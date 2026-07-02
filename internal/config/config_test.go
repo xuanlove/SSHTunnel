@@ -12,7 +12,7 @@ func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	// 使用临时目录避免污染真实配置
 	tmpDir := t.TempDir()
-	cfgDir := filepath.Join(tmpDir, "sshsuidao")
+	cfgDir := filepath.Join(tmpDir, "sshtunnel")
 	if err := os.MkdirAll(cfgDir, 0755); err != nil {
 		t.Fatalf("创建配置目录失败: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestManagerDelete(t *testing.T) {
 
 func TestManagerPersistence(t *testing.T) {
 	tmpDir := t.TempDir()
-	cfgDir := filepath.Join(tmpDir, "sshsuidao")
+	cfgDir := filepath.Join(tmpDir, "sshtunnel")
 	if err := os.MkdirAll(cfgDir, 0755); err != nil {
 		t.Fatalf("创建配置目录失败: %v", err)
 	}

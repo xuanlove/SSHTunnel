@@ -7,7 +7,7 @@ import (
 	"net"
 	"strconv"
 
-	"sshsuidao/internal/config"
+	"sshtunnel/internal/config"
 )
 
 // socks4Server SOCKS4/4a 代理服务器

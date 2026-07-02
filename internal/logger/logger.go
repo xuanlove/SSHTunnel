@@ -59,11 +59,11 @@ func New() (*Logger, error) {
 	if err != nil {
 		return nil, err
 	}
-	logDir := filepath.Join(dir, "sshsuidao", "logs")
+	logDir := filepath.Join(dir, "sshtunnel", "logs")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, err
 	}
-	logFile := filepath.Join(logDir, fmt.Sprintf("sshsuidao-%s.log", time.Now().Format("2006-01-02")))
+	logFile := filepath.Join(logDir, fmt.Sprintf("sshtunnel-%s.log", time.Now().Format("2006-01-02")))
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err

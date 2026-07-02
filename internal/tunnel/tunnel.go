@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"sshsuidao/internal/config"
-	"sshsuidao/internal/logger"
-	"sshsuidao/internal/port"
-	"sshsuidao/internal/proxy"
-	"sshsuidao/internal/sshclient"
+	"sshtunnel/internal/config"
+	"sshtunnel/internal/logger"
+	"sshtunnel/internal/port"
+	"sshtunnel/internal/proxy"
+	"sshtunnel/internal/sshclient"
 )
 
 // 重连参数（var 以便测试覆盖，避免真实等待）

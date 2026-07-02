@@ -1,14 +1,14 @@
 {
   "$schema": "https://wails.io/schema.json",
-  "name": "sshsuidao",
-  "outputfilename": "sshsuidao",
+  "name": "sshtunnel",
+  "outputfilename": "sshtunnel",
   "frontend:install": "npm install",
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
   "author": {
     "name": "SSH Tunnel Manager",
-    "email": "dev@sshsuidao.local"
+    "email": "dev@sshtunnel.local"
   },
   "info": {
     "companyName": "SSH Tunnel Manager",

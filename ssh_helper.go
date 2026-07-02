@@ -1,8 +1,8 @@
 package main
 
 import (
-	"sshsuidao/internal/config"
-	"sshsuidao/internal/sshclient"
+	"sshtunnel/internal/config"
+	"sshtunnel/internal/sshclient"
 )
 
 // simpleHop 用于测试连接的中间结构

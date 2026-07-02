@@ -19,9 +19,9 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
-	"sshsuidao/internal/logger"
-	"sshsuidao/internal/updater"
-	"sshsuidao/internal/web"
+	"sshtunnel/internal/logger"
+	"sshtunnel/internal/updater"
+	"sshtunnel/internal/web"
 )
 
 //go:embed all:frontend/dist
@@ -29,13 +29,15 @@ var assets embed.FS
 
 // 版本信息，构建时通过 -ldflags 注入：
 //
-//	go build -ldflags "-X main.version=v1.0.0 -X main.commit=$(git rev-parse --short HEAD) -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+//	go build -ldflags "-X main.version=v1.1.0 -X main.commit=$(git rev-parse --short HEAD) -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.buildVariant=desktop"
 //
-// 未注入时为默认值 dev/none/unknown。
+// buildVariant: "web"（默认，无 GUI）或 "desktop"（Wails 桌面版），决定版本检查时匹配的资产后缀。
+// 未注入时为默认值 dev/none/unknown/web。
 var (
-	version   = "dev"
-	commit    = "none"
-	buildTime = "unknown"
+	version      = "dev"
+	commit       = "none"
+	buildTime    = "unknown"
+	buildVariant = "web" // "web" 或 "desktop"
 )
 
 // 运行模式
@@ -160,7 +162,7 @@ func startWebServer(app *App, authEnabled bool, authUser, authPass string) {
 	// 创建 API Handler
 	handler := web.NewHandler(app.cfgMgr, app.tunnelMgr, app.logger,
 		generateJWTSecret(), authUser, authPass, hub).
-		WithVersion(version, commit, *flagRepo)
+		WithVersion(version, commit, buildVariant, *flagRepo)
 
 	// 创建并启动服务器
 	srv := web.NewServer(web.Config{
@@ -184,7 +186,7 @@ func startWebServer(app *App, authEnabled bool, authUser, authPass string) {
 // startDesktop 启动 Wails 桌面应用
 func startDesktop(app *App) {
 	err := wails.Run(&options.App{
-		Title:     "SSH Tunnel Manager",
+		Title:     "SSHTunnel",
 		Width:     1280,
 		Height:    820,
 		MinWidth:  960,
@@ -237,16 +239,17 @@ func (a *App) shutdown(ctx context.Context) {
 
 // printVersion 打印版本信息。
 func printVersion() {
-	fmt.Printf("sshsuidao %s\n", version)
+	fmt.Printf("SSHTunnel %s\n", version)
 	fmt.Printf("  commit:     %s\n", commit)
 	fmt.Printf("  build time: %s\n", buildTime)
+	fmt.Printf("  variant:    %s\n", buildVariant)
 	fmt.Printf("  repo:       %s\n", updater.DefaultRepo)
 }
 
 // runCheckUpdate 查询 GitHub 最新发布并与当前版本比较。
 // 退出码：0 表示已是最新或无更新；1 表示有新版本；2 表示检查失败（网络/API 错误）。
 func runCheckUpdate(repo string) int {
-	fmt.Printf("当前版本: %s\n", version)
+	fmt.Printf("当前版本: %s (%s)\n", version, buildVariant)
 	fmt.Printf("正在检查 %s 的最新发布...\n", repo)
 	latest, updateAvailable, rel, err := updater.CheckUpdate(version, repo)
 	if err != nil {
@@ -263,8 +266,8 @@ func runCheckUpdate(repo string) int {
 	}
 	fmt.Println("发现新版本！请前往发布页面下载，或运行安装脚本升级：")
 	if rel != nil {
-		// 提示当前平台对应的二进制资产
-		if u, err := rel.AssetForPlatform("", ""); err == nil {
+		// 提示当前平台与变体对应的二进制资产
+		if u, err := rel.AssetForPlatform("", "", buildVariant); err == nil {
 			fmt.Printf("  当前平台下载地址: %s\n", u)
 		}
 	}

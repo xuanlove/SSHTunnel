@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"sshsuidao/internal/config"
-	"sshsuidao/internal/logger"
-	"sshsuidao/internal/sshclient"
+	"sshtunnel/internal/config"
+	"sshtunnel/internal/logger"
+	"sshtunnel/internal/sshclient"
 )
 
 // ===== Mock SSH 客户端与拨号器 =====

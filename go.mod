@@ -1,4 +1,4 @@
-module sshsuidao
+module sshtunnel
 
 go 1.25.0
 

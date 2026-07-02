@@ -7,13 +7,13 @@ import (
 	"strconv"
 	"strings"
 
-	"sshsuidao/internal/config"
-	"sshsuidao/internal/logger"
-	"sshsuidao/internal/port"
-	"sshsuidao/internal/proxy"
-	"sshsuidao/internal/sshclient"
-	"sshsuidao/internal/tunnel"
-	"sshsuidao/internal/updater"
+	"sshtunnel/internal/config"
+	"sshtunnel/internal/logger"
+	"sshtunnel/internal/port"
+	"sshtunnel/internal/proxy"
+	"sshtunnel/internal/sshclient"
+	"sshtunnel/internal/tunnel"
+	"sshtunnel/internal/updater"
 )
 
 // Handler API 处理器，持有共享业务层引用
@@ -27,6 +27,7 @@ type Handler struct {
 	hub       *Hub
 	version   string // 当前版本号（构建时注入）
 	commit    string // git commit
+	variant   string // 构建变体：web 或 desktop
 	repo      string // GitHub 仓库，用于版本检查
 }
 
@@ -45,9 +46,10 @@ func NewHandler(cfgMgr *config.Manager, tunnelMgr *tunnel.Manager, log *logger.L
 }
 
 // WithVersion 注入版本信息（构建时由 main.go 调用）。
-func (h *Handler) WithVersion(version, commit, repo string) *Handler {
+func (h *Handler) WithVersion(version, commit, variant, repo string) *Handler {
 	h.version = version
 	h.commit = commit
+	h.variant = variant
 	h.repo = repo
 	return h
 }
@@ -88,6 +90,7 @@ func (h *Handler) handleVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 0, "success", map[string]string{
 		"version": h.version,
 		"commit":  h.commit,
+		"variant": h.variant,
 		"repo":    h.repo,
 	})
 }
@@ -105,13 +108,14 @@ func (h *Handler) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]interface{}{
-		"current":         h.version,
-		"latest":          latest,
+		"current":          h.version,
+		"latest":           latest,
+		"variant":          h.variant,
 		"update_available": updateAvailable,
 	}
 	if rel != nil {
 		resp["release_url"] = rel.HTMLURL
-		if u, err := rel.AssetForPlatform("", ""); err == nil {
+		if u, err := rel.AssetForPlatform("", "", h.variant); err == nil {
 			resp["download_url"] = u
 		}
 	}

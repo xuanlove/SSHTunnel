@@ -76,18 +76,33 @@ func TestIsNewer(t *testing.T) {
 // ===== 资产名/匹配测试 =====
 
 func TestAssetName(t *testing.T) {
-	cases := map[string]string{
-		"linux/amd64":   "sshsuidao-linux-amd64",
-		"linux/arm64":   "sshsuidao-linux-arm64",
-		"darwin/amd64":  "sshsuidao-darwin-amd64",
-		"darwin/arm64":  "sshsuidao-darwin-arm64",
-		"windows/amd64": "sshsuidao-windows-amd64.exe",
+	// web 变体（默认）
+	webCases := map[string]string{
+		"linux/amd64":   "sshtunnel-linux-amd64",
+		"linux/arm64":   "sshtunnel-linux-arm64",
+		"darwin/amd64":  "sshtunnel-darwin-amd64",
+		"darwin/arm64":  "sshtunnel-darwin-arm64",
+		"windows/amd64": "sshtunnel-windows-amd64.exe",
 	}
-	for platform, want := range cases {
+	for platform, want := range webCases {
 		parts := strings.SplitN(platform, "/", 2)
-		got := AssetName(parts[0], parts[1])
-		if got != want {
-			t.Errorf("AssetName(%s) = %q, want %q", platform, got, want)
+		if got := AssetName(parts[0], parts[1], "web"); got != want {
+			t.Errorf("AssetName(%s, web) = %q, want %q", platform, got, want)
+		}
+		// 空 variant 等价 web
+		if got := AssetName(parts[0], parts[1], ""); got != want {
+			t.Errorf("AssetName(%s, \"\") = %q, want %q", platform, got, want)
+		}
+	}
+	// desktop 变体（带 -desktop 后缀）
+	desktopCases := map[string]string{
+		"darwin/arm64":  "sshtunnel-darwin-arm64-desktop",
+		"windows/amd64": "sshtunnel-windows-amd64-desktop.exe",
+	}
+	for platform, want := range desktopCases {
+		parts := strings.SplitN(platform, "/", 2)
+		if got := AssetName(parts[0], parts[1], "desktop"); got != want {
+			t.Errorf("AssetName(%s, desktop) = %q, want %q", platform, got, want)
 		}
 	}
 }
@@ -96,18 +111,24 @@ func TestAssetForPlatform(t *testing.T) {
 	rel := &Release{
 		TagName: "v1.0.0",
 		Assets: []Asset{
-			{Name: "sshsuidao-linux-amd64", BrowserDownloadURL: "http://ex/linux"},
-			{Name: "sshsuidao-darwin-arm64", BrowserDownloadURL: "http://ex/darwin"},
-			{Name: "sshsuidao-windows-amd64.exe", BrowserDownloadURL: "http://ex/win"},
+			{Name: "sshtunnel-linux-amd64", BrowserDownloadURL: "http://ex/linux"},
+			{Name: "sshtunnel-darwin-arm64-desktop", BrowserDownloadURL: "http://ex/darwin-desktop"},
+			{Name: "sshtunnel-windows-amd64.exe", BrowserDownloadURL: "http://ex/win"},
+			{Name: "sshtunnel-windows-amd64-desktop.exe", BrowserDownloadURL: "http://ex/win-desktop"},
 		},
 	}
-	// 命中
-	url, err := rel.AssetForPlatform("linux", "amd64")
+	// web 变体命中
+	url, err := rel.AssetForPlatform("linux", "amd64", "web")
 	if err != nil || url != "http://ex/linux" {
-		t.Errorf("linux/amd64 匹配失败: url=%q err=%v", url, err)
+		t.Errorf("linux/amd64/web 匹配失败: url=%q err=%v", url, err)
+	}
+	// desktop 变体命中
+	url, err = rel.AssetForPlatform("windows", "amd64", "desktop")
+	if err != nil || url != "http://ex/win-desktop" {
+		t.Errorf("windows/amd64/desktop 匹配失败: url=%q err=%v", url, err)
 	}
 	// 未命中
-	_, err = rel.AssetForPlatform("linux", "arm64")
+	_, err = rel.AssetForPlatform("linux", "arm64", "web")
 	if err == nil {
 		t.Errorf("不存在的资产应返回错误")
 	}
@@ -124,8 +145,8 @@ func TestLatestRelease(t *testing.T) {
 		"body":      "修复若干问题",
 		"assets": []map[string]interface{}{
 			{
-				"name":                  "sshsuidao-linux-amd64",
-				"browser_download_url":  "https://github.com/xuanlove/SSHTunnel/releases/download/v1.2.3/sshsuidao-linux-amd64",
+				"name":                  "sshtunnel-linux-amd64",
+				"browser_download_url":  "https://github.com/xuanlove/SSHTunnel/releases/download/v1.2.3/sshtunnel-linux-amd64",
 				"size":                  int64(13000000),
 				"content_type":          "application/octet-stream",
 			},
@@ -171,7 +192,7 @@ func fetchFromURL(t *testing.T, url string) (*Release, error) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", "sshsuidao-updater-test")
+	req.Header.Set("User-Agent", "sshtunnel-updater-test")
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err

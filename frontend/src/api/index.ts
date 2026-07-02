@@ -10,7 +10,7 @@ import type {
 const isWeb = typeof window !== 'undefined' && !(window as any).go
 
 // ===== Token 管理（仅 WEB 模式使用）=====
-const TOKEN_KEY = 'sshsuidao_token'
+const TOKEN_KEY = 'sshtunnel_token'
 let authToken: string | null = isWeb ? localStorage.getItem(TOKEN_KEY) : null
 
 export function setToken(token: string | null) {

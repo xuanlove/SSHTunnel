@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"sshsuidao/internal/config"
+	"sshtunnel/internal/config"
 )
 
 // mockDialer 实现 Dialer 接口，将连接重定向到本地回环测试服务器

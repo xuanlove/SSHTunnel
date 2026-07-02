@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# sshsuidao Linux 安装脚本
+# sshtunnel Linux 安装脚本
 #
 # 功能：
 #   1. 自动检测系统架构（amd64 / arm64）
@@ -27,7 +27,7 @@ set -euo pipefail
 # ==================== 默认配置 ====================
 REPO="xuanlove/SSHTunnel"
 INSTALL_DIR="/usr/local/bin"
-BINARY_NAME="sshsuidao"
+BINARY_NAME="sshtunnel"
 INSTALL_SERVICE=false
 UPGRADE_MODE=false
 TARGET_VERSION=""
@@ -48,9 +48,9 @@ step()  { echo "${BLUE}==>${NC} ${BOLD}$*${NC}"; }
 # ==================== 帮助 ====================
 show_help() {
     cat <<EOF
-${BOLD}sshsuidao Linux 安装脚本${NC}
+${BOLD}sshtunnel Linux 安装脚本${NC}
 
-从 GitHub Release 下载并安装 sshsuidao 二进制。
+从 GitHub Release 下载并安装 sshtunnel 二进制。
 
 ${BOLD}用法:${NC}
   sudo bash install.sh [选项]
@@ -270,7 +270,7 @@ EOF
 
 # ==================== 主流程 ====================
 main() {
-    echo "${BOLD}================ sshsuidao 安装程序 ================${NC}"
+    echo "${BOLD}================ sshtunnel 安装程序 ================${NC}"
 
     step "检测系统架构"
     detect_platform

@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"sshsuidao/internal/config"
+	"sshtunnel/internal/config"
 )
 
 // authHelper 认证辅助，统一处理各协议认证

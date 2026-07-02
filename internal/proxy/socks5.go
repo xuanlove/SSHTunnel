@@ -7,7 +7,7 @@ import (
 	"net"
 	"strconv"
 
-	"sshsuidao/internal/config"
+	"sshtunnel/internal/config"
 )
 
 // socks5Server SOCKS5 代理服务器

@@ -1,5 +1,5 @@
 #!/bin/bash
-# SSH Tunnel Manager (sshsuidao) Linux systemd 服务安装脚本
+# SSH Tunnel Manager (sshtunnel) Linux systemd 服务安装脚本
 #
 # 功能：
 #   - 自动检测系统架构（amd64/arm64）
@@ -248,9 +248,9 @@ find_binary() {
 
     # 按优先级查找候选二进制
     local candidates=(
-        "${script_dir}/sshsuidao-linux-${arch}"
-        "${script_dir}/build/bin/sshsuidao-linux-${arch}"
-        "${script_dir}/bin/sshsuidao-linux-${arch}"
+        "${script_dir}/sshtunnel-linux-${arch}"
+        "${script_dir}/build/bin/sshtunnel-linux-${arch}"
+        "${script_dir}/bin/sshtunnel-linux-${arch}"
         "${script_dir}/${APP_NAME}"
     )
 
@@ -279,13 +279,13 @@ install_service() {
     if ! bin_src=$(find_binary "$arch"); then
         error "未找到 Linux ${arch} 二进制文件
 
-请先将 sshsuidao-linux-${arch} 放到以下任一位置：
+请先将 sshtunnel-linux-${arch} 放到以下任一位置：
   - 脚本同目录
   - ./build/bin/
   - ./bin/
 
 或先在源码目录执行交叉编译：
-  GOOS=linux GOARCH=${arch} CGO_ENABLED=0 go build -o sshsuidao-linux-${arch} ."
+  GOOS=linux GOARCH=${arch} CGO_ENABLED=0 go build -o sshtunnel-linux-${arch} ."
     fi
     info "使用二进制文件: ${bin_src}"
 
@@ -324,7 +324,7 @@ install_service() {
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=${APP_DESC} (WEB Panel)
-Documentation=https://github.com/sshsuidao/sshsuidao
+Documentation=https://github.com/sshtunnel/sshtunnel
 After=network-online.target
 Wants=network-online.target
 

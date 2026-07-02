@@ -48,7 +48,7 @@ function exportLogs() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `sshsuidao-logs-${Date.now()}.txt`
+  a.download = `sshtunnel-logs-${Date.now()}.txt`
   a.click()
   URL.revokeObjectURL(url)
 }

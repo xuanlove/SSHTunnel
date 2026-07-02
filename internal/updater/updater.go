@@ -52,7 +52,7 @@ func LatestRelease(repo string) (*Release, error) {
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	// 附带 User-Agent，GitHub API 对无 UA 的请求可能返回 403
-	req.Header.Set("User-Agent", "sshsuidao-updater")
+	req.Header.Set("User-Agent", "sshtunnel-updater")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -85,30 +85,42 @@ func CheckUpdate(current, repo string) (latest string, updateAvailable bool, rel
 }
 
 // AssetForPlatform 在发布资产中查找匹配 goos/goarch 的二进制下载地址。
-// 未指定时默认取当前运行时平台。
-func (r *Release) AssetForPlatform(goos, goarch string) (string, error) {
+// 未指定时默认取当前运行时平台；variant 为 "web"（默认）或 "desktop"。
+func (r *Release) AssetForPlatform(goos, goarch, variant string) (string, error) {
 	if goos == "" {
 		goos = runtime.GOOS
 	}
 	if goarch == "" {
 		goarch = runtime.GOARCH
 	}
-	want := AssetName(goos, goarch)
+	if variant == "" {
+		variant = "web"
+	}
+	want := AssetName(goos, goarch, variant)
 	for _, a := range r.Assets {
 		if a.Name == want {
 			return a.BrowserDownloadURL, nil
 		}
 	}
-	return "", fmt.Errorf("发布 %s 未包含 %s/%s 对应的二进制（期望资产名 %s）", r.TagName, goos, goarch, want)
+	return "", fmt.Errorf("发布 %s 未包含 %s/%s/%s 对应的二进制（期望资产名 %s）", r.TagName, goos, goarch, variant, want)
 }
 
-// AssetName 按 goos/goarch 返回标准二进制资产文件名。
-// 命名规则：sshsuidao-{os}-{arch}[.exe]（Windows 需 .exe 后缀）。
-func AssetName(goos, goarch string) string {
-	if goos == "windows" {
-		return fmt.Sprintf("sshsuidao-%s-%s.exe", goos, goarch)
+// AssetName 按 goos/goarch/variant 返回标准二进制资产文件名。
+// 命名规则：
+//   - web 变体：    sshtunnel-{os}-{arch}[.exe]
+//   - desktop 变体：sshtunnel-{os}-{arch}-desktop[.exe]（Windows 需 .exe 后缀）
+func AssetName(goos, goarch, variant string) string {
+	if variant == "" {
+		variant = "web"
 	}
-	return fmt.Sprintf("sshsuidao-%s-%s", goos, goarch)
+	suffix := ""
+	if variant == "desktop" {
+		suffix = "-desktop"
+	}
+	if goos == "windows" {
+		return fmt.Sprintf("sshtunnel-%s-%s%s.exe", goos, goarch, suffix)
+	}
+	return fmt.Sprintf("sshtunnel-%s-%s%s", goos, goarch, suffix)
 }
 
 // CompareVersions 比较两个语义化版本号（支持可选的 v 前缀与 pre-release 后缀）。

@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"sshsuidao/internal/config"
-	"sshsuidao/internal/logger"
-	"sshsuidao/internal/port"
-	"sshsuidao/internal/proxy"
-	"sshsuidao/internal/tunnel"
+	"sshtunnel/internal/config"
+	"sshtunnel/internal/logger"
+	"sshtunnel/internal/port"
+	"sshtunnel/internal/proxy"
+	"sshtunnel/internal/tunnel"
 )
 
 // App Wails 应用绑定层

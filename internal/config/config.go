@@ -108,7 +108,7 @@ func NewManager() (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfgDir := filepath.Join(dir, "sshsuidao")
+	cfgDir := filepath.Join(dir, "sshtunnel")
 	if err := os.MkdirAll(cfgDir, 0755); err != nil {
 		return nil, err
 	}

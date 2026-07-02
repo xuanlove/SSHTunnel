@@ -1,4 +1,4 @@
-# SSH Tunnel Manager (sshsuidao)
+# SSHTunnel
 
 一款跨平台的 SSH 隧道管理工具，基于 Wails v2 + Go + Vue 3 构建。支持多跳跳板链、多协议代理（HTTP/HTTPS/SOCKS4/SOCKS5）、本地端口转发、自动重连、实时日志推送，并提供桌面端与 WEB 面板双形态管理界面。
 
@@ -40,7 +40,7 @@
 ## 安装与构建
 
 ### 依赖
-- Go 1.21+
+- Go 1.25+
 - Node.js 18+ 与 npm（构建前端）
 - 桌面模式额外依赖：
   - Windows：无
@@ -55,49 +55,78 @@ go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
 # 克隆项目
 git clone <repo-url>
-cd sshsuidao
+cd sshtunnel
 
 # 构建前端
 cd frontend && npm install && npm run build && cd ..
 
 # 构建当前平台桌面端（CGO 启用）
-go build -o build/bin/sshsuidao .
+go build -o build/bin/sshtunnel .
 
 # 仅构建 WEB 模式二进制（CGO 禁用，可交叉编译）
-CGO_ENABLED=0 go build -o build/bin/sshsuidao-web .
+CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 ```
 
 ### 交叉编译全平台
 
-WEB 模式二进制可纯 Go 交叉编译，无平台依赖：
+WEB 模式二进制可纯 Go 交叉编译，无平台依赖。版本号通过 `-ldflags` 注入：
 
 ```bash
+VERSION=v1.1.0
+COMMIT=$(git rev-parse --short HEAD)
+LDFLAGS="-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.buildVariant=web"
+
 # Linux amd64
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-linux-amd64 .
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o build/bin/sshtunnel-linux-amd64 .
 
 # Linux arm64
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-linux-arm64 .
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o build/bin/sshtunnel-linux-arm64 .
 
 # macOS amd64 (Intel)
-GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-darwin-amd64 .
+GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o build/bin/sshtunnel-darwin-amd64 .
 
 # macOS arm64 (Apple Silicon)
-GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-darwin-arm64 .
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o build/bin/sshtunnel-darwin-arm64 .
 
-# Windows arm64
-GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-windows-arm64.exe .
+# Windows amd64
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o build/bin/sshtunnel-windows-amd64.exe .
 ```
 
-> 桌面模式（含 WebView）需在目标平台启用 CGO 重新编译，详见 Wails 官方文档。
+### 桌面版变体（含 WebView）
+
+桌面版通过 `buildVariant=desktop` 区分，资产名带 `-desktop` 后缀。需启用 CGO：
+
+```bash
+LDFLAGS_DESKTOP="-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.buildVariant=desktop"
+
+# Windows amd64 桌面版（Linux 宿主用 mingw-w64 交叉编译）
+CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+  go build -ldflags "${LDFLAGS_DESKTOP}" -o build/bin/sshtunnel-windows-amd64-desktop.exe .
+
+# macOS 桌面版需在 macOS 上或借助 osxcross 交叉编译
+CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+  go build -ldflags "${LDFLAGS_DESKTOP}" -o build/bin/sshtunnel-darwin-arm64-desktop .
+```
+
+> Linux 桌面版需在 Linux 宿主上启用 CGO 编译；macOS 桌面版交叉编译需 osxcross 工具链。详见 Wails 官方文档。
+
+### 资产命名规则
+
+| 变体 | 命名规则 | 示例 |
+|------|----------|------|
+| web（默认） | `sshtunnel-{os}-{arch}[.exe]` | `sshtunnel-linux-amd64` |
+| desktop | `sshtunnel-{os}-{arch}-desktop[.exe]` | `sshtunnel-windows-amd64-desktop.exe` |
+
+`--check-update` 与安装脚本会按当前变体匹配对应资产。
 
 ## 使用方式
 
 ### 桌面模式
 
 ```bash
-./sshsuidao
+./sshtunnel
 # 或显式指定
-./sshsuidao --mode=desktop
+./sshtunnel --mode=desktop
 ```
 
 启动后弹出原生窗口，左侧导航包含：仪表盘、配置编辑、日志、设置。
@@ -105,9 +134,9 @@ GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-windows-
 ### WEB 模式（无密码）
 
 ```bash
-./sshsuidao --mode=web --web-port=8090
+./sshtunnel --mode=web --web-port=8090
 # 监听所有网卡
-./sshsuidao --mode=web --web-host=0.0.0.0 --web-port=8090
+./sshtunnel --mode=web --web-host=0.0.0.0 --web-port=8090
 ```
 
 浏览器访问 `http://127.0.0.1:8090` 即可进入管理面板。
@@ -115,7 +144,7 @@ GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-windows-
 ### WEB 模式（密码保护）
 
 ```bash
-./sshsuidao --mode=web --web-port=8090 --auth=admin:yourpassword
+./sshtunnel --mode=web --web-port=8090 --auth=admin:yourpassword
 ```
 
 首次访问将跳转至登录页，输入凭据后获取 JWT Token（24 小时有效）。
@@ -123,7 +152,7 @@ GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-windows-
 ### 启用 HTTPS（WEB 面板）
 
 ```bash
-./sshsuidao --mode=web --web-port=8443 \
+./sshtunnel --mode=web --web-port=8443 \
   --tls-cert=/path/to/cert.pem \
   --tls-key=/path/to/key.pem \
   --auth=admin:password
@@ -132,7 +161,7 @@ GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-windows-
 ### 混合模式
 
 ```bash
-./sshsuidao --mode=both --web-port=8090 --auth=admin:password
+./sshtunnel --mode=both --web-port=8090 --auth=admin:password
 ```
 
 同时启动桌面端窗口与 WEB 面板，两端的日志与状态变更实时同步。
@@ -147,15 +176,30 @@ GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -o build/bin/sshsuidao-windows-
 | `--auth` | 空 | 启用密码访问，格式 `user:password`，留空则无密码 |
 | `--tls-cert` | 空 | TLS 证书路径（启用 HTTPS） |
 | `--tls-key` | 空 | TLS 私钥路径（启用 HTTPS） |
+| `--version` | - | 打印版本信息并退出 |
+| `--check-update` | - | 检查 GitHub Release 是否有新版本并退出 |
+| `--repo` | `xuanlove/SSHTunnel` | GitHub 仓库（owner/repo），用于版本检查 |
+
+### 版本检查
+
+```bash
+# 打印当前版本
+./sshtunnel --version
+
+# 检查是否有新版本
+./sshtunnel --check-update
+```
+
+退出码：`0` 表示已是最新；`1` 表示有新版本；`2` 表示检查失败。
 
 ## 配置说明
 
 ### 隧道配置
 
 配置文件存储位置：
-- Windows：`%APPDATA%\sshsuidao\configs.json`
-- Linux：`~/.config/sshsuidao/configs.json`
-- macOS：`~/Library/Application Support/sshsuidao/configs.json`
+- Windows：`%APPDATA%\sshtunnel\configs.json`
+- Linux：`~/.config/sshtunnel/configs.json`
+- macOS：`~/Library/Application Support/sshtunnel/configs.json`
 
 ### 跳板链简写格式
 
@@ -233,7 +277,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 ## 项目结构
 
 ```
-sshsuidao/
+sshtunnel/
 ├── main.go                  # 入口与运行模式切换
 ├── app.go                   # Wails 桌面端绑定层
 ├── ssh_helper.go            # SSH 辅助函数
@@ -268,7 +312,7 @@ sshsuidao/
 
 | 层级 | 技术 |
 |------|------|
-| 后端 | Go 1.21+、`golang.org/x/crypto/ssh` |
+| 后端 | Go 1.25+、`golang.org/x/crypto/ssh` |
 | 桌面框架 | Wails v2 |
 | 前端 | Vue 3、Element Plus、Pinia、Vue Router |
 | 实时通信 | `github.com/coder/websocket` |

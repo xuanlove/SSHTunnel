@@ -6,8 +6,8 @@ import (
 	"net"
 	"sync"
 
-	"sshsuidao/internal/config"
-	"sshsuidao/internal/port"
+	"sshtunnel/internal/config"
+	"sshtunnel/internal/port"
 )
 
 // Dialer 出站 Dialer 抽象，由 SSH 隧道提供

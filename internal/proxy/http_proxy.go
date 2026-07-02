@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"sshsuidao/internal/config"
+	"sshtunnel/internal/config"
 )
 
 // httpServer HTTP/HTTPS 代理服务器
@@ -173,7 +173,7 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request) {
 
 	// 移除逐跳头部，添加 Via 头
 	req.Header.Del("Proxy-Authorization")
-	req.Header.Set("Via", "1.1 sshsuidao")
+	req.Header.Set("Via", "1.1 sshtunnel")
 
 	// 转发请求
 	if err := req.Write(targetConn); err != nil {
@@ -188,7 +188,7 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	resp.Header.Set("Via", "1.1 sshsuidao")
+	resp.Header.Set("Via", "1.1 sshtunnel")
 	if err := resp.Write(conn); err != nil {
 		return
 	}

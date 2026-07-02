@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"sshsuidao/internal/config"
-	"sshsuidao/internal/logger"
+	"sshtunnel/internal/config"
+	"sshtunnel/internal/logger"
 )
 
 // Manager 多端口多协议代理管理器，绑定到单条 SSH 隧道

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"sshsuidao/internal/logger"
+	"sshtunnel/internal/logger"
 )
 
 // 测试鉴权状态接口（无密码模式）

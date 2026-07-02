@@ -20,7 +20,7 @@ func certDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	certDir := filepath.Join(dir, "sshsuidao", "certs")
+	certDir := filepath.Join(dir, "sshtunnel", "certs")
 	if err := os.MkdirAll(certDir, 0755); err != nil {
 		return "", err
 	}
@@ -34,8 +34,8 @@ func GenerateSelfSignedCert() (certPath, keyPath string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	certPath = filepath.Join(dir, "sshsuidao-proxy.crt")
-	keyPath = filepath.Join(dir, "sshsuidao-proxy.key")
+	certPath = filepath.Join(dir, "sshtunnel-proxy.crt")
+	keyPath = filepath.Join(dir, "sshtunnel-proxy.key")
 	return certPath, keyPath, generateCert(certPath, keyPath)
 }
 
@@ -55,7 +55,7 @@ func generateCert(certPath, keyPath string) error {
 		SerialNumber: serial,
 		Subject: pkix.Name{
 			Organization: []string{"SSH Tunnel Manager"},
-			CommonName:   "sshsuidao-proxy",
+			CommonName:   "sshtunnel-proxy",
 		},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
