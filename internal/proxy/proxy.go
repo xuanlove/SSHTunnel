@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"sshsuidao/internal/config"
+	"sshsuidao/internal/port"
 )
 
 // Dialer 出站 Dialer 抽象，由 SSH 隧道提供
@@ -89,7 +90,7 @@ func BuildServer(lc config.ProxyListener, dialer Dialer, log LogFunc) (Server, e
 	if log == nil {
 		log = noopLog
 	}
-	addr := bindAddr(lc.ListenPort, lc.AllowExternal)
+	addr := port.BindAddress(lc.ListenPort, lc.AllowExternal)
 	base := BaseServer{
 		id:         lc.ID,
 		protocol:   lc.Protocol,
@@ -113,13 +114,6 @@ func BuildServer(lc config.ProxyListener, dialer Dialer, log LogFunc) (Server, e
 	default:
 		return nil, fmt.Errorf("不支持的协议: %s", lc.Protocol)
 	}
-}
-
-func bindAddr(port int, allowExternal bool) string {
-	if allowExternal {
-		return fmt.Sprintf("0.0.0.0:%d", port)
-	}
-	return fmt.Sprintf("127.0.0.1:%d", port)
 }
 
 // checkPortConflict 检查端口冲突

@@ -68,6 +68,11 @@ func (h *Hub) removeClient(c *websocket.Conn) {
 }
 
 // handleLogStream WebSocket 日志流 /api/logs/stream
+//
+// 清理策略：使用单一 cleanup 闭包（sync.Once 保护）统一回收资源，
+// 避免读循环、心跳 goroutine 与广播路径并发 removeClient 造成的不一致。
+// 任意退出路径（读错误、Ping 失败、请求上下文取消）均触发同一清理逻辑：
+// 取消派生 context（使心跳 goroutine 立即退出）并从 hub 移除连接。
 func (h *Handler) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: []string{"*"},
@@ -77,30 +82,38 @@ func (h *Handler) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 	h.hub.addClient(c)
 
-	// 心跳与清理
-	ctx := r.Context()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	var once sync.Once
+	cleanup := func() {
+		once.Do(func() {
+			cancel()              // 通知心跳 goroutine 退出
+			h.hub.removeClient(c) // 幂等：已移除则跳过
+		})
+	}
+	defer cleanup()
+
+	// 心跳：周期性 Ping，失败或 context 取消即退出
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
-				h.hub.removeClient(c)
 				return
 			case <-ticker.C:
 				if err := c.Ping(ctx); err != nil {
-					h.hub.removeClient(c)
+					cleanup()
 					return
 				}
 			}
 		}
 	}()
 
-	// 阻塞读取（忽略客户端消息）
+	// 阻塞读取（忽略客户端消息）；读取错误触发 defer cleanup
 	for {
-		_, _, err := c.Read(ctx)
-		if err != nil {
-			h.hub.removeClient(c)
+		if _, _, err := c.Read(ctx); err != nil {
 			return
 		}
 	}

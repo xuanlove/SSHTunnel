@@ -15,18 +15,41 @@ import (
 	"sshsuidao/internal/sshclient"
 )
 
-// 重连参数
-const (
+// 重连参数（var 以便测试覆盖，避免真实等待）
+var (
 	reconnectInitialDelay = 2 * time.Second
 	reconnectMaxDelay     = 60 * time.Second
 	reconnectMaxAttempts  = 0 // 0 表示无限重连
 )
 
+// tunnelClient 抽象 SSH 客户端，使隧道逻辑可在不建立真实 SSH 连接的前提下测试。
+// *sshclient.Client 满足该接口。
+type tunnelClient interface {
+	Dial(network, address string) (net.Conn, error)
+	Wait() error
+	Close() error
+}
+
+// sshDialer 抽象 SSH 连接的建立，测试可注入返回 mock 客户端的实现。
+type sshDialer interface {
+	Dial(hops []sshclient.Hop) (tunnelClient, error)
+}
+
+// defaultDialer 委托给真实的 sshclient.Dial。
+type defaultDialer struct{}
+
+func (defaultDialer) Dial(hops []sshclient.Hop) (tunnelClient, error) {
+	return sshclient.Dial(hops)
+}
+
+// dialer 是包级 SSH 拨号器，测试可通过 setDialer 替换。
+var dialer sshDialer = defaultDialer{}
+
 // Tunnel 单条隧道的运行实例
 type Tunnel struct {
 	mu           sync.Mutex
 	cfg          *config.TunnelConfig
-	client       *sshclient.Client
+	client       tunnelClient
 	proxyMgr     *proxy.Manager
 	fwdListeners []net.Listener
 	ctx          context.Context
@@ -162,12 +185,14 @@ func (t *Tunnel) connectAndServe() error {
 			Passphrase: h.Passphrase,
 		}
 	}
-	client, err := sshclient.Dial(hops)
+	client, err := dialer.Dial(hops)
 	if err != nil {
 		t.log.TunnelError(t.cfg.ID, "SSH 连接失败: "+err.Error())
 		return err
 	}
+	t.mu.Lock()
 	t.client = client
+	t.mu.Unlock()
 
 	// 启动本地端口转发
 	for _, lf := range t.cfg.LocalForwards {
@@ -178,20 +203,31 @@ func (t *Tunnel) connectAndServe() error {
 
 	// 启动代理监听
 	if len(t.cfg.ProxyListeners) > 0 {
-		t.proxyMgr = proxy.NewManager(client, t.log, t.cfg.ID)
-		if err := t.proxyMgr.StartAll(t.ctx, t.cfg.ProxyListeners); err != nil {
+		pm := proxy.NewManager(client, t.log, t.cfg.ID)
+		t.mu.Lock()
+		t.proxyMgr = pm
+		t.mu.Unlock()
+		if err := pm.StartAll(t.ctx, t.cfg.ProxyListeners); err != nil {
 			t.log.TunnelError(t.cfg.ID, "代理监听启动失败: "+err.Error())
 		}
 	}
 	return nil
 }
 
+// clientSafe 在锁保护下获取当前客户端快照（阻塞操作须在锁外调用）。
+func (t *Tunnel) clientSafe() tunnelClient {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.client
+}
+
 // watchOnly 仅监听断开（不重连）
 func (t *Tunnel) watchOnly() {
-	if t.client == nil {
+	c := t.clientSafe()
+	if c == nil {
 		return
 	}
-	err := t.client.Wait()
+	err := c.Wait()
 	if err != nil && !t.isStopped() {
 		t.log.TunnelWarn(t.cfg.ID, "SSH 连接断开: "+err.Error())
 	}
@@ -206,10 +242,11 @@ func (t *Tunnel) watchAndReconnect() {
 		default:
 		}
 
-		if t.client == nil {
+		c := t.clientSafe()
+		if c == nil {
 			return
 		}
-		err := t.client.Wait()
+		err := c.Wait()
 		if t.isStopped() {
 			return
 		}
@@ -249,21 +286,26 @@ func (t *Tunnel) watchAndReconnect() {
 	}
 }
 
-// cleanupResources 清理旧连接资源（不取消 context）
+// cleanupResources 清理旧连接资源（不取消 context）。
+// 先在锁内快照并清空字段，再在锁外执行阻塞的 Close/StopAll，避免数据竞争。
 func (t *Tunnel) cleanupResources() {
 	t.mu.Lock()
-	for _, ln := range t.fwdListeners {
+	listeners := t.fwdListeners
+	t.fwdListeners = nil
+	pm := t.proxyMgr
+	t.proxyMgr = nil
+	c := t.client
+	t.client = nil
+	t.mu.Unlock()
+
+	for _, ln := range listeners {
 		ln.Close()
 	}
-	t.fwdListeners = nil
-	t.mu.Unlock()
-	if t.proxyMgr != nil {
-		t.proxyMgr.StopAll()
-		t.proxyMgr = nil
+	if pm != nil {
+		pm.StopAll()
 	}
-	if t.client != nil {
-		t.client.Close()
-		t.client = nil
+	if c != nil {
+		c.Close()
 	}
 }
 
@@ -309,17 +351,18 @@ func (t *Tunnel) startLocalForward(lf config.LocalForward) error {
 
 func (t *Tunnel) handleForward(conn net.Conn, target string) {
 	defer conn.Close()
-	if t.client == nil {
+	c := t.clientSafe()
+	if c == nil {
 		conn.Close()
 		return
 	}
-	targetConn, err := t.client.Dial("tcp", target)
+	targetConn, err := c.Dial("tcp", target)
 	if err != nil {
 		t.log.TunnelWarn(t.cfg.ID, "转发连接目标失败 "+target+": "+err.Error())
 		return
 	}
 	defer targetConn.Close()
-	sshclient.Bridge(conn, targetConn)
+	proxy.Bridge(conn, targetConn)
 }
 
 // stop 停止隧道

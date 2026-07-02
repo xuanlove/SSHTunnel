@@ -2,13 +2,12 @@ package web
 
 import (
 	"context"
-	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"io/fs"
 	"log"
 	"net/http"
-	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -47,7 +46,7 @@ func NewServer(cfg Config, handler *Handler) *Server {
 func (s *Server) Start() error {
 	mux := s.buildRoutes()
 
-	addr := s.cfg.Host + ":" + itoa(s.cfg.Port)
+	addr := s.cfg.Host + ":" + strconv.Itoa(s.cfg.Port)
 	s.srv = &http.Server{
 		Addr:    addr,
 		Handler: mux,
@@ -166,30 +165,3 @@ func writeError(w http.ResponseWriter, code int, message string) {
 	}
 	json.NewEncoder(w).Encode(resp)
 }
-
-// itoa 简易整数转字符串（避免引入 strconv）
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	pos := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
-}
-
-// 确保使用 os 包（用于未来扩展）
-var _ = os.Getenv
-var _ = tls.Config{}

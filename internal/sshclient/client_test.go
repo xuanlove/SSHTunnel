@@ -100,28 +100,3 @@ func TestParseHopChain(t *testing.T) {
 		})
 	}
 }
-
-func TestFmtAtoi(t *testing.T) {
-	tests := []struct {
-		input string
-		want  int
-		err   bool
-	}{
-		{"22", 22, false},
-		{"2222", 2222, false},
-		{"0", 0, false},
-		{"abc", 0, true},
-		{"", 0, true},
-		{"12a", 0, true},
-		{"-1", 0, true},
-	}
-	for _, tt := range tests {
-		got, err := fmtAtoi(tt.input)
-		if (err != nil) != tt.err {
-			t.Errorf("fmtAtoi(%q) err=%v, want err=%v", tt.input, err, tt.err)
-		}
-		if !tt.err && got != tt.want {
-			t.Errorf("fmtAtoi(%q) = %d, want %d", tt.input, got, tt.want)
-		}
-	}
-}

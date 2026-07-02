@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"sshsuidao/internal/config"
 	"sshsuidao/internal/logger"
@@ -343,29 +344,13 @@ func (h *Handler) handleTunnelTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 0, "success", nil)
 }
 
-// splitPath 拆分 URL 路径
+// splitPath 拆分 URL 路径（忽略空段）
 func splitPath(path string) []string {
 	var parts []string
-	for _, p := range splitSlash(path) {
+	for _, p := range strings.Split(path, "/") {
 		if p != "" {
 			parts = append(parts, p)
 		}
 	}
 	return parts
-}
-
-// splitSlash 按斜杠拆分
-func splitSlash(s string) []string {
-	var result []string
-	current := ""
-	for _, c := range s {
-		if c == '/' {
-			result = append(result, current)
-			current = ""
-		} else {
-			current += string(c)
-		}
-	}
-	result = append(result, current)
-	return result
 }

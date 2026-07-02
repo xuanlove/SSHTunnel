@@ -2,8 +2,8 @@ package sshclient
 
 import (
 	"fmt"
-	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,7 +38,7 @@ func ParseHopChain(s string) []Hop {
 			part = part[at+1:]
 		}
 		if colon := strings.LastIndex(part, ":"); colon >= 0 {
-			if p, err := fmtAtoi(part[colon+1:]); err == nil {
+			if p, err := strconv.Atoi(part[colon+1:]); err == nil {
 				h.Port = p
 				part = part[:colon]
 			}
@@ -47,20 +47,6 @@ func ParseHopChain(s string) []Hop {
 		hops = append(hops, h)
 	}
 	return hops
-}
-
-func fmtAtoi(s string) (int, error) {
-	if s == "" {
-		return 0, fmt.Errorf("empty string")
-	}
-	var n int
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("not a number")
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n, nil
 }
 
 // Client SSH 客户端，支持多跳串联
@@ -166,18 +152,4 @@ func (c *Client) Close() error {
 		return nil
 	}
 	return c.client.Close()
-}
-
-// Bridge 双向桥接两个连接
-func Bridge(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(a, b)
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(b, a)
-		done <- struct{}{}
-	}()
-	<-done
 }

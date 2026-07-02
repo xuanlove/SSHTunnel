@@ -158,20 +158,3 @@ func TestLogin(t *testing.T) {
 		t.Error("错误凭据不应返回 code=0")
 	}
 }
-
-// 测试 itoa
-func TestItoa(t *testing.T) {
-	cases := []struct {
-		input    int
-		expected string
-	}{
-		{0, "0"},
-		{8080, "8080"},
-		{443, "443"},
-	}
-	for _, c := range cases {
-		if got := itoa(c.input); got != c.expected {
-			t.Errorf("itoa(%d) = %s, 期望 %s", c.input, got, c.expected)
-		}
-	}
-}
