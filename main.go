@@ -20,11 +20,23 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"sshsuidao/internal/logger"
+	"sshsuidao/internal/updater"
 	"sshsuidao/internal/web"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
+
+// 版本信息，构建时通过 -ldflags 注入：
+//
+//	go build -ldflags "-X main.version=v1.0.0 -X main.commit=$(git rev-parse --short HEAD) -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+//
+// 未注入时为默认值 dev/none/unknown。
+var (
+	version   = "dev"
+	commit    = "none"
+	buildTime = "unknown"
+)
 
 // 运行模式
 type RunMode string
@@ -37,16 +49,31 @@ const (
 
 // CLI 参数
 var (
-	flagMode     = flag.String("mode", "desktop", "运行模式: desktop | web | both")
-	flagWebHost  = flag.String("web-host", "127.0.0.1", "WEB 监听地址")
-	flagWebPort  = flag.Int("web-port", 8080, "WEB 监听端口")
-	flagAuth     = flag.String("auth", "", "启用密码访问，格式 user:password，留空则无密码")
-	flagTLSCert  = flag.String("tls-cert", "", "TLS 证书路径")
-	flagTLSKey   = flag.String("tls-key", "", "TLS 私钥路径")
+	flagMode        = flag.String("mode", "desktop", "运行模式: desktop | web | both")
+	flagWebHost     = flag.String("web-host", "127.0.0.1", "WEB 监听地址")
+	flagWebPort     = flag.Int("web-port", 8080, "WEB 监听端口")
+	flagAuth        = flag.String("auth", "", "启用密码访问，格式 user:password，留空则无密码")
+	flagTLSCert     = flag.String("tls-cert", "", "TLS 证书路径")
+	flagTLSKey      = flag.String("tls-key", "", "TLS 私钥路径")
+	flagVersion     = flag.Bool("version", false, "打印版本信息并退出")
+	flagCheckUpdate = flag.Bool("check-update", false, "检查 GitHub Release 是否有新版本并退出")
+	flagRepo        = flag.String("repo", updater.DefaultRepo, "GitHub 仓库（owner/repo），用于版本检查与安装脚本")
 )
 
 func main() {
 	flag.Parse()
+
+	// --version：仅打印版本信息后退出
+	if *flagVersion {
+		printVersion()
+		return
+	}
+
+	// --check-update：查询最新发布并比较版本后退出
+	if *flagCheckUpdate {
+		os.Exit(runCheckUpdate(*flagRepo))
+		return
+	}
 
 	mode := RunMode(*flagMode)
 	switch mode {
@@ -132,7 +159,8 @@ func startWebServer(app *App, authEnabled bool, authUser, authPass string) {
 
 	// 创建 API Handler
 	handler := web.NewHandler(app.cfgMgr, app.tunnelMgr, app.logger,
-		generateJWTSecret(), authUser, authPass, hub)
+		generateJWTSecret(), authUser, authPass, hub).
+		WithVersion(version, commit, *flagRepo)
 
 	// 创建并启动服务器
 	srv := web.NewServer(web.Config{
@@ -206,3 +234,40 @@ func (a *App) shutdown(ctx context.Context) {
 		a.tunnelMgr.StopAll()
 	}
 }
+
+// printVersion 打印版本信息。
+func printVersion() {
+	fmt.Printf("sshsuidao %s\n", version)
+	fmt.Printf("  commit:     %s\n", commit)
+	fmt.Printf("  build time: %s\n", buildTime)
+	fmt.Printf("  repo:       %s\n", updater.DefaultRepo)
+}
+
+// runCheckUpdate 查询 GitHub 最新发布并与当前版本比较。
+// 退出码：0 表示已是最新或无更新；1 表示有新版本；2 表示检查失败（网络/API 错误）。
+func runCheckUpdate(repo string) int {
+	fmt.Printf("当前版本: %s\n", version)
+	fmt.Printf("正在检查 %s 的最新发布...\n", repo)
+	latest, updateAvailable, rel, err := updater.CheckUpdate(version, repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "检查更新失败: %v\n", err)
+		return 2
+	}
+	fmt.Printf("最新版本: %s\n", latest)
+	if rel != nil && rel.HTMLURL != "" {
+		fmt.Printf("发布页面: %s\n", rel.HTMLURL)
+	}
+	if !updateAvailable {
+		fmt.Println("已是最新版本。")
+		return 0
+	}
+	fmt.Println("发现新版本！请前往发布页面下载，或运行安装脚本升级：")
+	if rel != nil {
+		// 提示当前平台对应的二进制资产
+		if u, err := rel.AssetForPlatform("", ""); err == nil {
+			fmt.Printf("  当前平台下载地址: %s\n", u)
+		}
+	}
+	return 1
+}
+

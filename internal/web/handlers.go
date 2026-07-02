@@ -13,6 +13,7 @@ import (
 	"sshsuidao/internal/proxy"
 	"sshsuidao/internal/sshclient"
 	"sshsuidao/internal/tunnel"
+	"sshsuidao/internal/updater"
 )
 
 // Handler API 处理器，持有共享业务层引用
@@ -24,6 +25,9 @@ type Handler struct {
 	authUser  string
 	authPass  string // 明文密码（启动时传入）
 	hub       *Hub
+	version   string // 当前版本号（构建时注入）
+	commit    string // git commit
+	repo      string // GitHub 仓库，用于版本检查
 }
 
 // NewHandler 创建 API 处理器
@@ -38,6 +42,14 @@ func NewHandler(cfgMgr *config.Manager, tunnelMgr *tunnel.Manager, log *logger.L
 		authPass:  authPass,
 		hub:       hub,
 	}
+}
+
+// WithVersion 注入版本信息（构建时由 main.go 调用）。
+func (h *Handler) WithVersion(version, commit, repo string) *Handler {
+	h.version = version
+	h.commit = commit
+	h.repo = repo
+	return h
 }
 
 // JWTSecret 返回 JWT 密钥（供 main.go 传递给 Server）
@@ -61,8 +73,49 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/cert/generate", h.handleCertGenerate)
 	mux.HandleFunc("/hopchain/parse", h.handleHopChainParse)
 	mux.HandleFunc("/tunnel/test", h.handleTunnelTest)
+	mux.HandleFunc("/version", h.handleVersion)
+	mux.HandleFunc("/version/check", h.handleVersionCheck)
 
 	return mux
+}
+
+// handleVersion 返回当前二进制的版本信息。
+func (h *Handler) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	writeJSON(w, 0, "success", map[string]string{
+		"version": h.version,
+		"commit":  h.commit,
+		"repo":    h.repo,
+	})
+}
+
+// handleVersionCheck 查询 GitHub Release 最新版本并与当前比较。
+func (h *Handler) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	latest, updateAvailable, rel, err := updater.CheckUpdate(h.version, h.repo)
+	if err != nil {
+		h.log.Warnf("版本检查失败: %v", err)
+		writeError(w, 50002, "版本检查失败: "+err.Error())
+		return
+	}
+	resp := map[string]interface{}{
+		"current":         h.version,
+		"latest":          latest,
+		"update_available": updateAvailable,
+	}
+	if rel != nil {
+		resp["release_url"] = rel.HTMLURL
+		if u, err := rel.AssetForPlatform("", ""); err == nil {
+			resp["download_url"] = u
+		}
+	}
+	writeJSON(w, 0, "success", resp)
 }
 
 // handleLogin 登录接口
