@@ -1,0 +1,50 @@
+[
+  {
+    "id": "99382207-3788-4c89-8789-679f6e9d9a07",
+    "name": "bad-tunnel",
+    "hop_chain": [
+      {
+        "user": "u",
+        "host": "127.0.0.1",
+        "port": 1,
+        "auth_type": "password",
+        "password": "p"
+      }
+    ],
+    "tunnel_type": "proxy",
+    "proxy_listeners": [
+      {
+        "id": "l1",
+        "protocol": "http",
+        "listen_port": 1080,
+        "allow_external": false
+      }
+    ],
+    "auto_reconnect": false,
+    "status": "stopped"
+  },
+  {
+    "id": "49285807-176d-45d9-93b3-aa2beba68b07",
+    "name": "ws-auth-test",
+    "hop_chain": [
+      {
+        "user": "u",
+        "host": "h",
+        "port": 22,
+        "auth_type": "password",
+        "password": "p"
+      }
+    ],
+    "tunnel_type": "proxy",
+    "proxy_listeners": [
+      {
+        "id": "l1",
+        "protocol": "http",
+        "listen_port": 2080,
+        "allow_external": false
+      }
+    ],
+    "auto_reconnect": false,
+    "status": "stopped"
+  }
+]

@@ -1,0 +1,27 @@
+2026-07-02 15:44:08 [INFO] SSH Tunnel Manager 启动完成
+2026-07-02 15:46:59 [INFO] 配置已创建: ???? (ID: 1ebb8341-e134-4efa-bfb8-c61487c63b1c)
+2026-07-02 15:46:59 [INFO] 配置已更新: ????-??? (ID: 1ebb8341-e134-4efa-bfb8-c61487c63b1c)
+2026-07-02 15:46:59 [INFO] 配置已删除: ID: 1ebb8341-e134-4efa-bfb8-c61487c63b1c
+2026-07-02 15:48:37 [INFO] 配置已创建: ws-test (ID: 297deb07-6d83-406e-aa19-cde6cd051c0d)
+2026-07-02 15:49:41 [INFO] 配置已删除: ID: c0603199-7d98-4d75-8639-6741c3c09d32
+2026-07-02 15:49:41 [INFO] 配置已删除: ID: 297deb07-6d83-406e-aa19-cde6cd051c0d
+2026-07-02 15:49:41 [INFO] 配置已创建: bad-tunnel (ID: 99382207-3788-4c89-8789-679f6e9d9a07)
+2026-07-02 15:49:41 [INFO] 正在启动隧道: bad-tunnel (ID: 99382207-3788-4c89-8789-679f6e9d9a07)
+2026-07-02 15:49:41 [ERROR] SSH 连接失败: 第一跳连接失败 127.0.0.1:1: dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it.
+2026-07-02 15:49:41 [ERROR] 隧道启动失败: bad-tunnel - 第一跳连接失败 127.0.0.1:1: dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it.
+2026-07-02 15:49:41 [INFO] 批量启动所有隧道
+2026-07-02 15:49:41 [ERROR] SSH 连接失败: 第一跳连接失败 127.0.0.1:1: dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it.
+2026-07-02 15:49:41 [ERROR] 批量启动失败: bad-tunnel - 第一跳连接失败 127.0.0.1:1: dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it.
+2026-07-02 15:49:41 [INFO] 批量停止所有隧道
+2026-07-02 15:50:12 [INFO] 正在启动隧道: bad-tunnel (ID: 99382207-3788-4c89-8789-679f6e9d9a07)
+2026-07-02 15:50:12 [ERROR] SSH 连接失败: 第一跳连接失败 127.0.0.1:1: dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it.
+2026-07-02 15:50:12 [ERROR] 隧道启动失败: bad-tunnel - 第一跳连接失败 127.0.0.1:1: dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it.
+2026-07-02 15:50:12 [INFO] 批量启动所有隧道
+2026-07-02 15:50:12 [ERROR] SSH 连接失败: 第一跳连接失败 127.0.0.1:1: dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it.
+2026-07-02 15:50:12 [ERROR] 批量启动失败: bad-tunnel - 第一跳连接失败 127.0.0.1:1: dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it.
+2026-07-02 15:51:40 [INFO] SSH Tunnel Manager 启动完成
+2026-07-02 15:53:59 [INFO] 用户登录成功: admin
+2026-07-02 15:53:59 [INFO] 用户登录成功: admin
+2026-07-02 15:54:16 [INFO] 用户登录成功: admin
+2026-07-02 15:54:57 [INFO] 用户登录成功: admin
+2026-07-02 15:54:58 [INFO] 配置已创建: ws-auth-test (ID: 49285807-176d-45d9-93b3-aa2beba68b07)
