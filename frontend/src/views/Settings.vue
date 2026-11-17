@@ -16,6 +16,7 @@ const authLoaded = ref(false)
 
 onMounted(async () => {
   await loadGeoStatus()
+  await loadWebTLS()
   if (!isWebMode) return
   try {
     const s = await api.getWebAuthSettings()
@@ -95,6 +96,79 @@ function formatSize(bytes: number): string {
 }
 
 const geoCityDownloaded = computed(() => !!geoStatus.value?.city_db_exists)
+
+// ===== WEB 面板 HTTPS（SSL）=====
+const webTls = ref({
+  enabled: false,
+  certPem: '',
+  keyPem: '',
+  certFile: '',
+  keyFile: '',
+  active: false,
+  deployToken: '',
+})
+const webTlsSaving = ref(false)
+
+async function loadWebTLS() {
+  try {
+    const s = await api.getWebTLSSettings()
+    webTls.value.enabled = s.enabled
+    webTls.value.active = s.active
+    webTls.value.certFile = s.cert_file || ''
+    webTls.value.keyFile = s.key_file || ''
+    webTls.value.deployToken = s.deploy_token || ''
+    webTls.value.certPem = s.cert_pem || ''
+    webTls.value.keyPem = s.key_pem || ''
+  } catch {
+    // 忽略：仅 WEB 模式支持
+  }
+}
+
+async function handleSaveWebTLS() {
+  if (webTls.value.enabled && !webTls.value.certPem.trim() && !webTls.value.certFile) {
+    ElMessage.warning('请填写证书内容，或先通过 certd 部署证书')
+    return
+  }
+  webTlsSaving.value = true
+  try {
+    const res = await api.updateWebTLSSettings({
+      enabled: webTls.value.enabled,
+      cert_pem: webTls.value.certPem.trim() || undefined,
+      key_pem: webTls.value.keyPem.trim() || undefined,
+    })
+    webTls.value.active = res.active
+    webTls.value.certFile = res.cert_file || ''
+    webTls.value.keyFile = res.key_file || ''
+    webTls.value.keyPem = ''
+    ElMessage.success(
+      res.active
+        ? '已启用 HTTPS，监听正在重启，请改用 https:// 访问'
+        : '已保存，监听正在重启',
+    )
+  } catch (e: any) {
+    ElMessage.error(e?.message || '保存失败')
+  } finally {
+    webTlsSaving.value = false
+  }
+}
+
+async function handleRegenerateToken() {
+  try {
+    webTls.value.deployToken = await api.regenerateDeployToken()
+    ElMessage.success('部署令牌已重置，旧令牌立即失效')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '重置失败')
+  }
+}
+
+async function handleCopyToken() {
+  try {
+    await navigator.clipboard.writeText(webTls.value.deployToken)
+    ElMessage.success('已复制')
+  } catch {
+    ElMessage.warning('复制失败，请手动选择复制')
+  }
+}
 
 async function handleCheckPort() {
   try {
@@ -195,6 +269,56 @@ async function handleGenCert() {
       </div>
     </el-card>
 
+    <el-card v-if="isWebMode" class="panel">
+      <template #header><span>WEB 面板 HTTPS（SSL）</span></template>
+      <p class="desc">
+        开启后 WEB 面板以 HTTPS 提供服务。保存后监听会立即重启，请改用 https:// 访问（自签证书浏览器会提示不安全）。
+      </p>
+      <div class="auth-form">
+        <el-switch v-model="webTls.enabled" active-text="启用 HTTPS" />
+        <el-tag v-if="webTls.active" type="success" size="small">HTTPS 已生效</el-tag>
+      </div>
+      <div class="field-label">证书内容（PEM，含完整证书链）</div>
+      <el-input
+        v-model="webTls.certPem"
+        type="textarea"
+        :rows="5"
+        placeholder="-----BEGIN CERTIFICATE-----"
+      />
+      <div class="field-label" style="margin-top: 10px">私钥内容（PEM）</div>
+      <el-input
+        v-model="webTls.keyPem"
+        type="textarea"
+        :rows="4"
+        placeholder="-----BEGIN PRIVATE KEY-----"
+      />
+      <div class="info-row" v-if="webTls.certFile">
+        <span class="label">证书文件</span><span>{{ webTls.certFile }}</span>
+      </div>
+      <div class="info-row" v-if="webTls.keyFile">
+        <span class="label">私钥文件</span><span>{{ webTls.keyFile }}</span>
+      </div>
+      <div class="geo-actions">
+        <el-button type="primary" :loading="webTlsSaving" @click="handleSaveWebTLS">保存并应用</el-button>
+      </div>
+
+      <el-divider />
+      <div class="field-label">certd 部署 Token（外部工具自动部署证书用）</div>
+      <div class="auth-form">
+        <el-input :model-value="webTls.deployToken" readonly style="width: 420px" />
+        <el-button size="small" @click="handleCopyToken">复制</el-button>
+        <el-button size="small" type="danger" plain @click="handleRegenerateToken">重置</el-button>
+      </div>
+      <div class="fw-tip">
+        certd 等工具可通过 API 部署证书（请求头 <code>X-API-Token: &lt;上方 Token&gt;</code>）：<br />
+        <code>GET /api/cert/targets</code> 列出可部署目标（WEB 面板与所有 HTTPS 监听器）<br />
+        <code>GET /api/cert/read?target=web</code> 读取证书；隧道用 <code>?target=tunnel&amp;tunnel_id=..&amp;listener_id=..</code><br />
+        <code>POST /api/cert/deploy</code> 部署证书，body 示例：<br />
+        <code>{"target":"tunnel","tunnel_id":"...","listener_id":"...","cert_pem":"...","key_pem":"...","restart":true}</code><br />
+        <code>target=web</code> 时写入 WEB 面板证书并重启监听；<code>target=tunnel</code> 时写入 HTTPS 监听器证书并重启对应隧道。
+      </div>
+    </el-card>
+
     <el-card class="panel">
       <template #header><span>HTTPS 代理证书</span></template>
       <p class="desc">为 HTTPS 代理生成自签名证书（ECDSA，10 年有效期）。生成后可在 HTTPS 监听器配置中引用。</p>
@@ -273,5 +397,16 @@ async function handleGenCert() {
   font-size: 12px;
   color: #ebb563;
   line-height: 1.5;
+}
+.field-label {
+  font-size: 12px;
+  color: #8a8d95;
+  margin: 10px 0 4px;
+}
+.fw-tip code {
+  color: #e0e3e8;
+  background-color: #14161a;
+  padding: 1px 4px;
+  border-radius: 3px;
 }
 </style>

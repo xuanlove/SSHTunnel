@@ -57,9 +57,9 @@ func extractToken(r *http.Request) string {
 func generateJWT(username string, secret []byte) (string, int64, error) {
 	expiresAt := time.Now().Add(24 * time.Hour).Unix()
 	claims := jwt.MapClaims{
-		"username":  username,
-		"exp":       expiresAt,
-		"iat":       time.Now().Unix(),
+		"username": username,
+		"exp":      expiresAt,
+		"iat":      time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(secret)

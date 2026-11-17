@@ -334,6 +334,41 @@ export async function getCityCatalog(country: string): Promise<CityCatalog> {
   return httpGet<CityCatalog>(`/api/geoip/cities?country=${encodeURIComponent(country)}`)
 }
 
+// ===== WEB 面板 HTTPS（SSL）设置 =====
+export interface WebTLSSettings {
+  enabled: boolean
+  cert_file: string
+  key_file: string
+  cert_pem?: string
+  key_pem?: string
+  active: boolean
+  deploy_token: string
+}
+
+export async function getWebTLSSettings(): Promise<WebTLSSettings> {
+  if (!isWeb) throw new Error('仅 WEB 模式支持面板 HTTPS 设置')
+  return httpGet<WebTLSSettings>('/api/web/tls')
+}
+
+// 保存 HTTPS 设置；可直接提交证书/私钥 PEM 内容
+export async function updateWebTLSSettings(payload: {
+  enabled: boolean
+  cert_pem?: string
+  key_pem?: string
+  cert_file?: string
+  key_file?: string
+}): Promise<WebTLSSettings> {
+  if (!isWeb) throw new Error('仅 WEB 模式支持面板 HTTPS 设置')
+  return httpPut<WebTLSSettings>('/api/web/tls', payload)
+}
+
+// 重新生成 certd 部署令牌（旧令牌立即失效）
+export async function regenerateDeployToken(): Promise<string> {
+  if (!isWeb) throw new Error('仅 WEB 模式支持部署令牌')
+  const res = await httpPost<{ deploy_token: string }>('/api/web/tls/token', {})
+  return res?.deploy_token || ''
+}
+
 // ===== WEB 访问密码设置（仅 WEB 模式）=====
 export interface WebAuthSettings {
   enabled: boolean

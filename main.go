@@ -183,14 +183,14 @@ func startWebServer(app *App, authUser, authPass string) {
 
 	// 加载持久化的访问密码设置；--auth 启动参数覆盖（仅内存）
 	handler.UsePersistentAuth(authUser, authPass)
+	// --tls-cert/--tls-key 启动参数：启用并持久化 WEB 面板 HTTPS
+	handler.UseCLITLS(*flagTLSCert, *flagTLSKey)
 
 	// 创建并启动服务器
 	srv := web.NewServer(web.Config{
 		Host:      *flagWebHost,
 		Port:      *flagWebPort,
 		JWTSecret: handler.JWTSecret(),
-		TLSCert:   *flagTLSCert,
-		TLSKey:    *flagTLSKey,
 	}, handler)
 
 	go func() {

@@ -83,6 +83,8 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **实时推送**：日志与隧道状态变更通过 WebSocket 实时推送到前端
 - **JWT 鉴权**：开启访问密码后，登录获取 Token（24 小时有效）
 - **TLS 支持**：WEB 面板与 HTTPS 代理均可使用 TLS
+- **面板 HTTPS 可在线配置**：「系统设置」中开启 HTTPS 并直接粘贴证书/私钥内容（PEM），保存后监听热重启立即生效
+- **证书自动部署**：提供 Token 鉴权的 certd 部署 API，可自动替换 WEB 面板或 HTTPS 隧道监听器的证书并重启隧道
 
 ---
 
@@ -267,12 +269,19 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 
 ### 启用 HTTPS（WEB 面板）
 
+两种方式：
+
+1. **系统设置页（推荐）**：「系统设置 → WEB 面板 HTTPS（SSL）」，打开「启用 HTTPS」，直接粘贴证书与私钥 PEM 内容后「保存并应用」。保存后监听会在同一端口热重启，**改用 `https://` 重新访问即可**，无需重启进程；设置持久化到 `<配置目录>/sshtunnel/web_tls.json`，证书写入 `certs/web.crt|web.key`。
+2. 启动参数（会写入同样的持久化配置）：
+
 ```bash
 ./sshtunnel --mode=web --web-port=8443 \
   --tls-cert=/path/to/cert.pem \
   --tls-key=/path/to/key.pem \
   --auth=admin:password
 ```
+
+> 证书无法加载时会自动退回 HTTP 并记录告警，保证面板始终可访问以修正配置。
 
 ### 混合模式
 
@@ -290,8 +299,8 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 | `--web-host` | `127.0.0.1` | WEB 监听地址 |
 | `--web-port` | `8080` | WEB 监听端口 |
 | `--auth` | 空 | 启用密码访问，格式 `user:password`，留空则无密码 |
-| `--tls-cert` | 空 | TLS 证书路径（启用 HTTPS） |
-| `--tls-key` | 空 | TLS 私钥路径（启用 HTTPS） |
+| `--tls-cert` | 空 | TLS 证书路径（启用 HTTPS 并持久化到面板设置） |
+| `--tls-key` | 空 | TLS 私钥路径（启用 HTTPS 并持久化到面板设置） |
 | `--version` | - | 打印版本信息并退出 |
 | `--check-update` | - | 检查 GitHub Release 是否有新版本并退出 |
 | `--repo` | `xuanlove/SSHTunnel` | GitHub 仓库（owner/repo），用于版本检查 |
@@ -507,6 +516,44 @@ user1@host1:22, user2@host2:2222, user3@host3
 | GET | `/api/geoip/cities?country=CN` | 查询指定国家的省/城市下拉选项（首次调用后台构建索引，就绪前返回 `ready=false`） |
 | POST | `/api/geoip/download` | 下载/更新 GeoLite2-City 数据库（可选 body `{"url": "..."}` 指定地址），完成后热加载 |
 | PUT | `/api/geoip/settings` | 启用/关闭城市级数据库（body `{"enabled": true}`），启用前校验文件已下载 |
+| GET | `/api/web/tls` | 查询 WEB 面板 HTTPS 设置（含当前证书/私钥内容与 certd 部署 Token） |
+| PUT | `/api/web/tls` | 保存 HTTPS 设置（body 可用 `cert_pem`/`key_pem` 直接提交证书内容），保存后热重启监听 |
+| POST | `/api/web/tls/token` | 重置 certd 部署 Token（旧 Token 立即失效） |
+
+#### 证书部署 API（certd 等外部工具）
+
+以下端点使用**独立 Token 鉴权**（与 WEB 登录密码开关无关），请求头携带 `X-API-Token: <部署 Token>`
+（也支持 `Authorization: Bearer <Token>`）。Token 可在「系统设置 → WEB 面板 HTTPS」中查看或重置。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/cert/targets` | 列出可部署目标：WEB 面板与所有 HTTPS 代理监听器（含证书路径、是否存在、隧道运行状态） |
+| GET | `/api/cert/read?target=web` | 读取 WEB 面板证书与私钥 PEM 内容 |
+| GET | `/api/cert/read?target=tunnel&tunnel_id=X&listener_id=Y` | 读取指定 HTTPS 监听器的证书与私钥 PEM 内容 |
+| POST | `/api/cert/deploy` | 部署证书内容；`target=web` 写面板证书并热重启监听，`target=tunnel` 写监听器证书并按需重启隧道 |
+
+`POST /api/cert/deploy` 请求示例：
+
+```jsonc
+{
+  "target": "tunnel",        // web | tunnel
+  "tunnel_id": "xxx",        // target=tunnel 时必填
+  "listener_id": "yyy",      // target=tunnel 时必填（HTTPS 监听器）
+  "cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+  "key_pem": "-----BEGIN PRIVATE KEY-----\n...",
+  "restart": true,           // 隧道运行中时是否重启以加载新证书（默认 true）
+  "enable": true             // 仅 target=web：是否同时开启面板 HTTPS（默认 true）
+}
+```
+
+```bash
+curl -k -X POST https://127.0.0.1:8080/api/cert/deploy \
+  -H "X-API-Token: <部署 Token>" \
+  -H "Content-Type: application/json" \
+  -d "{\"target\":\"web\",\"cert_pem\":\"$(cat fullchain.pem | sed ':a;N;$!ba;s/\n/\\n/g')\",\"key_pem\":\"$(cat privkey.pem | sed ':a;N;$!ba;s/\n/\\n/g')\"}"
+```
+
+> 面板证书内容写入 `<配置目录>/sshtunnel/certs/web.crt|web.key`（私钥 0600）；隧道监听器若未配置证书路径，会自动生成 `<配置目录>/sshtunnel/certs/<隧道ID>-<监听器ID>.crt|.key` 并写回配置。
 
 ### WebSocket 端点
 
@@ -665,9 +712,12 @@ WEB API 服务器 + JWT 鉴权 + WebSocket 实时推送 + 嵌入式前端 SPA �
 
 - **核心类型**：`Config`、`Server`、`Handler`、`Hub`、`WSMessage`
 - **文件分工**：
-  - `server.go` — HTTP 服务器、路由树、SPA fallback、`writeJSON/writeError`
-  - `handlers.go` — API 路由（configs / tunnels / logs / version 等）
+  - `server.go` — HTTP 服务器、路由树、TLS 热重启、SPA fallback、`writeJSON/writeError`
+  - `handlers.go` — API 路由（configs / tunnels / logs / version / web tls 等）
   - `auth.go` — `authMiddleware`、JWT 签发/校验（HS256，24h 过期）
+  - `authstore.go` — 访问密码与 JWT 密钥持久化
+  - `websettings.go` — 面板 HTTPS 设置、证书 PEM 落盘、certd 部署 Token
+  - `certapi.go` — certd 证书部署 API（列出目标、读取、部署并重启隧道）
   - `ws.go` — `Hub` 广播器 + WebSocket 端点
 - **设计要点**：
   - **embed.FS**：`//go:embed all:assets` 嵌入前端编译产物
@@ -693,7 +743,7 @@ WEB API 服务器 + JWT 鉴权 + WebSocket 实时推送 + 嵌入式前端 SPA �
 | `ConfigEdit.vue` | 隧道配置编辑表单，嵌入 HopEditor 与 ProxyListenerEditor，支持连接测试 |
 | `Login.vue` | WEB 模式登录页 |
 | `Logs.vue` | 日志查看器，按级别与关键字过滤，彩色标签 |
-| `Settings.vue` | 系统设置（GeoIP 城市库下载/启用、端口检测、自签证书生成、版本信息） |
+| `Settings.vue` | 系统设置（面板 HTTPS、GeoIP 城市库、端口检测、自签证书生成、版本信息） |
 
 #### 组件（`src/components/`）
 
@@ -883,10 +933,11 @@ npm run preview    # 预览构建产物
 ## 安全建议
 
 1. **WEB 面板监听公网时务必启用 `--auth`**：无密码模式监听 `0.0.0.0` 会让任何能访问本机端口的人控制隧道，启动时会在日志中输出安全警告
-2. **生产环境推荐启用 HTTPS**：使用 `--tls-cert` / `--tls-key` 防止 Token 被中间人窃取
+2. **生产环境推荐启用 HTTPS**：在「系统设置」中开启面板 HTTPS 或使用 `--tls-cert` / `--tls-key`，防止 Token 被中间人窃取
 3. **SSH 密钥以 PEM 文本存储于配置文件**：请妥善保护 `configs.json`，避免提交到版本控制系统
 4. **JWT 密钥持久化于 `settings.json`**：服务重启/升级后已签发的 Token 仍然有效；如需强制所有会话重新登录，删除该文件中的 `jwt_secret` 字段并重启服务
-5. **systemd 部署已内置安全加固**：`ProtectSystem=strict`、`PrivateTmp=true`、`NoNewPrivileges=true`、专用 `nologin` 系统用户
+5. **certd 部署 Token 等同于证书写入权限**：请仅在可信网络中开放部署 API，泄露后在「系统设置」中重置 Token 即可立即失效
+6. **systemd 部署已内置安全加固**：`ProtectSystem=strict`、`PrivateTmp=true`、`NoNewPrivileges=true`、专用 `nologin` 系统用户
 
 ---
 

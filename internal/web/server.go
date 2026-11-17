@@ -2,14 +2,18 @@ package web
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,56 +25,117 @@ type Config struct {
 	Host      string // 监听地址
 	Port      int    // 监听端口
 	JWTSecret []byte // JWT 签名密钥
-	TLSCert   string // TLS 证书路径
-	TLSKey    string // TLS 私钥路径
 }
 
 // Server WEB API 服务器
 type Server struct {
 	cfg     Config
 	handler *Handler
-	srv     *http.Server
+
+	mu       sync.Mutex
+	srv      *http.Server
+	reloadCh chan struct{}
 }
 
 // NewServer 创建 WEB 服务器
 func NewServer(cfg Config, handler *Handler) *Server {
-	return &Server{
-		cfg:     cfg,
-		handler: handler,
+	s := &Server{
+		cfg:      cfg,
+		handler:  handler,
+		reloadCh: make(chan struct{}, 1),
 	}
+	// 允许系统设置中切换 TLS 后热重启监听
+	handler.SetTLSReloader(func() {
+		select {
+		case s.reloadCh <- struct{}{}:
+		default:
+		}
+	})
+	return s
 }
 
-// Start 启动 WEB 服务器（阻塞）
+// Start 启动 WEB 服务器（阻塞）。
+// TLS 设置变化时会在同一端口重启监听，无需重启进程。
 func (s *Server) Start() error {
 	mux := s.buildRoutes()
-
 	addr := s.cfg.Host + ":" + strconv.Itoa(s.cfg.Port)
-	s.srv = &http.Server{
-		Addr:    addr,
-		Handler: mux,
-		// 超时设置
-		ReadHeaderTimeout: 10 * time.Second,
-		// WebSocket 需要长连接，不设 ReadTimeout
-	}
 
 	// 安全警告
 	if !s.handler.AuthEnabled() && (s.cfg.Host == "0.0.0.0" || s.cfg.Host == "::") {
 		log.Printf("⚠️  警告：WEB 面板以无密码模式监听所有网卡 %s，任何能访问本机端口 %d 的设备均可控制隧道；可在「系统设置」中开启访问密码，或确认网络环境可信", s.cfg.Host, s.cfg.Port)
 	}
 
-	log.Printf("WEB 面板启动: http://%s", addr)
+	for {
+		ln, tlsOn, err := s.listen(addr)
+		if err != nil {
+			return err
+		}
+		s.handler.tls.SetActive(tlsOn)
+		if tlsOn {
+			log.Printf("WEB 面板启动: https://%s", addr)
+		} else {
+			log.Printf("WEB 面板启动: http://%s", addr)
+		}
 
-	if s.cfg.TLSCert != "" && s.cfg.TLSKey != "" {
-		log.Printf("启用 HTTPS: 证书 %s", s.cfg.TLSCert)
-		return s.srv.ListenAndServeTLS(s.cfg.TLSCert, s.cfg.TLSKey)
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+			// WebSocket 需要长连接，不设 ReadTimeout
+		}
+		s.mu.Lock()
+		s.srv = srv
+		s.mu.Unlock()
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- srv.Serve(ln) }()
+
+		select {
+		case err := <-errCh:
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		case <-s.reloadCh:
+			// 强制关闭现有连接（含 WebSocket），以便在同一端口重新监听
+			_ = srv.Close()
+			<-errCh
+			s.handler.tls.SetActive(false)
+			log.Println("WEB 面板监听已重启（TLS 设置变更）")
+		}
 	}
-	return s.srv.ListenAndServe()
+}
+
+// listen 按当前 TLS 设置创建监听器
+func (s *Server) listen(addr string) (net.Listener, bool, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, false, err
+	}
+	certFile, keyFile, ok := s.handler.tls.Effective()
+	if !ok {
+		return ln, false, nil
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		// 证书不可用时退回 HTTP，保证面板仍可访问以修正配置
+		log.Printf("⚠️  WEB 面板 HTTPS 证书加载失败，已退回 HTTP: %v", err)
+		return ln, false, nil
+	}
+	log.Printf("已启用 HTTPS: 证书 %s", certFile)
+	return tls.NewListener(ln, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}), true, nil
 }
 
 // Shutdown 优雅关闭
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.srv != nil {
-		return s.srv.Shutdown(ctx)
+	s.mu.Lock()
+	srv := s.srv
+	s.mu.Unlock()
+	if srv != nil {
+		return srv.Shutdown(ctx)
 	}
 	return nil
 }
@@ -83,6 +148,10 @@ func (s *Server) buildRoutes() *http.ServeMux {
 	mux.HandleFunc("/api/auth/status", s.handleAuthStatus)
 	// 登录接口始终注册；未开启访问密码时返回提示（兼容运行时动态开启）
 	mux.HandleFunc("/api/login", s.handler.handleLogin)
+
+	// certd 等外部工具使用的证书部署 API：使用独立 Token 鉴权（不受 WEB 登录开关影响）
+	certd := http.StripPrefix("/api", certdTokenMiddleware(s.handler.tls.DeployToken)(s.handler.certRouter()))
+	mux.Handle("/api/cert/", certd)
 
 	// 受保护 API（未启用密码时直接放行，启用后需 Token；支持运行时切换）
 	protected := http.StripPrefix("/api", s.handler.apiRouter())
@@ -126,10 +195,9 @@ func (s *Server) buildRoutes() *http.ServeMux {
 
 // handleAuthStatus 返回当前鉴权状态（动态）
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	tlsEnabled := s.cfg.TLSCert != "" && s.cfg.TLSKey != ""
 	writeJSON(w, 0, "success", map[string]interface{}{
 		"auth_enabled": s.handler.AuthEnabled(),
-		"tls_enabled":  tlsEnabled,
+		"tls_enabled":  s.handler.tls.Active(),
 	})
 }
 

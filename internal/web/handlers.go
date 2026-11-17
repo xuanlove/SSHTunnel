@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -72,6 +73,20 @@ func (h *Handler) UsePersistentAuth(cliUser, cliPass string) {
 	if s := h.tls.Settings(); s.Enabled {
 		h.log.Infof("已启用 WEB 面板 HTTPS（证书 %s）", s.CertFile)
 	}
+	// 确保 certd 部署令牌已生成（首次启动时自动创建并持久化）
+	h.tls.EnsureDeployToken()
+}
+
+// UseCLITLS 使用启动参数 --tls-cert/--tls-key 启用 WEB 面板 HTTPS（持久化）。
+func (h *Handler) UseCLITLS(certFile, keyFile string) {
+	if certFile == "" || keyFile == "" {
+		return
+	}
+	if err := h.tls.EnableWithFiles(certFile, keyFile); err != nil {
+		h.log.Warnf("保存启动参数指定的 TLS 证书失败: %v", err)
+		return
+	}
+	h.log.Infof("已按启动参数启用 WEB 面板 HTTPS（证书 %s）", certFile)
 }
 
 // AuthEnabled 当前是否启用访问密码（供中间件动态判断）。
@@ -124,6 +139,7 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/version/check", h.handleVersionCheck)
 	mux.HandleFunc("/auth/settings", h.handleAuthSettings)
 	mux.HandleFunc("/web/tls", h.handleWebTLS)
+	mux.HandleFunc("/web/tls/token", h.handleWebTLSToken)
 	mux.HandleFunc("/geoip/status", h.handleGeoIPStatus)
 	mux.HandleFunc("/geoip/download", h.handleGeoIPDownload)
 	mux.HandleFunc("/geoip/settings", h.handleGeoIPSettings)
@@ -342,20 +358,33 @@ func (h *Handler) handleAuthSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWebTLS WEB 面板 HTTPS 设置：GET 查询，PUT 保存并热切换监听。
-// 保存后监听会在短暂延迟后重启（当前连接会断开，需改用 https:// 重新访问）。
+// 支持直接填写证书/私钥 PEM 内容（写入配置目录 certs/web.crt|web.key），
+// 也支持指定已有文件路径。保存后会重启监听，需改用 https:// 重新访问。
 func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s := h.tls.Settings()
-		writeJSON(w, 0, "success", map[string]interface{}{
-			"enabled":   s.Enabled,
-			"cert_file": s.CertFile,
-			"key_file":  s.KeyFile,
-			"active":    h.tls.Active(),
-		})
+		resp := map[string]interface{}{
+			"active":       h.tls.Active(),
+			"deploy_token": h.tls.DeployToken(),
+		}
+		// 回填已有证书内容，便于在界面上查看/修改
+		if s.CertFile != "" {
+			if data, err := os.ReadFile(s.CertFile); err == nil {
+				resp["cert_pem"] = string(data)
+			}
+		}
+		if s.KeyFile != "" {
+			if data, err := os.ReadFile(s.KeyFile); err == nil {
+				resp["key_pem"] = string(data)
+			}
+		}
+		writeJSON(w, 0, "success", mergeTLSSettings(resp, s))
 	case http.MethodPut:
 		var req struct {
 			Enabled  bool   `json:"enabled"`
+			CertPEM  string `json:"cert_pem"`
+			KeyPEM   string `json:"key_pem"`
 			CertFile string `json:"cert_file"`
 			KeyFile  string `json:"key_file"`
 		}
@@ -363,33 +392,20 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "请求格式错误")
 			return
 		}
-		req.CertFile = strings.TrimSpace(req.CertFile)
-		req.KeyFile = strings.TrimSpace(req.KeyFile)
-		if req.Enabled {
-			if req.CertFile == "" || req.KeyFile == "" {
-				writeError(w, 400, "启用 HTTPS 需要填写证书与私钥文件路径")
-				return
-			}
-			if _, err := tls.LoadX509KeyPair(req.CertFile, req.KeyFile); err != nil {
-				writeError(w, 400, "证书加载失败: "+err.Error())
-				return
-			}
-		}
-
 		old := h.tls.Settings()
-		next := WebTLSSettings{Enabled: req.Enabled, CertFile: req.CertFile, KeyFile: req.KeyFile}
+		next, err := h.resolveTLSSettings(req.Enabled, req.CertPEM, req.KeyPEM, req.CertFile, req.KeyFile, old)
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
 		if err := h.tls.Save(next); err != nil {
 			writeError(w, 500, "保存设置失败: "+err.Error())
 			return
 		}
 
-		// 配置发生变化时需要重启监听，使 HTTP/HTTPS 切换立即生效
 		changed := old.Enabled != next.Enabled || old.CertFile != next.CertFile || old.KeyFile != next.KeyFile
 		resp := map[string]interface{}{
-			"enabled":   next.Enabled,
-			"cert_file": next.CertFile,
-			"key_file":  next.KeyFile,
-			"active":    h.tls.Active(),
+			"active":     h.tls.Active(),
 			"restarting": changed,
 		}
 		if next.Enabled {
@@ -397,18 +413,87 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.log.Info("WEB 面板 HTTPS 已关闭")
 		}
-		writeJSON(w, 0, "success", resp)
+		writeJSON(w, 0, "success", mergeTLSSettings(resp, next))
 
-		if changed && h.reloadTLS != nil {
-			// 先让响应返回给客户端，再重启监听
-			go func() {
-				time.Sleep(300 * time.Millisecond)
-				h.reloadTLS()
-			}()
+		if changed {
+			h.scheduleTLSReload()
 		}
 	default:
 		writeError(w, 405, "方法不允许")
 	}
+}
+
+// mergeTLSSettings 合并设置字段到响应
+func mergeTLSSettings(resp map[string]interface{}, s WebTLSSettings) map[string]interface{} {
+	resp["enabled"] = s.Enabled
+	resp["cert_file"] = s.CertFile
+	resp["key_file"] = s.KeyFile
+	return resp
+}
+
+// resolveTLSSettings 根据请求解析最终设置：优先使用 PEM 内容，其次文件路径，最后沿用旧值。
+func (h *Handler) resolveTLSSettings(enabled bool, certPEM, keyPEM, certFile, keyFile string, old WebTLSSettings) (WebTLSSettings, error) {
+	next := WebTLSSettings{Enabled: enabled, CertFile: old.CertFile, KeyFile: old.KeyFile}
+
+	if strings.TrimSpace(certPEM) != "" || strings.TrimSpace(keyPEM) != "" {
+		if strings.TrimSpace(certPEM) == "" || strings.TrimSpace(keyPEM) == "" {
+			return next, fmt.Errorf("证书与私钥内容必须同时填写")
+		}
+		if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
+			return next, fmt.Errorf("证书或私钥内容无效: %w", err)
+		}
+		if err := WritePEMFile(WebCertPath(), []byte(certPEM), 0644); err != nil {
+			return next, fmt.Errorf("保存证书失败: %w", err)
+		}
+		if err := WritePEMFile(WebKeyPath(), []byte(keyPEM), 0600); err != nil {
+			return next, fmt.Errorf("保存私钥失败: %w", err)
+		}
+		next.CertFile = WebCertPath()
+		next.KeyFile = WebKeyPath()
+	} else {
+		if f := strings.TrimSpace(certFile); f != "" {
+			next.CertFile = f
+		}
+		if f := strings.TrimSpace(keyFile); f != "" {
+			next.KeyFile = f
+		}
+	}
+
+	if enabled {
+		if next.CertFile == "" || next.KeyFile == "" {
+			return next, fmt.Errorf("启用 HTTPS 需要填写证书内容或指定证书文件")
+		}
+		if _, err := tls.LoadX509KeyPair(next.CertFile, next.KeyFile); err != nil {
+			return next, fmt.Errorf("证书加载失败: %w", err)
+		}
+	}
+	return next, nil
+}
+
+// scheduleTLSReload 延迟触发监听重启，保证当前响应先返回客户端。
+func (h *Handler) scheduleTLSReload() {
+	if h.reloadTLS == nil {
+		return
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		h.reloadTLS()
+	}()
+}
+
+// handleWebTLSToken 重新生成 certd 部署令牌
+func (h *Handler) handleWebTLSToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	token, err := h.tls.RegenerateDeployToken()
+	if err != nil {
+		writeError(w, 500, "生成失败: "+err.Error())
+		return
+	}
+	h.log.Info("certd 部署令牌已重置")
+	writeJSON(w, 0, "success", map[string]string{"deploy_token": token})
 }
 
 // handleConfigs 配置列表 CRUD
