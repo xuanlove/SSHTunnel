@@ -464,9 +464,11 @@ user1@host1:22, user2@host2:2222, user3@host3
 
 #### 城市级 GeoIP（Merged-IP）
 
-内置数据库只精确到国家。如需按城市过滤，请在 **系统设置 → GeoIP 城市级数据库** 点击「下载城市数据库」（Merged-IP 城市/ASN 合并库，约 93MB，从 GitHub Releases 下载，保存到配置目录下的 `Merged-IP.mmdb`），下载完成后打开「启用城市级数据库」开关，**即时热加载、无需重启**；可随时再次点击「更新城市数据库」获取新数据。
+内置数据库只精确到国家。如需按城市过滤，请在 **系统设置 → GeoIP 城市级数据库** 点击「下载城市数据库」（Merged-IP 城市/ASN 合并库，约 93MB，多镜像测速下载，保存到配置目录下的 `Merged-IP.mmdb`），下载完成后打开「启用城市级数据库」开关，**即时热加载、无需重启**；可随时再次点击「更新城市数据库」获取新数据。
 
-- 下载地址：`https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb`（可用 `POST /api/geoip/download` 的 `url` 字段指定其他地址）
+- 下载地址（多镜像）：直连 GitHub Releases 与多个加速镜像，下载前会**并发测速（采样 1MB），自动选择最快的可用镜像**，失败时按速度顺序依次回退
+  - 直连：`https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb`
+  - 也可用 `POST /api/geoip/download` 的 `url` 字段指定单一地址（此时不做测速）
 - 旧版本缓存 `GeoLite2-City.mmdb` 会在启动时自动重命名为 `Merged-IP.mmdb`，无需重新下载
 - 城市规则在配置页通过**三级下拉**选取（国家 → 省/州 → 城市），选「全部（*）」表示通配；下拉数据由城市库自动生成（服务端首次扫描约需数十秒，之后使用本地缓存秒开）
 - 规则存储格式为 `国家/省/城市`（如 `CN/GD/Shenzhen`）；省可用 ISO 3166-2 代码（`GD`）或英文名（`Guangdong`），城市使用英文名（`Shenzhen`），匹配不区分大小写

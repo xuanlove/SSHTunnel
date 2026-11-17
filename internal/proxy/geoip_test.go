@@ -1,12 +1,14 @@
 package proxy
 
 import (
+	"bytes"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"sshtunnel/internal/config"
 )
@@ -62,15 +64,30 @@ func TestDownloadCityDatabaseHTTPError(t *testing.T) {
 	}
 }
 
+// cityDBSample 返回可用的城市库样本路径；不存在时跳过测试
+func cityDBSample(t *testing.T) string {
+	t.Helper()
+	for _, p := range []string{
+		os.Getenv("GEOLITE2_CITY_MMDB"),
+		"/tmp/Merged-IP.mmdb",
+		"/tmp/GeoLite2-City.mmdb",
+	} {
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	t.Skip("未找到城市库样本（可用 GEOLITE2_CITY_MMDB 指定），跳过")
+	return ""
+}
+
 // TestDownloadCityDatabaseCityServer 提供真实 City 库时应成功并热加载为 City 类型
 func TestDownloadCityDatabaseCityServer(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	cityDB := os.Getenv("GEOLITE2_CITY_MMDB")
-	if cityDB == "" {
-		cityDB = "/tmp/GeoLite2-City.mmdb"
-	}
-	data, err := os.ReadFile(cityDB)
+	data, err := os.ReadFile(cityDBSample(t))
 	if err != nil {
 		t.Skipf("未找到城市库样本，跳过: %v", err)
 	}
@@ -137,13 +154,7 @@ func TestMigrateLegacyCityDatabase(t *testing.T) {
 
 // TestCityLookup 城市级解析返回国家/省/城市
 func TestCityLookup(t *testing.T) {
-	cityDB := os.Getenv("GEOLITE2_CITY_MMDB")
-	if cityDB == "" {
-		cityDB = "/tmp/GeoLite2-City.mmdb"
-	}
-	if _, err := os.Stat(cityDB); err != nil {
-		t.Skipf("未找到城市库样本，跳过: %v", err)
-	}
+	cityDB := cityDBSample(t)
 	if err := LoadGeoIPDatabaseFile(cityDB); err != nil {
 		t.Fatalf("加载城市库失败: %v", err)
 	}
@@ -168,5 +179,107 @@ func TestCityLookup(t *testing.T) {
 	}, defaultGeoResolver{})
 	if fw.Allow(net.ParseIP("223.5.5.5")) {
 		t.Errorf("城市规则 CN/%s/%s 应命中 223.5.5.5", info.ProvinceCode, info.City)
+	}
+}
+
+// TestRankMirrorsBySpeed 测速后应按速度降序排列，失败镜像排最后
+func TestRankMirrorsBySpeed(t *testing.T) {
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("f"), mirrorProbeBytes))
+	}))
+	defer fast.Close()
+
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chunk := bytes.Repeat([]byte("s"), 32*1024)
+		for i := 0; i < 32; i++ {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer slow.Close()
+
+	dead := "http://127.0.0.1:1/dead.mmdb"
+	ranked := rankMirrorsBySpeed([]string{slow.URL, dead, fast.URL})
+	if len(ranked) != 3 {
+		t.Fatalf("排序结果数量 = %d, want 3", len(ranked))
+	}
+	if ranked[0] != fast.URL {
+		t.Errorf("最快镜像应排第一: got %s, want %s", ranked[0], fast.URL)
+	}
+	if ranked[1] != slow.URL {
+		t.Errorf("较慢镜像应排第二: got %s, want %s", ranked[1], slow.URL)
+	}
+	if ranked[2] != dead {
+		t.Errorf("测速失败的镜像应排最后: got %s, want %s", ranked[2], dead)
+	}
+}
+
+// TestProbeMirrorRangeHeader 测速应携带 Range 且只读取采样大小
+func TestProbeMirrorRangeHeader(t *testing.T) {
+	var gotRange string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRange = r.Header.Get("Range")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), mirrorProbeBytes*2))
+	}))
+	defer srv.Close()
+
+	n, elapsed, err := probeMirror(srv.URL, mirrorProbeBytes)
+	if err != nil {
+		t.Fatalf("测速失败: %v", err)
+	}
+	if gotRange != "bytes=0-1048575" {
+		t.Errorf("Range 头 = %q, want bytes=0-1048575", gotRange)
+	}
+	if n != mirrorProbeBytes {
+		t.Errorf("采样字节 = %d, want %d", n, mirrorProbeBytes)
+	}
+	if elapsed <= 0 {
+		t.Errorf("耗时应大于 0")
+	}
+}
+
+// TestDownloadCityDatabaseMultiMirrorFallback 首个镜像不可用时应按测速顺序回退到可用镜像
+func TestDownloadCityDatabaseMultiMirrorFallback(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	data, err := os.ReadFile(cityDBSample(t))
+	if err != nil {
+		t.Skipf("未找到城市库样本，跳过: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(data)
+	}))
+	defer srv.Close()
+
+	old := GeoIPDownloadMirrors
+	GeoIPDownloadMirrors = []string{"http://127.0.0.1:1/dead.mmdb", srv.URL}
+	defer func() { GeoIPDownloadMirrors = old }()
+
+	before := CurrentGeoIPStatus()
+	defer func() {
+		if before.Loaded {
+			_ = LoadBuiltinGeoDatabase()
+		} else {
+			unloadGeoDB()
+		}
+	}()
+
+	src, size, err := DownloadCityDatabase("")
+	if err != nil {
+		t.Fatalf("多镜像下载应回退成功: %v", err)
+	}
+	if src != srv.URL {
+		t.Errorf("实际下载地址 = %q, want %q", src, srv.URL)
+	}
+	if size != int64(len(data)) {
+		t.Errorf("下载大小 = %d, want %d", size, len(data))
+	}
+	if st := CurrentGeoIPStatus(); !st.CityReady {
+		t.Errorf("下载后应加载 City 库")
 	}
 }

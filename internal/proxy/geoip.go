@@ -1,14 +1,17 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -160,16 +163,116 @@ func SaveGeoIPSettings(s GeoIPSettings) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// GeoIPDownloadMirrors 城市级数据库下载地址（Merged-IP：城市 + ASN 合并库，数据更完整）
+// GeoIPDownloadMirrors 城市级数据库下载地址（Merged-IP：城市 + ASN 合并库，数据更完整）。
+// 下载前会并发测速，优先使用最快的可用镜像；失败时按速度顺序依次回退。
 var GeoIPDownloadMirrors = []string{
 	"https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb",
+	"https://ghfast.top/https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb",
+	"https://ghproxy.net/https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb",
+	"https://gh-proxy.com/https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb",
+	"https://github.moeyy.xyz/https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb",
+	"https://hub.gitmirror.com/https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb",
 }
+
+const (
+	// mirrorProbeBytes 测速采样大小（1MB）
+	mirrorProbeBytes = 1 << 20
+	// mirrorProbeTimeout 单个镜像测速超时
+	mirrorProbeTimeout = 8 * time.Second
+)
 
 // geoipHTTPClient 下载客户端（超时较长，尊重环境变量代理）
 var geoipHTTPClient = &http.Client{Timeout: 15 * time.Minute}
 
+// mirrorSpeed 镜像测速结果
+type mirrorSpeed struct {
+	URL   string
+	Bytes int64
+	Speed float64 // 字节/秒；0 表示测速失败
+}
+
+// probeMirror 对镜像做一次限速采样：请求前 1MB 并测量耗时。
+// 即使中途超时，也会用已读取的字节数估算速度。
+func probeMirror(url string, probeBytes int) (int64, time.Duration, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), mirrorProbeTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	req.Header.Set("User-Agent", "sshtunnel-geoip")
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", probeBytes-1))
+
+	start := time.Now()
+	resp, err := geoipHTTPClient.Do(req)
+	if err != nil {
+		return 0, time.Since(start), err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return 0, time.Since(start), fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	buf := make([]byte, 64*1024)
+	var read int64
+	for read < int64(probeBytes) {
+		n := len(buf)
+		if remain := int64(probeBytes) - read; int64(n) > remain {
+			n = int(remain)
+		}
+		m, err := resp.Body.Read(buf[:n])
+		read += int64(m)
+		if err != nil {
+			break
+		}
+	}
+	elapsed := time.Since(start)
+	if read == 0 {
+		return 0, elapsed, errors.New("未读取到数据")
+	}
+	return read, elapsed, nil
+}
+
+// rankMirrorsBySpeed 并发测速并返回按速度降序排列的镜像地址。
+// 测速失败的镜像排在最后，仍会作为兜底尝试。
+func rankMirrorsBySpeed(urls []string) []string {
+	if len(urls) <= 1 {
+		return append([]string(nil), urls...)
+	}
+
+	results := make([]mirrorSpeed, len(urls))
+	var wg sync.WaitGroup
+	for i, u := range urls {
+		wg.Add(1)
+		go func(i int, u string) {
+			defer wg.Done()
+			n, elapsed, err := probeMirror(u, mirrorProbeBytes)
+			if err != nil {
+				log.Printf("GeoIP 镜像测速失败 %s: %v", u, err)
+				results[i] = mirrorSpeed{URL: u}
+				return
+			}
+			secs := elapsed.Seconds()
+			if secs <= 0 {
+				secs = 0.001
+			}
+			results[i] = mirrorSpeed{URL: u, Bytes: n, Speed: float64(n) / secs}
+			log.Printf("GeoIP 镜像测速 %s: %.0f KB/s", u, results[i].Speed/1024)
+		}(i, u)
+	}
+	wg.Wait()
+
+	sort.SliceStable(results, func(i, j int) bool { return results[i].Speed > results[j].Speed })
+	ranked := make([]string, len(results))
+	for i, r := range results {
+		ranked[i] = r.URL
+	}
+	return ranked
+}
+
 // DownloadCityDatabase 下载城市级数据库（Merged-IP）到缓存路径并热加载。
-// urlOverride 非空时仅使用该地址；否则依次尝试内置镜像。
+// urlOverride 非空时仅使用该地址；否则先并发测速，优先使用最快的镜像。
 // 返回实际使用的下载地址与文件大小。
 func DownloadCityDatabase(urlOverride string) (string, int64, error) {
 	dest := CityDatabasePath()
@@ -183,6 +286,12 @@ func DownloadCityDatabase(urlOverride string) (string, int64, error) {
 	urls := GeoIPDownloadMirrors
 	if urlOverride != "" {
 		urls = []string{urlOverride}
+	} else if len(urls) > 1 {
+		// 多镜像：先测速，按速度从快到慢依次尝试
+		urls = rankMirrorsBySpeed(urls)
+		if len(urls) > 0 {
+			log.Printf("GeoIP 城市库将优先使用镜像: %s", urls[0])
+		}
 	}
 
 	var lastErr error

@@ -11,13 +11,7 @@ func TestCityCatalog(t *testing.T) {
 	if testing.Short() {
 		t.Skip("跳过耗时的城市索引构建测试")
 	}
-	cityDB := os.Getenv("GEOLITE2_CITY_MMDB")
-	if cityDB == "" {
-		cityDB = "/tmp/GeoLite2-City.mmdb"
-	}
-	if _, err := os.Stat(cityDB); err != nil {
-		t.Skipf("未找到城市库样本，跳过: %v", err)
-	}
+	cityDB := cityDBSample(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	if err := LoadGeoIPDatabaseFile(cityDB); err != nil {

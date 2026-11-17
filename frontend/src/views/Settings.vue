@@ -232,7 +232,7 @@ async function handleGenCert() {
     <el-card class="panel">
       <template #header><span>GeoIP 城市级数据库</span></template>
       <p class="desc">
-        内置数据库精确到国家（约 3.3MB）；如需在代理防火墙中按「城市」过滤，请下载城市级数据库（Merged-IP，约 93MB，服务端从 GitHub 发布下载）。
+        内置数据库精确到国家（约 3.3MB）；如需在代理防火墙中按「城市」过滤，请下载城市级数据库（Merged-IP，约 93MB，多镜像自动测速选择最快下载）。
       </p>
       <div class="info-row">
         <span class="label">当前数据库</span>
