@@ -1,0 +1,12 @@
+name: Runner probe
+
+on:
+  push:
+    paths:
+      - '.github/probe-trigger'
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "runner ok $(uname -a)"
