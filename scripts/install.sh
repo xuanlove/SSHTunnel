@@ -310,6 +310,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# systemd 服务不继承 HOME，而程序依赖 os.UserConfigDir/UserCacheDir 定位配置与日志，
+# 因此显式设置 HOME 与 XDG 目录；StateDirectory 负责创建 /var/lib/sshtunnel
+StateDirectory=sshtunnel
+Environment=HOME=/var/lib/sshtunnel
+Environment=XDG_CONFIG_HOME=/var/lib/sshtunnel/config
+Environment=XDG_CACHE_HOME=/var/lib/sshtunnel/cache
+Environment=XDG_DATA_HOME=/var/lib/sshtunnel/data
 ExecStart=${target} ${exec_args}
 Restart=on-failure
 RestartSec=5
