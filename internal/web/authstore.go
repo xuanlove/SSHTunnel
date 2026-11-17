@@ -1,12 +1,16 @@
 package web
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -16,16 +20,20 @@ type WebAuthSettings struct {
 	Enabled      bool   `json:"auth_enabled"`
 	Username     string `json:"username"`
 	PasswordHash string `json:"password_hash,omitempty"`
+	// JWTSecret 持久化的 JWT 签名密钥（hex）。
+	// 持久化后服务重启/升级不会使已签发的 Token 失效，避免用户被反复踢回登录页。
+	JWTSecret string `json:"jwt_secret,omitempty"`
 }
 
 // AuthStore 运行时鉴权状态，支持在系统设置中动态开启/关闭访问密码。
 // 凭据以 bcrypt 哈希持久化到 <UserConfigDir>/sshtunnel/settings.json。
 type AuthStore struct {
-	mu       sync.RWMutex
-	path     string // 持久化路径；空字符串表示仅内存（测试用，不落盘）
-	enabled  bool
-	username string
-	passHash []byte
+	mu        sync.RWMutex
+	path      string // 持久化路径；空字符串表示仅内存（测试用，不落盘）
+	enabled   bool
+	username  string
+	passHash  []byte
+	jwtSecret string // JWT 签名密钥（hex），惰性生成并持久化
 }
 
 // DefaultAuthStorePath 返回默认持久化路径。
@@ -53,8 +61,29 @@ func NewAuthStore(path string) *AuthStore {
 		s.enabled = cfg.Enabled
 		s.username = cfg.Username
 		s.passHash = []byte(cfg.PasswordHash)
+		s.jwtSecret = cfg.JWTSecret
 	}
 	return s
+}
+
+// Secret 返回 JWT 签名密钥。首次调用时随机生成并持久化，
+// 使服务重启后旧 Token 仍然有效（避免升级重启后被反复踢回登录页）。
+func (s *AuthStore) Secret() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.jwtSecret == "" {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			// 极端情况下退化为时间派生密钥（仍可工作，仅重启后失效）
+			s.jwtSecret = fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+			return []byte(s.jwtSecret)
+		}
+		s.jwtSecret = hex.EncodeToString(b)
+		if s.path != "" {
+			_ = s.persistLocked()
+		}
+	}
+	return []byte(s.jwtSecret)
 }
 
 // Enabled 当前是否启用访问密码。
@@ -141,6 +170,7 @@ func (s *AuthStore) persistLocked() error {
 		Enabled:      s.enabled,
 		Username:     s.username,
 		PasswordHash: string(s.passHash),
+		JWTSecret:    s.jwtSecret,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

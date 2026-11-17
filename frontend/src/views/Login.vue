@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { login, setToken } from '@/api'
+import { login, setToken, resetAuthRedirect } from '@/api'
 
 const router = useRouter()
 const username = ref('')
@@ -18,6 +18,7 @@ async function handleLogin() {
   try {
     const token = await login(username.value, password.value)
     setToken(token)
+    resetAuthRedirect()
     ElMessage.success('登录成功')
     router.push('/')
   } catch (e: any) {

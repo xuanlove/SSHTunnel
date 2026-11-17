@@ -125,6 +125,29 @@ func TestAuthStoreChangePassword(t *testing.T) {
 	}
 }
 
+// TestAuthStoreSecretPersistence 验证 JWT 密钥持久化（重启后 Token 仍有效）
+func TestAuthStoreSecretPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+
+	s1 := NewAuthStore(path)
+	sec1 := string(s1.Secret())
+	if sec1 == "" {
+		t.Fatalf("Secret 不应为空")
+	}
+
+	// 重新加载：应得到相同密钥
+	s2 := NewAuthStore(path)
+	sec2 := string(s2.Secret())
+	if sec1 != sec2 {
+		t.Errorf("重启后密钥应保持一致: %q vs %q", sec1, sec2)
+	}
+
+	// 内存模式：每次新实例各自随机（不落盘）
+	if string(NewAuthStore("").Secret()) == string(NewAuthStore("").Secret()) {
+		t.Errorf("内存模式下密钥不应相同")
+	}
+}
+
 // TestAuthSettingsEndpoint 验证 /api/auth/settings 接口
 func TestAuthSettingsEndpoint(t *testing.T) {
 	h := NewHandler(nil, nil, logger.NewTest(), []byte("secret"), "", "", nil)

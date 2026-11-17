@@ -29,6 +29,30 @@ function authHeaders(): Record<string, string> {
   return authToken ? { Authorization: `Bearer ${authToken}` } : {}
 }
 
+// ===== 401 统一处理 =====
+// 说明：本项目使用 hash 路由（#/xxx），因此跳转必须写 hash，
+// 否则会整页刷新到 /login（无 hash），随后又被路由守卫重定向，表现为页面来回跳转。
+// 同时做幂等处理：并发/迟到的 401 响应不得清除刚登录得到的新 Token。
+let redirectingToLogin = false
+
+function handleUnauthorized(sentToken: string | null) {
+  // 仅当当前 Token 仍是本次请求发送的那个（或本就没带）时才清除，
+  // 避免迟到的 401 清掉用户刚登录获得的新 Token，从而反复被踢回登录页。
+  if (!sentToken || authToken === sentToken) {
+    setToken(null)
+  }
+  if (!isWeb || redirectingToLogin) return
+  redirectingToLogin = true
+  if (!location.hash.startsWith('#/login')) {
+    location.hash = '#/login'
+  }
+}
+
+// 登录成功后调用，允许后续再次触发 401 跳转
+export function resetAuthRedirect() {
+  redirectingToLogin = false
+}
+
 // ===== 鉴权状态 =====
 export interface AuthStatus {
   auth_enabled: boolean
@@ -55,10 +79,10 @@ export async function login(username: string, password: string): Promise<string>
 
 // ===== 通用 HTTP 请求封装 =====
 async function httpGet<T>(path: string): Promise<T> {
+  const sent = authToken
   const res = await fetch(path, { headers: authHeaders() })
   if (res.status === 401) {
-    setToken(null)
-    if (isWeb) location.href = '/login'
+    handleUnauthorized(sent)
     throw new Error('未授权')
   }
   const json = await res.json()
@@ -67,14 +91,14 @@ async function httpGet<T>(path: string): Promise<T> {
 }
 
 async function httpPost<T>(path: string, body?: any): Promise<T> {
+  const sent = authToken
   const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body ? JSON.stringify(body) : undefined,
   })
   if (res.status === 401) {
-    setToken(null)
-    if (isWeb) location.href = '/login'
+    handleUnauthorized(sent)
     throw new Error('未授权')
   }
   const json = await res.json()
@@ -83,14 +107,14 @@ async function httpPost<T>(path: string, body?: any): Promise<T> {
 }
 
 async function httpPut<T>(path: string, body: any): Promise<T> {
+  const sent = authToken
   const res = await fetch(path, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   })
   if (res.status === 401) {
-    setToken(null)
-    if (isWeb) location.href = '/login'
+    handleUnauthorized(sent)
     throw new Error('未授权')
   }
   const json = await res.json()
@@ -99,13 +123,13 @@ async function httpPut<T>(path: string, body: any): Promise<T> {
 }
 
 async function httpDelete<T>(path: string): Promise<T> {
+  const sent = authToken
   const res = await fetch(path, {
     method: 'DELETE',
     headers: authHeaders(),
   })
   if (res.status === 401) {
-    setToken(null)
-    if (isWeb) location.href = '/login'
+    handleUnauthorized(sent)
     throw new Error('未授权')
   }
   const json = await res.json()

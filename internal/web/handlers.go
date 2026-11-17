@@ -53,6 +53,8 @@ func NewHandler(cfgMgr *config.Manager, tunnelMgr *tunnel.Manager, log *logger.L
 // WEB 模式由 main.go 调用；桌面模式无 WEB 服务，不调用。
 func (h *Handler) UsePersistentAuth(cliUser, cliPass string) {
 	h.auth = NewAuthStore(DefaultAuthStorePath())
+	// 使用持久化的 JWT 密钥：服务重启/升级后已签发的 Token 仍然有效
+	h.jwtSecret = h.auth.Secret()
 	if cliUser != "" {
 		h.auth.initFromCLI(cliUser, cliPass)
 		h.log.Info("已通过 --auth 启动参数启用访问密码（覆盖 settings.json）")

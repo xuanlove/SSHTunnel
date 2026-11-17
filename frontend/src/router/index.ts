@@ -34,9 +34,6 @@ const router = createRouter({
 })
 
 // 路由守卫：WEB 模式下根据鉴权状态决定是否需要登录
-let authChecked = false
-let authRequired = false
-
 router.beforeEach(async (to, from, next) => {
   // 桌面端无需登录
   if (!isWebMode) {
@@ -44,23 +41,26 @@ router.beforeEach(async (to, from, next) => {
     return
   }
 
-  // 登录页直接放行
-  if (to.path === '/login') {
-    next()
-    return
+  // 每次导航都查询最新鉴权状态（本机请求，开销可忽略）。
+  // 若缓存该结果，在「系统设置」中开启/关闭访问密码后会与后端不一致，
+  // 导致误拦截或误放行（随后被 401 踢回登录页），表现为页面来回跳转。
+  let authRequired = false
+  try {
+    const status = await checkAuthStatus()
+    authRequired = status.auth_enabled
+  } catch {
+    // 查询失败时保守处理：按需要登录处理（已持有 token 仍可放行）
+    authRequired = true
   }
 
-  // 首次访问时查询鉴权状态
-  if (!authChecked) {
-    try {
-      const status = await checkAuthStatus()
-      authRequired = status.auth_enabled
-      authChecked = true
-    } catch (e) {
-      // 查询失败默认需要登录
-      authRequired = true
-      authChecked = true
+  // 登录页：已登录则直接进入主界面，避免停留在登录页
+  if (to.path === '/login') {
+    if (authRequired && getToken()) {
+      next('/')
+      return
     }
+    next()
+    return
   }
 
   // 无密码模式直接放行

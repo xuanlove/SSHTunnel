@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useTunnelStore } from '@/stores/tunnel'
 
@@ -8,11 +8,24 @@ const route = useRoute()
 
 const isLoginPage = computed(() => route.path === '/login')
 
-onMounted(async () => {
-  if (isLoginPage.value) return
-  await store.loadConfigs()
-  store.setupLogListener()
-})
+// 首次进入主界面时加载数据并订阅日志。
+// 用 watch 而非 onMounted：若页面首次落在登录页（onMounted 被跳过），
+// 登录成功跳回主界面后仍能正常加载，避免主界面空白。
+let initialized = false
+watch(
+  isLoginPage,
+  async (login) => {
+    if (login || initialized) return
+    initialized = true
+    try {
+      await store.loadConfigs()
+    } catch {
+      // 失败时由 http 层统一处理（401 跳转登录等）
+    }
+    store.setupLogListener()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
