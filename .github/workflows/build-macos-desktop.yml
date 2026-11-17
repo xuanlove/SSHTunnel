@@ -51,6 +51,8 @@ jobs:
       - name: Build desktop binaries
         env:
           CGO_ENABLED: '1'
+          # wails build 默认注入该框架（WailsContext.m 使用 UTType）
+          CGO_LDFLAGS: '-framework UniformTypeIdentifiers'
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
