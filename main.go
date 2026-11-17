@@ -20,6 +20,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"sshtunnel/internal/logger"
+	"sshtunnel/internal/proxy"
 	"sshtunnel/internal/updater"
 	"sshtunnel/internal/web"
 )
@@ -60,6 +61,7 @@ var (
 	flagVersion     = flag.Bool("version", false, "打印版本信息并退出")
 	flagCheckUpdate = flag.Bool("check-update", false, "检查 GitHub Release 是否有新版本并退出")
 	flagRepo        = flag.String("repo", updater.DefaultRepo, "GitHub 仓库（owner/repo），用于版本检查与安装脚本")
+	flagGeoIPDB     = flag.String("geoip-db", "", "GeoLite2-Country .mmdb 数据库路径（用于代理防火墙的 GeoIP 规则）")
 )
 
 func main() {
@@ -88,6 +90,15 @@ func main() {
 
 	// 解析鉴权配置（--auth 为启动参数，作为运行时设置的初始值/覆盖）
 	_, authUser, authPass := parseAuth(*flagAuth)
+
+	// 加载 GeoIP 数据库（可选；用于代理防火墙的国家规则）
+	if *flagGeoIPDB != "" {
+		if err := proxy.SetGeoIPDatabase(*flagGeoIPDB); err != nil {
+			log.Printf("⚠️  GeoIP 数据库加载失败（国家规则将不生效）: %v", err)
+		} else {
+			log.Printf("GeoIP 数据库已加载: %s", *flagGeoIPDB)
+		}
+	}
 
 	// 初始化共享业务层
 	app := NewApp()

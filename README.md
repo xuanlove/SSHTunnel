@@ -62,6 +62,7 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **认证方式**：密码认证 / 密钥认证（密钥以 PEM 文本形式存储，便于跨设备同步）
 - **自动重连**：SSH 断开后指数退避重连（初始 2s，上限 60s，可配置无限重试）
 - **端口冲突检测**：监听启动前自动检测端口占用，避免冲突
+- **代理防火墙**：每个代理监听端口可独立配置简易防火墙，支持黑名单（默认）/白名单模式、自定义 IP 与 IP 段（IPv4 + IPv6 CIDR）、GeoIP 国家规则
 - **代理连通性自检**：每个代理监听器可一键「测试代理端口」，经该监听端口访问 `https://api.ip.sb/ip` 并显示出口 IP，直观验证隧道是否走通
 
 ### 代理协议细节
@@ -293,6 +294,7 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 | `--version` | - | 打印版本信息并退出 |
 | `--check-update` | - | 检查 GitHub Release 是否有新版本并退出 |
 | `--repo` | `xuanlove/SSHTunnel` | GitHub 仓库（owner/repo），用于版本检查 |
+| `--geoip-db` | 空 | GeoLite2-Country `.mmdb` 路径，用于代理防火墙的国家规则 |
 
 ### 版本检查
 
@@ -412,6 +414,32 @@ user1@host1:22, user2@host2:2222, user3@host3
 - 是否允许外部访问（`0.0.0.0` 或 `127.0.0.1`）
 - 认证配置（HTTP Basic / SOCKS5 用户名密码 / SOCKS4 UserID）
 - TLS 证书（仅 HTTPS，可在设置页一键生成自签证书）
+- **简易防火墙**（可选，默认不启用）：黑名单/白名单模式、自定义 IP 与 IP 段、GeoIP 国家规则
+
+防火墙配置示例（`proxy_listeners[].firewall`）：
+
+```jsonc
+{
+  "enabled": true,
+  "mode": "blacklist",              // blacklist（默认，命中拒绝）| whitelist（仅命中放行）
+  "ips": [
+    "203.0.113.7",                  // 单个 IPv4
+    "10.0.0.0/8",                   // IPv4 CIDR
+    "2001:db8::/32",                // IPv6 CIDR
+    "2001:db8::dead:beef"           // 单个 IPv6
+  ],
+  "countries": ["CN", "US"]         // GeoIP 国家代码，需服务器配置 GeoLite2 数据库
+}
+```
+
+匹配语义：IP 规则与 GeoIP 国家规则取**并集**（任一命中即视为命中名单）。
+
+| 模式 | 命中名单 | 未命中 |
+|------|----------|--------|
+| `blacklist`（默认） | 拒绝 | 放行 |
+| `whitelist` | 放行 | 拒绝 |
+
+> GeoIP 国家规则需要服务器上的 `GeoLite2-Country.mmdb`（通过 `--geoip-db` 指定）；未配置时国家规则自动忽略，IP/IP 段规则不受影响，界面会给出提示。
 
 ### 代理端口连通性测试
 
@@ -838,6 +866,15 @@ npm run preview    # 预览构建产物
 ---
 
 ## 版本更新说明
+
+### v1.4.0
+
+- **新增：代理监听端口简易防火墙**（配置页每个监听器可独立启用）
+  - 黑名单（默认）/ 白名单两种模式
+  - 自定义 IP 与 IP 段，完整支持 IPv4 与 IPv6（含 CIDR）
+  - GeoIP 国家规则（ISO 国家代码），需通过 `--geoip-db` 配置 GeoLite2-Country 数据库；未配置时自动忽略国家规则
+  - IP 规则与国家规则取并集；白名单模式下未知来源默认拒绝
+  - 连接被拒时记录告警日志（含来源 IP）
 
 ### v1.3.2
 

@@ -1,11 +1,51 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as api from '@/api'
-import type { ProxyListener, ProxyProtocol } from '@/types'
+import type { FirewallConfig, FirewallMode, ProxyListener, ProxyProtocol } from '@/types'
 
 const props = defineProps<{ modelValue: ProxyListener[] }>()
 const emit = defineEmits<{ 'update:modelValue': [ProxyListener[]] }>()
+
+// GeoIP 数据库是否可用（用于国家规则提示）
+const geoReady = ref(false)
+onMounted(async () => {
+  try {
+    geoReady.value = await api.geoIPAvailable()
+  } catch {
+    geoReady.value = false
+  }
+})
+
+// 常用国家选项（ISO 3166-1 alpha-2）
+const countryOptions = [
+  { label: '中国 (CN)', value: 'CN' },
+  { label: '中国香港 (HK)', value: 'HK' },
+  { label: '中国台湾 (TW)', value: 'TW' },
+  { label: '日本 (JP)', value: 'JP' },
+  { label: '韩国 (KR)', value: 'KR' },
+  { label: '新加坡 (SG)', value: 'SG' },
+  { label: '美国 (US)', value: 'US' },
+  { label: '加拿大 (CA)', value: 'CA' },
+  { label: '英国 (GB)', value: 'GB' },
+  { label: '德国 (DE)', value: 'DE' },
+  { label: '法国 (FR)', value: 'FR' },
+  { label: '荷兰 (NL)', value: 'NL' },
+  { label: '俄罗斯 (RU)', value: 'RU' },
+  { label: '澳大利亚 (AU)', value: 'AU' },
+  { label: '印度 (IN)', value: 'IN' },
+  { label: '巴西 (BR)', value: 'BR' },
+  { label: '越南 (VN)', value: 'VN' },
+  { label: '泰国 (TH)', value: 'TH' },
+  { label: '马来西亚 (MY)', value: 'MY' },
+  { label: '印度尼西亚 (ID)', value: 'ID' },
+  { label: '菲律宾 (PH)', value: 'PH' },
+  { label: '土耳其 (TR)', value: 'TR' },
+  { label: '乌克兰 (UA)', value: 'UA' },
+  { label: '瑞典 (SE)', value: 'SE' },
+  { label: '瑞士 (CH)', value: 'CH' },
+  { label: '阿联酋 (AE)', value: 'AE' },
+]
 
 const listeners = computed<ProxyListener[]>({
   get: () => props.modelValue,
@@ -100,6 +140,44 @@ const portCounts = computed(() => {
 
 function isPortDuplicated(port: number) {
   return (portCounts.value[port] || 0) > 1
+}
+
+// ===== 防火墙配置 =====
+function defaultFirewall(): FirewallConfig {
+  return { enabled: true, mode: 'blacklist', ips: [], countries: [] }
+}
+
+function onFirewallToggle(idx: number, enabled: boolean) {
+  updateListener(idx, { firewall: enabled ? defaultFirewall() : null })
+}
+
+function updateFirewall(idx: number, patch: Partial<FirewallConfig>) {
+  const arr = [...listeners.value]
+  const cur = arr[idx]
+  const base = cur.firewall || defaultFirewall()
+  arr[idx] = { ...cur, firewall: { ...base, ...patch } }
+  listeners.value = arr
+}
+
+// IP 文本框（每行一条），按监听器 id 维护原始文本，避免编辑过程中被格式化
+const ipTexts = ref<Record<string, string>>({})
+
+function ipTextOf(pl: ProxyListener): string {
+  if (ipTexts.value[pl.id] !== undefined) return ipTexts.value[pl.id]
+  return (pl.firewall?.ips || []).join('\n')
+}
+
+function onIPTextInput(idx: number, id: string, text: string) {
+  ipTexts.value = { ...ipTexts.value, [id]: text }
+  const ips = text
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+  updateFirewall(idx, { ips })
+}
+
+function setFirewallMode(idx: number, mode: FirewallMode) {
+  updateFirewall(idx, { mode })
 }
 
 // ===== 代理监听端口连通性测试 =====
@@ -216,6 +294,64 @@ async function handleTestProxy(pl: ProxyListener) {
         </el-row>
       </div>
 
+      <div class="fw-row">
+        <el-switch
+          :model-value="!!pl.firewall"
+          active-text="启用简易防火墙"
+          @update:model-value="(v: string | number | boolean) => onFirewallToggle(idx, v as boolean)"
+        />
+        <template v-if="pl.firewall">
+          <el-radio-group
+            :model-value="pl.firewall.mode"
+            size="small"
+            @update:model-value="(v: string | number | boolean) => setFirewallMode(idx, v as FirewallMode)"
+          >
+            <el-radio-button value="blacklist">黑名单（命中拒绝）</el-radio-button>
+            <el-radio-button value="whitelist">白名单（仅命中放行）</el-radio-button>
+          </el-radio-group>
+        </template>
+      </div>
+
+      <div v-if="pl.firewall" class="fw-detail">
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <div class="field-label">自定义 IP / IP 段（每行一条，支持 IPv4 与 IPv6）</div>
+            <el-input
+              type="textarea"
+              :rows="4"
+              :model-value="ipTextOf(pl)"
+              placeholder="203.0.113.7&#10;10.0.0.0/8&#10;2001:db8::/32"
+              @update:model-value="(v: string) => onIPTextInput(idx, pl.id, v)"
+            />
+          </el-col>
+          <el-col :span="12">
+            <div class="field-label">GeoIP 国家（可搜索/自定义输入国家代码）</div>
+            <el-select
+              multiple
+              filterable
+              allow-create
+              default-first-option
+              collapse-tags
+              collapse-tags-tooltip
+              :model-value="pl.firewall.countries || []"
+              placeholder="选择或输入国家代码，如 CN、US"
+              style="width: 100%"
+              @update:model-value="(v: string[]) => updateFirewall(idx, { countries: v })"
+            >
+              <el-option
+                v-for="c in countryOptions"
+                :key="c.value"
+                :label="c.label"
+                :value="c.value"
+              />
+            </el-select>
+            <div v-if="!geoReady" class="fw-tip">
+              服务器未配置 GeoIP 数据库（--geoip-db），国家规则不会生效；IP/IP 段规则不受影响。
+            </div>
+          </el-col>
+        </el-row>
+      </div>
+
       <div class="probe-row">
         <el-button
           size="small"
@@ -290,6 +426,26 @@ async function handleTestProxy(pl: ProxyListener) {
   flex-wrap: wrap;
   border-top: 1px dashed #3a3f4b;
   padding-top: 8px;
+}
+.fw-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-top: 1px dashed #3a3f4b;
+  padding-top: 8px;
+}
+.fw-detail {
+  background-color: #1b1e24;
+  border: 1px dashed #3a3f4b;
+  border-radius: 4px;
+  padding: 10px;
+}
+.fw-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #ebb563;
+  line-height: 1.5;
 }
 .probe-error {
   max-width: 460px;

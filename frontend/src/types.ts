@@ -34,6 +34,18 @@ export interface TLSConfig {
   key_file: string
 }
 
+// 防火墙模式：blacklist=黑名单（默认，命中拒绝）；whitelist=白名单（仅命中放行）
+export type FirewallMode = 'blacklist' | 'whitelist'
+
+export interface FirewallConfig {
+  enabled: boolean
+  mode: FirewallMode
+  // 自定义 IP / CIDR，支持 IPv4 与 IPv6（如 10.0.0.0/8、203.0.113.7、2001:db8::/32）
+  ips?: string[]
+  // GeoIP 国家代码（ISO 3166-1 alpha-2，如 CN、US），需服务器配置 GeoLite2 数据库
+  countries?: string[]
+}
+
 export interface ProxyListener {
   id: string
   protocol: ProxyProtocol
@@ -41,6 +53,7 @@ export interface ProxyListener {
   allow_external: boolean
   auth?: AuthConfig | null
   tls?: TLSConfig | null
+  firewall?: FirewallConfig | null
 }
 
 export interface TunnelConfig {

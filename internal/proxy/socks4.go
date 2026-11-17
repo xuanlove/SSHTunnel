@@ -67,6 +67,11 @@ func (s *socks4Server) Stop() error {
 func (s *socks4Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
+	// 简易防火墙：来源校验
+	if !s.allowConn(conn) {
+		return
+	}
+
 	// SOCKS4 协议: VN(1) CD(1) DSTPORT(2) DSTIP(4) USERID(null-terminated)
 	header := make([]byte, 8)
 	if _, err := io.ReadFull(conn, header); err != nil {

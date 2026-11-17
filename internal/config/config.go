@@ -40,13 +40,13 @@ const (
 
 // HopConfig 单跳 SSH 配置
 type HopConfig struct {
-	User        string `json:"user"`
-	Host        string `json:"host"`
-	Port        int    `json:"port"`
-	AuthType    string `json:"auth_type"` // password | key
-	Password    string `json:"password,omitempty"`
-	KeyContent  string `json:"key_content,omitempty"`  // 密钥文本内容（PEM 格式）
-	Passphrase  string `json:"passphrase,omitempty"`
+	User       string `json:"user"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	AuthType   string `json:"auth_type"` // password | key
+	Password   string `json:"password,omitempty"`
+	KeyContent string `json:"key_content,omitempty"` // 密钥文本内容（PEM 格式）
+	Passphrase string `json:"passphrase,omitempty"`
 }
 
 // LocalForward 本地端口转发
@@ -70,26 +70,52 @@ type TLSConfig struct {
 	KeyFile  string `json:"key_file"`
 }
 
+// FirewallMode 防火墙模式
+type FirewallMode string
+
+const (
+	// FirewallBlacklist 黑名单（默认）：命中名单的客户端被拒绝，其余放行
+	FirewallBlacklist FirewallMode = "blacklist"
+	// FirewallWhitelist 白名单：仅命中名单的客户端放行，其余拒绝
+	FirewallWhitelist FirewallMode = "whitelist"
+)
+
+// FirewallConfig 代理监听器的简易防火墙配置
+//
+// 匹配规则（IP 与 GeoIP 国家取并集）：
+//   - 黑名单模式（默认）：命中 → 拒绝；未命中 → 放行
+//   - 白名单模式：命中 → 放行；未命中 → 拒绝
+type FirewallConfig struct {
+	Enabled bool         `json:"enabled"`
+	Mode    FirewallMode `json:"mode"`          // blacklist(默认) | whitelist
+	IPs     []string     `json:"ips,omitempty"` // 自定义 IP / CIDR，支持 IPv4 与 IPv6
+	// Countries GeoIP 国家代码列表（ISO 3166-1 alpha-2，如 CN、US）。
+	// 需要服务器配置 GeoLite2-Country 数据库（--geoip-db）才会生效。
+	Countries []string `json:"countries,omitempty"`
+}
+
 // ProxyListener 代理监听器
 type ProxyListener struct {
-	ID            string      `json:"id"`
+	ID            string        `json:"id"`
 	Protocol      ProxyProtocol `json:"protocol"` // http | https | socks4 | socks5
-	ListenPort    int         `json:"listen_port"`
-	AllowExternal bool        `json:"allow_external"`
-	Auth          *AuthConfig `json:"auth,omitempty"`
-	TLS           *TLSConfig  `json:"tls,omitempty"` // https 专用
+	ListenPort    int           `json:"listen_port"`
+	AllowExternal bool          `json:"allow_external"`
+	Auth          *AuthConfig   `json:"auth,omitempty"`
+	TLS           *TLSConfig    `json:"tls,omitempty"` // https 专用
+	// Firewall 简易防火墙（懒启用；nil 或 Enabled=false 表示不限制）
+	Firewall *FirewallConfig `json:"firewall,omitempty"`
 }
 
 // TunnelConfig 隧道完整配置
 type TunnelConfig struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	HopChain      []HopConfig     `json:"hop_chain"`
-	TunnelType    TunnelType      `json:"tunnel_type"`
-	LocalForwards []LocalForward  `json:"local_forwards,omitempty"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	HopChain       []HopConfig     `json:"hop_chain"`
+	TunnelType     TunnelType      `json:"tunnel_type"`
+	LocalForwards  []LocalForward  `json:"local_forwards,omitempty"`
 	ProxyListeners []ProxyListener `json:"proxy_listeners,omitempty"`
-	AutoReconnect bool            `json:"auto_reconnect"`
-	Status        TunnelStatus    `json:"status"` // 运行时状态
+	AutoReconnect  bool            `json:"auto_reconnect"`
+	Status         TunnelStatus    `json:"status"` // 运行时状态
 }
 
 // userConfigDir 默认使用系统配置目录（可被测试覆盖）

@@ -50,6 +50,27 @@ type BaseServer struct {
 	listener   net.Listener
 	dialer     Dialer
 	log        func(level string, msg string)
+	fw         *Firewall // 简易防火墙（nil 表示不限制）
+}
+
+// allowConn 依据防火墙规则判断是否允许该连接接入。
+// 各协议在 handleConn 开头调用；拒绝时记录一条告警日志。
+func (b *BaseServer) allowConn(conn net.Conn) bool {
+	if b.fw == nil {
+		return true
+	}
+	ip := remoteIP(conn)
+	if b.fw.Allow(ip) {
+		return true
+	}
+	src := "unknown"
+	if ip != nil {
+		src = ip.String()
+	}
+	if b.log != nil {
+		b.log("warn", "防火墙已拒绝来源 "+src)
+	}
+	return false
 }
 
 func (b *BaseServer) Status() ListenerStatus {
@@ -91,12 +112,19 @@ func BuildServer(lc config.ProxyListener, dialer Dialer, log LogFunc) (Server, e
 		log = noopLog
 	}
 	addr := port.BindAddress(lc.ListenPort, lc.AllowExternal)
+
+	fw, err := NewFirewall(lc.Firewall, defaultGeoResolver{})
+	if err != nil {
+		return nil, fmt.Errorf("防火墙配置错误: %w", err)
+	}
+
 	base := BaseServer{
 		id:         lc.ID,
 		protocol:   lc.Protocol,
 		listenAddr: addr,
 		dialer:     dialer,
 		log:        log,
+		fw:         fw,
 	}
 
 	switch lc.Protocol {

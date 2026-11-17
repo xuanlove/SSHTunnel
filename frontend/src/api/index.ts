@@ -263,6 +263,19 @@ export async function testProxyListener(payload: {
   return httpPost<ProxyProbeResult>('/api/proxy/test', payload)
 }
 
+// GeoIP 数据库是否可用（用于代理防火墙的国家规则提示）
+export async function geoIPAvailable(): Promise<boolean> {
+  if (!isWeb) {
+    return Call.ByName('App.GeoIPAvailable') as Promise<boolean>
+  }
+  try {
+    const info = await httpGet<{ geoip_available?: boolean }>('/api/version')
+    return !!info?.geoip_available
+  } catch {
+    return false
+  }
+}
+
 // ===== WEB 访问密码设置（仅 WEB 模式）=====
 export interface WebAuthSettings {
   enabled: boolean

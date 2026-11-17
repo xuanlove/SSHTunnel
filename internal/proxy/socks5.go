@@ -67,6 +67,11 @@ func (s *socks5Server) Stop() error {
 func (s *socks5Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
+	// 简易防火墙：来源校验
+	if !s.allowConn(conn) {
+		return
+	}
+
 	// 1. 握手协商认证方式
 	// 客户端: VER(1) NMETHODS(1) METHODS(n)
 	header := make([]byte, 2)

@@ -113,11 +113,12 @@ func (h *Handler) handleVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "方法不允许")
 		return
 	}
-	writeJSON(w, 0, "success", map[string]string{
-		"version": h.version,
-		"commit":  h.commit,
-		"variant": h.variant,
-		"repo":    h.repo,
+	writeJSON(w, 0, "success", map[string]interface{}{
+		"version":         h.version,
+		"commit":          h.commit,
+		"variant":         h.variant,
+		"repo":            h.repo,
+		"geoip_available": proxy.GeoIPAvailable(),
 	})
 }
 

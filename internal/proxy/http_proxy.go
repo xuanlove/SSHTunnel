@@ -17,9 +17,9 @@ import (
 // 当 tlsCfg 为 nil 时为 HTTP 代理，否则为 HTTPS 代理（监听器包装 TLS）
 type httpServer struct {
 	BaseServer
-	auth    *config.AuthConfig
-	helper  authHelper
-	tlsCfg  *config.TLSConfig
+	auth   *config.AuthConfig
+	helper authHelper
+	tlsCfg *config.TLSConfig
 }
 
 func newHTTPServer(base BaseServer, auth *config.AuthConfig, tlsCfg *config.TLSConfig) *httpServer {
@@ -92,6 +92,11 @@ func (s *httpServer) Stop() error {
 
 func (s *httpServer) handleConn(conn net.Conn) {
 	defer conn.Close()
+
+	// 简易防火墙：来源校验
+	if !s.allowConn(conn) {
+		return
+	}
 
 	br := bufio.NewReader(conn)
 	req, err := http.ReadRequest(br)

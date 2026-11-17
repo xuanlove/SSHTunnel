@@ -188,5 +188,10 @@ func (a *App) TestProxyListener(protocol string, portNum int, username, password
 	})
 }
 
+// GeoIPAvailable 是否已加载 GeoIP 数据库（代理防火墙国家规则依赖它）
+func (a *App) GeoIPAvailable() bool {
+	return proxy.GeoIPAvailable()
+}
+
 // 用于上下文传递（保留 context 引用）
 var _ = context.Background
