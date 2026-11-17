@@ -36,13 +36,22 @@ const levelColor = (lvl: string) => {
   }[lvl] || '#909399'
 }
 
+// 日志时间只显示到秒（本地时区），如 2026-11-17 20:55:21
+function formatTime(t: string): string {
+  const d = new Date(t)
+  if (Number.isNaN(d.getTime())) return t
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 function clearLogs() {
   store.logs.splice(0, store.logs.length)
 }
 
 function exportLogs() {
   const text = filteredLogs.value
-    .map(l => `[${l.time}] [${l.level}] ${l.tunnel_id ? '(' + l.tunnel_id + ') ' : ''}${l.message}`)
+    .map(l => `[${formatTime(l.time)}] [${l.level}] ${l.tunnel_id ? '(' + l.tunnel_id + ') ' : ''}${l.message}`)
     .join('\n')
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
@@ -93,7 +102,7 @@ onMounted(async () => {
 
     <div class="log-container" ref="logContainer">
       <div v-for="(log, idx) in filteredLogs" :key="idx" class="log-line">
-        <span class="log-time">{{ log.time }}</span>
+        <span class="log-time">{{ formatTime(log.time) }}</span>
         <el-tag :type="levelType(log.level)" size="small">{{ log.level }}</el-tag>
         <span class="log-msg" :style="{ color: levelColor(log.level) }">
           {{ log.tunnel_id ? `[${log.tunnel_id}] ` : '' }}{{ log.message }}
