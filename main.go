@@ -61,7 +61,7 @@ var (
 	flagVersion     = flag.Bool("version", false, "打印版本信息并退出")
 	flagCheckUpdate = flag.Bool("check-update", false, "检查 GitHub Release 是否有新版本并退出")
 	flagRepo        = flag.String("repo", updater.DefaultRepo, "GitHub 仓库（owner/repo），用于版本检查与安装脚本")
-	flagGeoIPDB     = flag.String("geoip-db", "", "GeoLite2-Country .mmdb 数据库路径（用于代理防火墙的 GeoIP 规则）")
+	flagGeoIPDB     = flag.String("geoip-db", "", "GeoLite2-Country .mmdb 路径；留空使用内置数据库，传 none 禁用")
 )
 
 func main() {
@@ -91,8 +91,18 @@ func main() {
 	// 解析鉴权配置（--auth 为启动参数，作为运行时设置的初始值/覆盖）
 	_, authUser, authPass := parseAuth(*flagAuth)
 
-	// 加载 GeoIP 数据库（可选；用于代理防火墙的国家规则）
-	if *flagGeoIPDB != "" {
+	// 加载 GeoIP 数据库（用于代理防火墙的国家规则）
+	// 默认使用内嵌的 GeoLite2-Country；--geoip-db 可指定外部文件覆盖；传 none 禁用。
+	switch strings.ToLower(strings.TrimSpace(*flagGeoIPDB)) {
+	case "":
+		if err := proxy.LoadBuiltinGeoDatabase(); err != nil {
+			log.Printf("⚠️  内置 GeoIP 数据库加载失败（国家规则将不生效）: %v", err)
+		} else {
+			log.Printf("已加载内置 GeoIP 数据库（GeoLite2-Country）")
+		}
+	case "none", "off", "disabled":
+		log.Printf("已按 --geoip-db=%s 禁用 GeoIP（国家规则不生效）", *flagGeoIPDB)
+	default:
 		if err := proxy.SetGeoIPDatabase(*flagGeoIPDB); err != nil {
 			log.Printf("⚠️  GeoIP 数据库加载失败（国家规则将不生效）: %v", err)
 		} else {
@@ -284,4 +294,3 @@ func runCheckUpdate(repo string) int {
 	}
 	return 1
 }
-

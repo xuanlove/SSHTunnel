@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	_ "embed"
 	"fmt"
 	"net"
 	"strings"
@@ -10,6 +11,12 @@ import (
 
 	"sshtunnel/internal/config"
 )
+
+// builtinGeoDB 内置的 GeoLite2-Country 数据库。
+// 数据来源：MaxMind GeoLite2 Country（CC BY-SA 4.0），见 geodata/README.md。
+//
+//go:embed geodata/GeoLite2-Country.mmdb
+var builtinGeoDB []byte
 
 // GeoResolver 将 IP 解析为国家代码（ISO 3166-1 alpha-2）。
 // 抽象为接口便于测试替换。
@@ -24,8 +31,8 @@ var (
 	geoipDB *geoip2.Reader
 )
 
-// SetGeoIPDatabase 加载 GeoLite2-Country 数据库（.mmdb）。
-// 传空字符串表示卸载。加载成功后，防火墙的国家规则才会生效。
+// SetGeoIPDatabase 加载外部 GeoLite2-Country 数据库（.mmdb），覆盖内置库。
+// 传空字符串表示卸载（之后可再调用 LoadBuiltinGeoDatabase 恢复内置库）。
 func SetGeoIPDatabase(path string) error {
 	geoipMu.Lock()
 	defer geoipMu.Unlock()
@@ -42,6 +49,25 @@ func SetGeoIPDatabase(path string) error {
 		return fmt.Errorf("加载 GeoIP 数据库失败: %w", err)
 	}
 	geoipDB = db
+	return nil
+}
+
+// LoadBuiltinGeoDatabase 从内嵌数据加载 GeoLite2-Country 数据库（无需外部文件）。
+// 若已加载外部数据库则会被替换。
+func LoadBuiltinGeoDatabase() error {
+	if len(builtinGeoDB) == 0 {
+		return fmt.Errorf("内置 GeoIP 数据库为空")
+	}
+	db, err := geoip2.FromBytes(builtinGeoDB)
+	if err != nil {
+		return fmt.Errorf("解析内置 GeoIP 数据库失败: %w", err)
+	}
+	geoipMu.Lock()
+	if geoipDB != nil {
+		_ = geoipDB.Close()
+	}
+	geoipDB = db
+	geoipMu.Unlock()
 	return nil
 }
 

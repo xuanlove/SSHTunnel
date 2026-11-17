@@ -175,6 +175,79 @@ func TestFirewallNilIP(t *testing.T) {
 	}
 }
 
+// TestBuiltinGeoDatabase 验证内置 GeoLite2 数据库可加载并正确解析 IPv4/IPv6
+func TestBuiltinGeoDatabase(t *testing.T) {
+	if err := LoadBuiltinGeoDatabase(); err != nil {
+		t.Fatalf("加载内置 GeoIP 失败: %v", err)
+	}
+	// 测试结束后卸载，避免影响其他用例（它们假设未加载数据库）
+	defer func() {
+		geoipMu.Lock()
+		if geoipDB != nil {
+			_ = geoipDB.Close()
+			geoipDB = nil
+		}
+		geoipMu.Unlock()
+	}()
+
+	if !GeoIPAvailable() {
+		t.Fatalf("加载后 GeoIPAvailable 应为 true")
+	}
+
+	// 只校验能解析出国家代码，不绑定具体国家（数据库会定期更新）
+	for _, ip := range []string{"8.8.8.8", "114.114.114.114", "2001:4860:4860::8888"} {
+		code, err := lookupCountry(net.ParseIP(ip))
+		if err != nil {
+			t.Errorf("解析 %s 失败: %v", ip, err)
+			continue
+		}
+		if code == "" {
+			t.Errorf("%s 未解析出国家代码", ip)
+		}
+	}
+
+	// 私有地址通常无归属记录 → 空字符串且无错误
+	if code, err := lookupCountry(net.ParseIP("192.168.1.1")); err != nil {
+		t.Errorf("私有地址解析不应报错: %v", err)
+	} else if code != "" {
+		t.Errorf("私有地址不应有国家代码，实际 %q", code)
+	}
+}
+
+// TestBuiltinGeoFirewall 验证内置数据库接入防火墙国家规则
+func TestBuiltinGeoFirewall(t *testing.T) {
+	if err := LoadBuiltinGeoDatabase(); err != nil {
+		t.Fatalf("加载内置 GeoIP 失败: %v", err)
+	}
+	defer func() {
+		geoipMu.Lock()
+		if geoipDB != nil {
+			_ = geoipDB.Close()
+			geoipDB = nil
+		}
+		geoipMu.Unlock()
+	}()
+
+	// 明确一个可解析的 IP 与其国家，然后黑名单该国家 → 应拒绝
+	ip := net.ParseIP("114.114.114.114")
+	code, err := lookupCountry(ip)
+	if err != nil || code == "" {
+		t.Skipf("数据库未覆盖该 IP，跳过: %v", err)
+	}
+	fw := mustFW(t, &config.FirewallConfig{Enabled: true, Countries: []string{code}}, defaultGeoResolver{})
+	if fw.Allow(ip) {
+		t.Errorf("黑名单国家 %s 应拒绝 %s", code, ip)
+	}
+
+	// 白名单该国家 → 放行
+	fw2 := mustFW(t, &config.FirewallConfig{
+		Enabled: true, Mode: config.FirewallWhitelist, Countries: []string{code},
+	}, defaultGeoResolver{})
+	if !fw2.Allow(ip) {
+		t.Errorf("白名单国家 %s 应放行 %s", code, ip)
+	}
+}
+
 // TestBuildServerWithFirewall 验证 BuildServer 正确装配防火墙
 func TestBuildServerWithFirewall(t *testing.T) {
 	_, err := BuildServer(config.ProxyListener{
