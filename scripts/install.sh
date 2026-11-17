@@ -7,7 +7,8 @@
 #   2. 从 GitHub Release 获取最新版本号
 #   3. 下载对应平台的二进制资产
 #   4. 安装到 /usr/local/bin（需要 root 或 sudo）
-#   5. 安装后调用 --version 与 --check-update 验证
+#   5. 默认安装为 systemd 服务，以 WEB 模式运行（可用 --no-service 跳过）
+#   6. 安装后调用 --version 与 --check-update 验证
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/xuanlove/SSHTunnel/main/scripts/install.sh | sudo bash
@@ -18,9 +19,15 @@
 #   -r, --repo owner/repo   GitHub 仓库（默认 xuanlove/SSHTunnel）
 #   -v, --version VERSION   安装指定版本而非最新（如 v1.0.0）
 #   -d, --dir PATH          安装目录（默认 /usr/local/bin）
-#   -s, --service           安装为 systemd 服务（交互式配置端口/密码）
+#   -s, --service           安装为 systemd 服务（默认启用，保留此选项兼容旧用法）
+#   -n, --no-service        仅安装二进制，不安装 systemd 服务
 #   -u, --upgrade           升级模式：保留现有配置，仅替换二进制
 #   -h, --help              显示帮助
+#
+# 服务参数（非交互模式 / 管道安装时生效，交互终端下会询问）：
+#   WEB_HOST   监听地址（默认 127.0.0.1）
+#   WEB_PORT   监听端口（默认 8080）
+#   WEB_AUTH   访问密码 user:password（默认无密码）
 #
 set -euo pipefail
 
@@ -28,7 +35,7 @@ set -euo pipefail
 REPO="xuanlove/SSHTunnel"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="sshtunnel"
-INSTALL_SERVICE=false
+INSTALL_SERVICE=true   # 默认安装为 systemd 服务（WEB 模式）
 UPGRADE_MODE=false
 TARGET_VERSION=""
 
@@ -61,22 +68,31 @@ ${BOLD}选项:${NC}
   -r, --repo owner/repo   GitHub 仓库（默认 ${REPO}）
   -v, --version VERSION    安装指定版本而非最新（如 v1.0.0）
   -d, --dir PATH           安装目录（默认 ${INSTALL_DIR}）
-  -s, --service            安装为 systemd 服务（交互式配置端口/密码）
+  -s, --service            安装为 systemd 服务（默认启用，保留兼容）
+  -n, --no-service         仅安装二进制，不安装 systemd 服务
   -u, --upgrade            升级模式：保留现有配置，仅替换二进制
   -h, --help               显示此帮助
 
+${BOLD}服务参数${NC}（非交互模式生效，交互终端下会询问）:
+  WEB_HOST   监听地址（默认 127.0.0.1）
+  WEB_PORT   监听端口（默认 8080）
+  WEB_AUTH   访问密码 user:password（默认无密码）
+
 ${BOLD}示例:${NC}
-  # 一键安装最新版
+  # 一键安装最新版（默认安装为 WEB 模式的 systemd 服务）
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | sudo bash
 
   # 安装指定版本
   sudo bash install.sh -v v1.0.0
 
+  # 仅安装二进制，不注册服务
+  sudo bash install.sh --no-service
+
+  # 非交互配置服务（管道安装场景）
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | sudo WEB_PORT=8090 WEB_AUTH=admin:pass bash
+
   # 升级（保留配置）
   sudo bash install.sh -u
-
-  # 安装并注册为 systemd 服务
-  sudo bash install.sh -s
 EOF
     exit 0
 }
@@ -88,6 +104,7 @@ while [[ $# -gt 0 ]]; do
         -v|--version)  TARGET_VERSION="$2"; shift 2 ;;
         -d|--dir)      INSTALL_DIR="$2"; shift 2 ;;
         -s|--service)  INSTALL_SERVICE=true; shift ;;
+        -n|--no-service) INSTALL_SERVICE=false; shift ;;
         -u|--upgrade)  UPGRADE_MODE=true; shift ;;
         -h|--help)     show_help ;;
         *) error "未知参数: $1"; exit 1 ;;
@@ -109,6 +126,18 @@ check_command uname
 if [[ "$INSTALL_DIR" == /usr/* || "$INSTALL_DIR" == /opt/* ]] && [[ $EUID -ne 0 ]]; then
     error "安装到系统目录 ${INSTALL_DIR} 需要 root 权限，请使用 sudo 运行"
     exit 1
+fi
+
+# 服务安装需要 root 与 systemd
+if $INSTALL_SERVICE; then
+    if [[ $EUID -ne 0 ]]; then
+        error "默认安装为 systemd 服务，需要 root 权限：请使用 sudo 运行，或加 --no-service 仅安装二进制"
+        exit 1
+    fi
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "未检测到 systemctl（非 systemd 系统），跳过服务安装，仅安装二进制"
+        INSTALL_SERVICE=false
+    fi
 fi
 
 # ==================== 架构检测 ====================
@@ -239,27 +268,43 @@ verify_install() {
 }
 
 # ==================== systemd 服务安装 ====================
+# 以 WEB 模式安装为 systemd 服务。
+# 交互终端下询问监听地址/端口/密码；非交互（管道安装）时使用默认值或环境变量：
+#   WEB_HOST（默认 127.0.0.1）、WEB_PORT（默认 8080）、WEB_AUTH（user:password，默认无密码）
 install_service() {
     local target="${INSTALL_DIR}/${BINARY_NAME}"
     local svc_path="/etc/systemd/system/${BINARY_NAME}.service"
-    local web_port web_host auth
+    local web_host="${WEB_HOST:-127.0.0.1}"
+    local web_port="${WEB_PORT:-8080}"
+    local auth="${WEB_AUTH:-}"
+    local start_now="Y"
 
-    step "配置 systemd 服务"
-    echo "请回答以下问题（直接回车使用默认值）："
-    read -rp "WEB 监听地址 [127.0.0.1]: " web_host
-    web_host="${web_host:-127.0.0.1}"
-    read -rp "WEB 监听端口 [8080]: " web_port
-    web_port="${web_port:-8080}"
-    read -rp "访问密码（user:password，留空无密码）: " auth
+    # 仅交互终端下询问；管道场景避免 read 吞掉脚本内容
+    if [[ -t 0 ]]; then
+        step "配置 systemd 服务"
+        info "请回答以下问题（直接回车使用默认值）："
+        local input
+        read -rp "WEB 监听地址 [${web_host}]: " input; web_host="${input:-$web_host}"
+        read -rp "WEB 监听端口 [${web_port}]: " input; web_port="${input:-$web_port}"
+        read -rp "访问密码（user:password，留空无密码）: " input; auth="${input:-$auth}"
+        read -rp "立即启动服务？[Y/n]: " input; start_now="${input:-Y}"
+    fi
+
+    # 端口合法性校验（环境变量可能是非法值）
+    if ! [[ "$web_port" =~ ^[0-9]+$ ]] || (( web_port < 1 || web_port > 65535 )); then
+        error "无效的 WEB 端口: ${web_port}（应为 1-65535）"
+        exit 1
+    fi
 
     local exec_args="--mode=web --web-host=${web_host} --web-port=${web_port}"
     if [[ -n "$auth" ]]; then
         exec_args="${exec_args} --auth=${auth}"
     fi
 
+    step "安装 systemd 服务"
     cat > "$svc_path" <<EOF
 [Unit]
-Description=SSH Tunnel Manager (WEB mode)
+Description=SSHTunnel (WEB mode)
 After=network-online.target
 Wants=network-online.target
 
@@ -268,26 +313,32 @@ Type=simple
 ExecStart=${target} ${exec_args}
 Restart=on-failure
 RestartSec=5
-# 配置文件存放于用户配置目录，无需特殊权限
-AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable "${BINARY_NAME}.service"
-    info "服务已安装: ${svc_path}"
-    info "启动: sudo systemctl start ${BINARY_NAME}"
-    info "状态: sudo systemctl status ${BINARY_NAME}"
-    info "日志: sudo journalctl -u ${BINARY_NAME} -f"
+    systemctl enable "${BINARY_NAME}.service" >/dev/null 2>&1
+    info "服务已安装并设为开机自启: ${svc_path}"
 
-    read -rp "立即启动服务？[Y/n]: " start_now
-    if [[ "${start_now:-Y}" =~ ^[Yy]$ ]]; then
-        systemctl start "${BINARY_NAME}"
+    if [[ "$start_now" =~ ^[Yy]$ ]]; then
+        # restart：未运行则启动，已运行（升级场景）则应用新二进制
+        systemctl restart "${BINARY_NAME}"
         sleep 1
-        systemctl --no-pager status "${BINARY_NAME}" || true
+        if systemctl is-active --quiet "${BINARY_NAME}"; then
+            local addr="${web_host}"
+            [[ "$addr" == "0.0.0.0" || "$addr" == "::" ]] && addr="<本机IP>"
+            info "服务已启动，WEB 面板: http://${addr}:${web_port}"
+        else
+            warn "服务启动失败，请查看日志: journalctl -u ${BINARY_NAME} -e"
+        fi
+    else
+        info "稍后启动: sudo systemctl start ${BINARY_NAME}"
     fi
+
+    info "常用命令: systemctl status|restart|stop ${BINARY_NAME}"
+    info "实时日志: journalctl -u ${BINARY_NAME} -f"
 }
 
 # ==================== 主流程 ====================
@@ -331,7 +382,7 @@ main() {
     # 验证
     verify_install
 
-    # 可选：systemd 服务
+    # 默认安装 systemd 服务（WEB 模式）；--no-service 跳过
     if $INSTALL_SERVICE; then
         install_service
     fi
@@ -344,7 +395,6 @@ main() {
     info "检查更新: ${BINARY_NAME} --check-update"
     if ! $INSTALL_SERVICE; then
         info "启动 WEB 面板: ${BINARY_NAME} --mode=web --web-port=8080"
-        info "安装为服务: sudo bash install.sh -s -v ${INSTALLED_VERSION}"
     fi
 }
 

@@ -90,14 +90,15 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 curl -fsSL https://raw.githubusercontent.com/xuanlove/SSHTunnel/main/scripts/install.sh | sudo bash
 ```
 
-安装完成后：
+默认会安装为 **systemd 服务并以 WEB 模式运行**（监听 `127.0.0.1:8080`，开机自启）。安装完成后：
 
 ```bash
-sshtunnel --version          # 查看版本
-sshtunnel --mode=web --web-port=8090 --auth=admin:yourpassword
+sshtunnel --version                # 查看版本
+systemctl status sshtunnel         # 查看服务状态
+journalctl -u sshtunnel -f         # 实时日志
 ```
 
-浏览器访问 `http://<服务器IP>:8090` 进入管理面板。
+浏览器访问 `http://<服务器IP>:8080` 进入管理面板（如需公网访问或密码保护，见 [安装](#安装) 中的 `WEB_HOST` / `WEB_AUTH` 配置）。
 
 ### 下载预编译二进制
 
@@ -120,18 +121,24 @@ sshtunnel --mode=web --web-port=8090 --auth=admin:yourpassword
 
 ### 方式一：安装脚本（推荐）
 
+默认安装为 **systemd 服务（WEB 模式，开机自启）**，可用 `--no-service` 仅安装二进制：
+
 ```bash
-# 安装最新版
+# 安装最新版（默认注册 systemd 服务并启动）
 curl -fsSL https://raw.githubusercontent.com/xuanlove/SSHTunnel/main/scripts/install.sh | sudo bash
+
+# 非交互配置服务参数（管道安装场景）
+curl -fsSL https://raw.githubusercontent.com/xuanlove/SSHTunnel/main/scripts/install.sh | \
+  sudo WEB_HOST=0.0.0.0 WEB_PORT=8090 WEB_AUTH=admin:yourpassword bash
 
 # 安装指定版本
 sudo bash scripts/install.sh -v v1.1.0
 
-# 升级模式（保留现有配置，仅替换二进制）
-sudo bash scripts/install.sh -u
+# 仅安装二进制，不注册 systemd 服务
+sudo bash scripts/install.sh --no-service
 
-# 安装并注册为 systemd 服务（交互式配置端口/密码）
-sudo bash scripts/install.sh -s
+# 升级模式（保留现有配置，仅替换二进制；服务自动重启生效）
+sudo bash scripts/install.sh -u
 ```
 
 脚本选项：
@@ -139,11 +146,20 @@ sudo bash scripts/install.sh -s
 | 选项 | 说明 |
 |------|------|
 | `-r, --repo owner/repo` | GitHub 仓库（默认 `xuanlove/SSHTunnel`） |
-| `-v, --version VERSION` | 安装指定版本而非最新（如 `v1.1.0`） |
+| `-v, --version VERSION` | 安装指定版本而非最新（如 `v1.1.0`，缺 `v` 前缀自动补全） |
 | `-d, --dir PATH` | 安装目录（默认 `/usr/local/bin`） |
-| `-s, --service` | 安装为 systemd 服务（交互式配置端口/密码） |
+| `-s, --service` | 安装为 systemd 服务（默认启用，保留兼容） |
+| `-n, --no-service` | 仅安装二进制，不安装 systemd 服务 |
 | `-u, --upgrade` | 升级模式：保留配置，仅替换二进制 |
 | `-h, --help` | 显示帮助 |
+
+服务参数环境变量（交互终端下会逐项询问；管道/非交互安装时读取这些变量）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `WEB_HOST` | `127.0.0.1` | WEB 监听地址（公网访问用 `0.0.0.0`） |
+| `WEB_PORT` | `8080` | WEB 监听端口 |
+| `WEB_AUTH` | 空 | 访问密码 `user:password`，留空无密码 |
 
 ### 方式二：systemd 服务部署（根目录脚本）
 
