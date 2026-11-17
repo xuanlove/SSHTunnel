@@ -134,7 +134,8 @@ detect_platform() {
 }
 
 # ==================== 获取最新版本 ====================
-# 利用 GitHub /releases/latest 的 302 重定向解析最新 tag，无需 jq
+# 利用 GitHub /releases/latest 的 302 重定向解析最新 tag，无需 jq。
+# 相比 api.github.com 不受未认证请求限流影响。
 get_latest_version() {
     local url="https://github.com/${REPO}/releases/latest"
     local final_url
@@ -147,10 +148,21 @@ get_latest_version() {
     # 最终 URL 形如 https://github.com/owner/repo/releases/tag/v1.0.0
     local tag="${final_url##*/tag/}"
     if [[ -z "$tag" || "$tag" == "$final_url" ]]; then
-        error "解析版本号失败: $final_url"
+        error "解析版本号失败: ${final_url}"
+        error "可能原因：仓库 ${REPO} 不存在，或尚无任何 Release"
         exit 1
     fi
     echo "$tag"
+}
+
+# 规范化版本标签：GitHub Release 标签约定为 vX.Y.Z。
+# 用户通过 -v 输入 1.1.0（缺 v 前缀）时自动补 v，避免资产 URL 404。
+normalize_version() {
+    local v="$1"
+    if [[ "$v" != v* && "$v" =~ ^[0-9] ]]; then
+        v="v${v}"
+    fi
+    echo "$v"
 }
 
 # ==================== 下载二进制 ====================
@@ -164,7 +176,7 @@ download_binary() {
 
     if ! curl -fSL --progress-bar -o "$tmp_file" "$download_url"; then
         error "下载失败。可能该版本未提供 ${PLATFORM} 二进制。"
-        error "请前往 https://github.com/${REPO}/releases 查看可用资产"
+        error "请确认标签存在（如 v1.1.0），或访问 https://github.com/${REPO}/releases 查看可用资产"
         rm -f "$tmp_file"
         exit 1
     fi
@@ -281,7 +293,12 @@ main() {
 
     # 确定版本
     if [[ -n "$TARGET_VERSION" ]]; then
-        INSTALLED_VERSION="$TARGET_VERSION"
+        local normalized
+        normalized="$(normalize_version "$TARGET_VERSION")"
+        if [[ "$normalized" != "$TARGET_VERSION" ]]; then
+            info "版本号已规范化: ${TARGET_VERSION} -> ${normalized}"
+        fi
+        INSTALLED_VERSION="$normalized"
         info "使用指定版本: ${INSTALLED_VERSION}"
     else
         step "获取最新版本"
