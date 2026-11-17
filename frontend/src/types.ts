@@ -42,8 +42,11 @@ export interface FirewallConfig {
   mode: FirewallMode
   // 自定义 IP / CIDR，支持 IPv4 与 IPv6（如 10.0.0.0/8、203.0.113.7、2001:db8::/32）
   ips?: string[]
-  // GeoIP 国家代码（ISO 3166-1 alpha-2，如 CN、US），需服务器配置 GeoLite2 数据库
+  // GeoIP 国家代码（ISO 3166-1 alpha-2，如 CN、US），内置 Country 库即可生效
   countries?: string[]
+  // 城市级规则「国家/省/城市」，各段支持 * 通配，如 CN/GD/Shenzhen、CN/*/Shenzhen
+  // 需要启用城市级 GeoLite2-City 数据库（系统设置中下载并开启）
+  cities?: string[]
 }
 
 export interface ProxyListener {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as api from '@/api'
 
@@ -15,6 +15,7 @@ const authSaving = ref(false)
 const authLoaded = ref(false)
 
 onMounted(async () => {
+  await loadGeoStatus()
   if (!isWebMode) return
   try {
     const s = await api.getWebAuthSettings()
@@ -48,6 +49,52 @@ async function handleSaveAuth() {
     authSaving.value = false
   }
 }
+
+// ===== GeoIP 城市数据库 =====
+const geoStatus = ref<api.GeoIPStatus | null>(null)
+const geoDownloading = ref(false)
+const geoSwitching = ref(false)
+
+async function loadGeoStatus() {
+  try {
+    geoStatus.value = await api.getGeoIPStatus()
+  } catch {
+    // 忽略：状态不可用时不展示详情
+  }
+}
+
+async function handleDownloadGeo() {
+  geoDownloading.value = true
+  try {
+    geoStatus.value = await api.downloadGeoIPDatabase()
+    ElMessage.success('城市数据库下载完成，可开启「启用城市级数据库」')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '下载失败')
+  } finally {
+    geoDownloading.value = false
+  }
+}
+
+async function handleToggleGeo(enabled: boolean) {
+  geoSwitching.value = true
+  try {
+    geoStatus.value = await api.setGeoIPEnabled(enabled)
+    ElMessage.success(enabled ? '已启用城市级数据库' : '已切换回内置 Country 数据库')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '切换失败')
+    await loadGeoStatus()
+  } finally {
+    geoSwitching.value = false
+  }
+}
+
+function formatSize(bytes: number): string {
+  if (!bytes) return '-'
+  if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024).toFixed(0)} KB`
+}
+
+const geoCityDownloaded = computed(() => !!geoStatus.value?.city_db_exists)
 
 async function handleCheckPort() {
   try {
@@ -105,6 +152,46 @@ async function handleGenCert() {
         <el-button type="primary" :loading="authSaving" :disabled="!authLoaded" @click="handleSaveAuth">
           保存
         </el-button>
+      </div>
+    </el-card>
+
+    <el-card class="panel">
+      <template #header><span>GeoIP 城市级数据库</span></template>
+      <p class="desc">
+        内置数据库精确到国家（约 3.3MB）；如需在代理防火墙中按「城市」过滤，请下载城市级数据库（约 49MB，服务端从公开镜像下载）。
+      </p>
+      <div class="info-row">
+        <span class="label">当前数据库</span>
+        <span>{{ geoStatus?.type === 'City' ? '城市级（GeoLite2-City）' : '内置国家库（GeoLite2-Country）' }}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">数据来源</span>
+        <span>{{ geoStatus?.source === 'builtin' ? '内置' : (geoStatus?.source || '-') }}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">大小</span>
+        <span>{{ formatSize(geoStatus?.size_bytes || 0) }}</span>
+      </div>
+      <div class="info-row" v-if="geoStatus?.updated_at">
+        <span class="label">更新时间</span>
+        <span>{{ geoStatus.updated_at }}</span>
+      </div>
+      <div class="geo-actions">
+        <el-button type="primary" :loading="geoDownloading" @click="handleDownloadGeo">
+          {{ geoDownloading ? '下载中…（约 49MB，请耐心等待）' : (geoCityDownloaded ? '更新城市数据库' : '下载城市数据库') }}
+        </el-button>
+        <el-switch
+          :model-value="!!geoStatus?.enabled"
+          active-text="启用城市级数据库"
+          :disabled="!geoCityDownloaded || geoSwitching"
+          @update:model-value="(v: string | number | boolean) => handleToggleGeo(!!v)"
+        />
+      </div>
+      <div class="fw-tip" v-if="!geoCityDownloaded">
+        尚未下载城市数据库，启用开关将在下载完成后可用。
+      </div>
+      <div class="fw-tip" v-else-if="!geoStatus?.enabled">
+        已下载但未启用，当前仍使用内置国家库；城市规则不会生效。
       </div>
     </el-card>
 
@@ -173,5 +260,18 @@ async function handleGenCert() {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+.geo-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.fw-tip {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #ebb563;
+  line-height: 1.5;
 }
 </style>

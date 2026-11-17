@@ -193,5 +193,33 @@ func (a *App) GeoIPAvailable() bool {
 	return proxy.GeoIPAvailable()
 }
 
+// GeoIPStatus 返回当前 GeoIP 能力状态（桌面端）
+func (a *App) GeoIPStatus() proxy.GeoIPStatus {
+	return proxy.CurrentGeoIPStatus()
+}
+
+// DownloadGeoIPDatabase 下载/更新城市级数据库（桌面端）
+func (a *App) DownloadGeoIPDatabase(url string) (proxy.GeoIPStatus, error) {
+	if _, _, err := proxy.DownloadCityDatabase(url); err != nil {
+		return proxy.CurrentGeoIPStatus(), err
+	}
+	return proxy.CurrentGeoIPStatus(), nil
+}
+
+// SetGeoIPEnabled 启用/关闭城市级数据库（桌面端，热加载）
+func (a *App) SetGeoIPEnabled(enabled bool) (proxy.GeoIPStatus, error) {
+	if enabled {
+		if err := proxy.LoadGeoIPDatabaseFile(proxy.CityDatabasePath()); err != nil {
+			return proxy.CurrentGeoIPStatus(), err
+		}
+	} else if err := proxy.LoadBuiltinGeoDatabase(); err != nil {
+		return proxy.CurrentGeoIPStatus(), err
+	}
+	if err := proxy.SaveGeoIPSettings(proxy.GeoIPSettings{Enabled: enabled}); err != nil {
+		return proxy.CurrentGeoIPStatus(), err
+	}
+	return proxy.CurrentGeoIPStatus(), nil
+}
+
 // 用于上下文传递（保留 context 引用）
 var _ = context.Background

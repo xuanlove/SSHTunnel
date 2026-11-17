@@ -276,6 +276,42 @@ export async function geoIPAvailable(): Promise<boolean> {
   }
 }
 
+// ===== GeoIP 城市级数据库 =====
+export interface GeoIPStatus {
+  loaded: boolean
+  type: string // Country | City
+  source: string // builtin 或文件路径
+  size_bytes: number
+  updated_at: string
+  city_ready: boolean
+  city_db_cache: string
+  city_db_exists: boolean
+  enabled: boolean
+}
+
+export async function getGeoIPStatus(): Promise<GeoIPStatus> {
+  if (!isWeb) {
+    return Call.ByName('App.GeoIPStatus') as Promise<GeoIPStatus>
+  }
+  return httpGet<GeoIPStatus>('/api/geoip/status')
+}
+
+// 下载 / 更新城市级数据库（约 49MB，服务端发起下载）；url 可选，用于指定自定义下载地址
+export async function downloadGeoIPDatabase(url = ''): Promise<GeoIPStatus> {
+  if (!isWeb) {
+    return Call.ByName('App.DownloadGeoIPDatabase', url) as Promise<GeoIPStatus>
+  }
+  return httpPost<GeoIPStatus>('/api/geoip/download', { url })
+}
+
+// 启用 / 关闭城市级数据库（立即热加载，无需重启）
+export async function setGeoIPEnabled(enabled: boolean): Promise<GeoIPStatus> {
+  if (!isWeb) {
+    return Call.ByName('App.SetGeoIPEnabled', enabled) as Promise<GeoIPStatus>
+  }
+  return httpPut<GeoIPStatus>('/api/geoip/settings', { enabled })
+}
+
 // ===== WEB 访问密码设置（仅 WEB 模式）=====
 export interface WebAuthSettings {
   enabled: boolean

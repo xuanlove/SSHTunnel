@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -11,14 +12,14 @@ import (
 	"sshtunnel/internal/port"
 )
 
-// stubGeo 测试用国家解析器
-type stubGeo map[string]string // ip -> country
+// stubGeo 测试用地理信息解析器：ip -> GeoInfo
+type stubGeo map[string]*GeoInfo
 
-func (s stubGeo) Country(ip net.IP) (string, error) {
-	if c, ok := s[ip.String()]; ok {
-		return c, nil
+func (s stubGeo) Lookup(ip net.IP) (*GeoInfo, error) {
+	if g, ok := s[ip.String()]; ok {
+		return g, nil
 	}
-	return "", nil
+	return nil, nil
 }
 
 func mustFW(t *testing.T, cfg *config.FirewallConfig, geo GeoResolver) *Firewall {
@@ -108,9 +109,9 @@ func TestFirewallIPv6Single(t *testing.T) {
 // TestFirewallGeoIP 国家规则（IP 与国家取并集）
 func TestFirewallGeoIP(t *testing.T) {
 	geo := stubGeo{
-		"1.2.3.4":      "CN",
-		"5.6.7.8":      "US",
-		"2001:db8::aa": "JP",
+		"1.2.3.4":      {Country: "CN", ProvinceCode: "BJ", Province: "Beijing", City: "Beijing"},
+		"5.6.7.8":      {Country: "US", ProvinceCode: "CA", Province: "California", City: "San Francisco"},
+		"2001:db8::aa": {Country: "JP", ProvinceCode: "13", Province: "Tokyo", City: "Tokyo"},
 	}
 	// 黑名单：拒绝 CN
 	fw := mustFW(t, &config.FirewallConfig{Enabled: true, Countries: []string{"cn"}}, geo)
@@ -133,20 +134,79 @@ func TestFirewallGeoIP(t *testing.T) {
 	}
 }
 
-// TestFirewallGeoIPWithoutDB 未配置 GeoIP 时国家规则不命中（白名单下拒绝）
+// TestFirewallCities 城市规则：国家/省/城市，支持 * 通配与省代码或英文名
+func TestFirewallCities(t *testing.T) {
+	geo := stubGeo{
+		"1.1.1.1": {Country: "CN", ProvinceCode: "GD", Province: "Guangdong", City: "Shenzhen"},
+		"2.2.2.2": {Country: "CN", ProvinceCode: "BJ", Province: "Beijing", City: "Beijing"},
+		"3.3.3.3": {Country: "US", ProvinceCode: "CA", Province: "California", City: "San Francisco"},
+		"4.4.4.4": {Country: "JP", ProvinceCode: "13", Province: "Tokyo", City: "Tokyo"},
+	}
+
+	cases := []struct {
+		name  string
+		rules []string
+		ip    string
+		want  bool // 黑名单模式下 Allow 结果
+	}{
+		{"精确城市-省代码", []string{"CN/GD/Shenzhen"}, "1.1.1.1", false},
+		{"精确城市-省英文名", []string{"CN/Guangdong/Shenzhen"}, "1.1.1.1", false},
+		{"大小写不敏感", []string{"cn/gd/shenzhen"}, "1.1.1.1", false},
+		{"城市不匹配", []string{"CN/GD/Guangzhou"}, "1.1.1.1", true},
+		{"国家通配", []string{"*/GD/Shenzhen"}, "1.1.1.1", false},
+		{"省通配", []string{"CN/*/Shenzhen"}, "1.1.1.1", false},
+		{"城市通配", []string{"CN/GD/*"}, "1.1.1.1", false},
+		{"全省通配不匹配北京", []string{"CN/GD/*"}, "2.2.2.2", true},
+		{"任意城市", []string{"CN/*/*"}, "2.2.2.2", false},
+		{"多规则命中其一", []string{"US/CA/*", "JP/*/Tokyo"}, "4.4.4.4", false},
+		{"多规则未命中", []string{"US/CA/*", "JP/*/Osaka"}, "4.4.4.4", true},
+		{"仅国家段", []string{"US"}, "3.3.3.3", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fw := mustFW(t, &config.FirewallConfig{Enabled: true, Cities: c.rules}, geo)
+			if got := fw.Allow(net.ParseIP(c.ip)); got != c.want {
+				t.Errorf("Allow(%s) rules=%v = %v, want %v", c.ip, c.rules, got, c.want)
+			}
+		})
+	}
+
+	// 白名单：仅允许深圳
+	fw := mustFW(t, &config.FirewallConfig{
+		Enabled: true, Mode: config.FirewallWhitelist, Cities: []string{"CN/GD/Shenzhen"},
+	}, geo)
+	if !fw.Allow(net.ParseIP("1.1.1.1")) {
+		t.Errorf("白名单命中深圳应放行")
+	}
+	if fw.Allow(net.ParseIP("2.2.2.2")) {
+		t.Errorf("白名单未命中应拒绝")
+	}
+}
+
+// TestFirewallCityRuleParseError 非法城市规则应报错
+func TestFirewallCityRuleParseError(t *testing.T) {
+	if _, err := NewFirewall(&config.FirewallConfig{
+		Enabled: true, Cities: []string{"CN/GD"},
+	}, nil); err == nil {
+		t.Errorf("两段式城市规则应报错")
+	}
+}
+
+// TestFirewallGeoIPWithoutDB 未加载数据库时国家/城市规则不命中
 func TestFirewallGeoIPWithoutDB(t *testing.T) {
 	fw := mustFW(t, &config.FirewallConfig{
 		Enabled: true, Mode: config.FirewallWhitelist, Countries: []string{"CN"},
 	}, defaultGeoResolver{})
-	// 未加载数据库：无法判定 → 白名单拒绝
 	if fw.Allow(net.ParseIP("1.2.3.4")) {
 		t.Errorf("无 GeoIP 数据库时白名单应拒绝")
 	}
-
-	// 黑名单模式下无数据库 → 放行
 	fw2 := mustFW(t, &config.FirewallConfig{Enabled: true, Countries: []string{"CN"}}, defaultGeoResolver{})
 	if !fw2.Allow(net.ParseIP("1.2.3.4")) {
 		t.Errorf("无 GeoIP 数据库时黑名单应放行")
+	}
+	fw3 := mustFW(t, &config.FirewallConfig{Enabled: true, Cities: []string{"CN/GD/Shenzhen"}}, defaultGeoResolver{})
+	if !fw3.Allow(net.ParseIP("1.2.3.4")) {
+		t.Errorf("无数据库时黑名单城市规则应放行")
 	}
 }
 
@@ -175,77 +235,88 @@ func TestFirewallNilIP(t *testing.T) {
 	}
 }
 
-// TestBuiltinGeoDatabase 验证内置 GeoLite2 数据库可加载并正确解析 IPv4/IPv6
+// TestBuiltinGeoDatabase 验证内置 GeoLite2-Country 可加载并解析 IPv4/IPv6
 func TestBuiltinGeoDatabase(t *testing.T) {
 	if err := LoadBuiltinGeoDatabase(); err != nil {
 		t.Fatalf("加载内置 GeoIP 失败: %v", err)
 	}
-	// 测试结束后卸载，避免影响其他用例（它们假设未加载数据库）
-	defer func() {
-		geoipMu.Lock()
-		if geoipDB != nil {
-			_ = geoipDB.Close()
-			geoipDB = nil
-		}
-		geoipMu.Unlock()
-	}()
+	defer unloadGeoDB()
 
 	if !GeoIPAvailable() {
 		t.Fatalf("加载后 GeoIPAvailable 应为 true")
 	}
-
-	// 只校验能解析出国家代码，不绑定具体国家（数据库会定期更新）
+	if st := CurrentGeoIPStatus(); st.Type != GeoDBTypeCountry {
+		t.Errorf("内置库类型应为 Country，实际 %s", st.Type)
+	}
 	for _, ip := range []string{"8.8.8.8", "114.114.114.114", "2001:4860:4860::8888"} {
-		code, err := lookupCountry(net.ParseIP(ip))
+		info, err := lookupGeo(net.ParseIP(ip))
 		if err != nil {
 			t.Errorf("解析 %s 失败: %v", ip, err)
 			continue
 		}
-		if code == "" {
+		if info == nil || info.Country == "" {
 			t.Errorf("%s 未解析出国家代码", ip)
 		}
 	}
-
-	// 私有地址通常无归属记录 → 空字符串且无错误
-	if code, err := lookupCountry(net.ParseIP("192.168.1.1")); err != nil {
+	if info, err := lookupGeo(net.ParseIP("192.168.1.1")); err != nil {
 		t.Errorf("私有地址解析不应报错: %v", err)
-	} else if code != "" {
-		t.Errorf("私有地址不应有国家代码，实际 %q", code)
+	} else if info != nil && info.Country != "" {
+		t.Errorf("私有地址不应有国家代码，实际 %q", info.Country)
 	}
 }
 
-// TestBuiltinGeoFirewall 验证内置数据库接入防火墙国家规则
+// TestBuiltinGeoFirewall 内置 Country 库驱动国家规则
 func TestBuiltinGeoFirewall(t *testing.T) {
 	if err := LoadBuiltinGeoDatabase(); err != nil {
 		t.Fatalf("加载内置 GeoIP 失败: %v", err)
 	}
-	defer func() {
-		geoipMu.Lock()
-		if geoipDB != nil {
-			_ = geoipDB.Close()
-			geoipDB = nil
-		}
-		geoipMu.Unlock()
-	}()
+	defer unloadGeoDB()
 
-	// 明确一个可解析的 IP 与其国家，然后黑名单该国家 → 应拒绝
 	ip := net.ParseIP("114.114.114.114")
-	code, err := lookupCountry(ip)
-	if err != nil || code == "" {
+	info, err := lookupGeo(ip)
+	if err != nil || info == nil || info.Country == "" {
 		t.Skipf("数据库未覆盖该 IP，跳过: %v", err)
 	}
-	fw := mustFW(t, &config.FirewallConfig{Enabled: true, Countries: []string{code}}, defaultGeoResolver{})
+	fw := mustFW(t, &config.FirewallConfig{Enabled: true, Countries: []string{info.Country}}, defaultGeoResolver{})
 	if fw.Allow(ip) {
-		t.Errorf("黑名单国家 %s 应拒绝 %s", code, ip)
+		t.Errorf("黑名单国家 %s 应拒绝 %s", info.Country, ip)
 	}
-
-	// 白名单该国家 → 放行
 	fw2 := mustFW(t, &config.FirewallConfig{
-		Enabled: true, Mode: config.FirewallWhitelist, Countries: []string{code},
+		Enabled: true, Mode: config.FirewallWhitelist, Countries: []string{info.Country},
 	}, defaultGeoResolver{})
 	if !fw2.Allow(ip) {
-		t.Errorf("白名单国家 %s 应放行 %s", code, ip)
+		t.Errorf("白名单国家 %s 应放行 %s", info.Country, ip)
 	}
+}
+
+// TestGeoIPSettingsPersistence 验证设置持久化
+func TestGeoIPSettingsPersistence(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	if s := LoadGeoIPSettings(); s.Enabled {
+		t.Errorf("默认应为未启用")
+	}
+	if err := SaveGeoIPSettings(GeoIPSettings{Enabled: true}); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	if s := LoadGeoIPSettings(); !s.Enabled {
+		t.Errorf("重新加载后应保持启用")
+	}
+	if got := CityDatabasePath(); got != filepath.Join(dir, "sshtunnel", "GeoLite2-City.mmdb") {
+		t.Errorf("城市库缓存路径不符: %s", got)
+	}
+}
+
+// unloadGeoDB 测试辅助：卸载全局数据库，避免用例间相互影响
+func unloadGeoDB() {
+	geoipMu.Lock()
+	if geoipDB != nil {
+		_ = geoipDB.Close()
+		geoipDB = nil
+	}
+	geoipSource, geoipType, geoipSize = "", "", 0
+	geoipMu.Unlock()
 }
 
 // TestBuildServerWithFirewall 验证 BuildServer 正确装配防火墙

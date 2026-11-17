@@ -62,7 +62,7 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **认证方式**：密码认证 / 密钥认证（密钥以 PEM 文本形式存储，便于跨设备同步）
 - **自动重连**：SSH 断开后指数退避重连（初始 2s，上限 60s，可配置无限重试）
 - **端口冲突检测**：监听启动前自动检测端口占用，避免冲突
-- **代理防火墙**：每个代理监听端口可独立配置简易防火墙，支持黑名单（默认）/白名单模式、自定义 IP 与 IP 段（IPv4 + IPv6 CIDR）、GeoIP 国家规则（**内置 GeoLite2 数据库，开箱即用**）
+- **代理防火墙**：每个代理监听端口可独立配置简易防火墙，支持黑名单（默认）/白名单模式、自定义 IP 与 IP 段（IPv4 + IPv6 CIDR）、GeoIP 国家规则（**内置 GeoLite2-Country，开箱即用**）与城市级规则（按需下载 GeoLite2-City）
 - **代理连通性自检**：每个代理监听器可一键「测试代理端口」，经该监听端口访问 `https://api.ip.sb/ip` 并显示出口 IP，直观验证隧道是否走通
 
 ### 代理协议细节
@@ -294,7 +294,7 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 | `--version` | - | 打印版本信息并退出 |
 | `--check-update` | - | 检查 GitHub Release 是否有新版本并退出 |
 | `--repo` | `xuanlove/SSHTunnel` | GitHub 仓库（owner/repo），用于版本检查 |
-| `--geoip-db` | 空（内置） | GeoLite2-Country `.mmdb` 路径；留空使用内置数据库，`none` 禁用（影响代理防火墙国家规则） |
+| `--geoip-db` | 空（按系统设置） | GeoIP `.mmdb` 路径（Country 或 City）；留空时按系统设置加载（未启用则用内置 Country 库），`none` 禁用（影响代理防火墙国家/城市规则） |
 
 ### 版本检查
 
@@ -414,7 +414,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 - 是否允许外部访问（`0.0.0.0` 或 `127.0.0.1`）
 - 认证配置（HTTP Basic / SOCKS5 用户名密码 / SOCKS4 UserID）
 - TLS 证书（仅 HTTPS，可在设置页一键生成自签证书）
-- **简易防火墙**（可选，默认不启用）：黑名单/白名单模式、自定义 IP 与 IP 段、GeoIP 国家规则
+- **简易防火墙**（可选，默认不启用）：黑名单/白名单模式、自定义 IP 与 IP 段、GeoIP 国家规则与城市级规则
 
 防火墙配置示例（`proxy_listeners[].firewall`）：
 
@@ -428,18 +428,32 @@ user1@host1:22, user2@host2:2222, user3@host3
     "2001:db8::/32",                // IPv6 CIDR
     "2001:db8::dead:beef"           // 单个 IPv6
   ],
-  "countries": ["CN", "US"]         // GeoIP 国家代码，需服务器配置 GeoLite2 数据库
+  "countries": ["CN", "US"],        // GeoIP 国家代码（内置 Country 库即可生效）
+  "cities": [                       // 城市级规则「国家/省/城市」，需启用 City 库
+    "CN/GD/Shenzhen",
+    "CN/*/Shenzhen",                // 省通配
+    "*/GD/*"                        // 国家/城市通配
+  ]
 }
 ```
 
-匹配语义：IP 规则与 GeoIP 国家规则取**并集**（任一命中即视为命中名单）。
+匹配语义：IP 规则、GeoIP 国家规则与城市规则取**并集**（任一命中即视为命中名单）。
 
 | 模式 | 命中名单 | 未命中 |
 |------|----------|--------|
 | `blacklist`（默认） | 拒绝 | 放行 |
 | `whitelist` | 放行 | 拒绝 |
 
-> GeoIP 国家规则使用**编译期内置**的 GeoLite2-Country 数据库，无需任何额外配置即可使用；可用 `--geoip-db /path/to.mmdb` 指定外部（更新版）数据库覆盖，或用 `--geoip-db none` 禁用国家规则。IP/IP 段规则始终可用。
+> GeoIP 国家规则使用**编译期内置**的 GeoLite2-Country 数据库，无需任何额外配置即可使用；可用 `--geoip-db /path/to.mmdb` 指定外部数据库覆盖，或用 `--geoip-db none` 禁用。IP/IP 段规则始终可用。
+
+#### 城市级 GeoIP（GeoLite2-City）
+
+内置数据库只精确到国家。如需按城市过滤，请在 **系统设置 → GeoIP 城市级数据库** 点击「下载城市数据库」（约 49MB，服务端从公开镜像下载，保存到配置目录下的 `GeoLite2-City.mmdb`），下载完成后打开「启用城市级数据库」开关，**即时热加载、无需重启**；可随时再次点击「更新城市数据库」获取新数据。
+
+- 城市规则格式为 `国家/省/城市`，各段可用 `*` 通配；省支持 ISO 3166-2 代码（`GD`）或英文名（`Guangdong`），城市使用英文名（`Shenzhen`），匹配不区分大小写
+- 关闭开关即回退到内置国家库（城市规则不再生效，国家与 IP 规则不受影响）
+- 已启用但城市库文件缺失/损坏时，启动会自动回退内置国家库并记录告警
+- 也可用 `--geoip-db` 显式指定任意 Country / City 类型的 `.mmdb` 文件
 
 ### 代理端口连通性测试
 
@@ -485,6 +499,9 @@ user1@host1:22, user2@host2:2222, user3@host3
 | GET | `/api/version/check` | 检查 GitHub Release 新版本 |
 | GET | `/api/auth/settings` | 查询访问密码设置（是否开启、用户名） |
 | PUT | `/api/auth/settings` | 开启/关闭访问密码并设置凭据（开启成功返回 token） |
+| GET | `/api/geoip/status` | 查询 GeoIP 状态（当前库类型、来源、大小、是否已下载城市库、是否启用） |
+| POST | `/api/geoip/download` | 下载/更新 GeoLite2-City 数据库（可选 body `{"url": "..."}` 指定地址），完成后热加载 |
+| PUT | `/api/geoip/settings` | 启用/关闭城市级数据库（body `{"enabled": true}`），启用前校验文件已下载 |
 
 ### WebSocket 端点
 
@@ -607,6 +624,8 @@ SSH 多跳串联拨号与隧道 Dial 复用。
   - `socks4.go` — SOCKS4/4a 实现（UserID 认证 + 域名直连）
   - `cert.go` — ECDSA P-256 自签证书生成（10 年有效期）
   - `auth.go` — 统一认证辅助
+  - `firewall.go` — 简易防火墙（IP/国家/城市规则匹配）
+  - `geoip.go` — GeoIP 数据库管理（内置 Country 库、城市库下载与热加载、设置持久化）
   - `util.go` — `Bridge` 双向桥接
 - **设计要点**：
   - 接口抽象 + `BaseServer` 嵌入复用，`BuildServer` 工厂按协议分发
@@ -668,7 +687,7 @@ WEB API 服务器 + JWT 鉴权 + WebSocket 实时推送 + 嵌入式前端 SPA �
 | `ConfigEdit.vue` | 隧道配置编辑表单，嵌入 HopEditor 与 ProxyListenerEditor，支持连接测试 |
 | `Login.vue` | WEB 模式登录页 |
 | `Logs.vue` | 日志查看器，按级别与关键字过滤，彩色标签 |
-| `Settings.vue` | 系统设置（端口检测、自签证书生成、版本信息） |
+| `Settings.vue` | 系统设置（GeoIP 城市库下载/启用、端口检测、自签证书生成、版本信息） |
 
 #### 组件（`src/components/`）
 
@@ -873,7 +892,8 @@ npm run preview    # 预览构建产物
   - 黑名单（默认）/ 白名单两种模式
   - 自定义 IP 与 IP 段，完整支持 IPv4 与 IPv6（含 CIDR）
   - GeoIP 国家规则（ISO 国家代码），**内置 GeoLite2-Country 数据库，无需额外配置**；可用 `--geoip-db` 覆盖为外部数据库或传 `none` 禁用
-  - IP 规则与国家规则取并集；白名单模式下未知来源默认拒绝
+  - **城市级 GeoIP 规则**：`国家/省/城市` 格式（如 `CN/GD/Shenzhen`），各段支持 `*` 通配；城市库在「系统设置」中按需下载并启用（GeoLite2-City，约 49MB），即时热加载，关闭即回退内置国家库
+  - IP 规则、国家规则与城市规则取并集；白名单模式下未知来源默认拒绝
   - 连接被拒时记录告警日志（含来源 IP）
 
 ### v1.3.2
@@ -952,10 +972,11 @@ npm run preview    # 预览构建产物
 
 ## 第三方数据与许可
 
-本程序内置 **MaxMind GeoLite2 Country** 数据库（`internal/proxy/geodata/GeoLite2-Country.mmdb`），仅用于代理防火墙的 IP 归属国家判定。
+本程序内置 **MaxMind GeoLite2 Country** 数据库（`internal/proxy/geodata/GeoLite2-Country.mmdb`），用于代理防火墙的国家判定；城市级数据库（GeoLite2-City）不随程序分发，由用户在「系统设置」中按需下载。
 
-- 数据来源：[MaxMind GeoLite2](https://www.maxmind.com/en/geoip2-country-database)
+- 数据来源：[MaxMind GeoLite2](https://www.maxmind.com/en/geoip2-databases)
 - 许可协议：**CC BY-SA 4.0**（GeoLite2 EULA）
+- 城市库由公开镜像（P3TERX/GeoLite.mmdb）提供下载，下载后保存于用户配置目录（`sshtunnel/GeoLite2-City.mmdb`）
 - 署名要求已在本节及 [geodata/README.md](internal/proxy/geodata/README.md) 中声明
 - 如需更新内置数据，替换该 `.mmdb` 文件后重新编译即可
 
@@ -979,7 +1000,7 @@ npm run preview    # 预览构建产物
 | 实时通信 | `github.com/coder/websocket` | v1.8.15 |
 | 鉴权 | `github.com/golang-jwt/jwt/v5` | v5.3.1 |
 | 唯一标识 | `github.com/google/uuid` | v1.6.0 |
-| GeoIP | `github.com/oschwald/geoip2-golang` + 内置 GeoLite2-Country | v1.8.0 |
+| GeoIP | `github.com/oschwald/geoip2-golang` + 内置 GeoLite2-Country / 可选 GeoLite2-City | v1.8.0 |
 
 ---
 

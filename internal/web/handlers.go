@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -103,6 +104,9 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/version", h.handleVersion)
 	mux.HandleFunc("/version/check", h.handleVersionCheck)
 	mux.HandleFunc("/auth/settings", h.handleAuthSettings)
+	mux.HandleFunc("/geoip/status", h.handleGeoIPStatus)
+	mux.HandleFunc("/geoip/download", h.handleGeoIPDownload)
+	mux.HandleFunc("/geoip/settings", h.handleGeoIPSettings)
 
 	return mux
 }
@@ -147,6 +151,81 @@ func (h *Handler) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 0, "success", resp)
+}
+
+// handleGeoIPStatus 返回当前 GeoIP 能力状态
+func (h *Handler) handleGeoIPStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	writeJSON(w, 0, "success", proxy.CurrentGeoIPStatus())
+}
+
+// handleGeoIPDownload 下载 / 更新城市级数据库（GeoLite2-City）
+func (h *Handler) handleGeoIPDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	h.log.Info("开始下载 GeoIP 城市数据库（GeoLite2-City）...")
+	src, size, err := proxy.DownloadCityDatabase(req.URL)
+	if err != nil {
+		h.log.Errorf("GeoIP 城市数据库下载失败: %v", err)
+		writeError(w, 50002, "下载失败: "+err.Error())
+		return
+	}
+	h.log.Infof("GeoIP 城市数据库下载完成: %s (%.1f MB)", src, float64(size)/1024/1024)
+	writeJSON(w, 0, "success", proxy.CurrentGeoIPStatus())
+}
+
+// handleGeoIPSettings 开关城市级数据库（立即热加载，无需重启）
+func (h *Handler) handleGeoIPSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+
+	if req.Enabled {
+		path := proxy.CityDatabasePath()
+		if path == "" {
+			writeError(w, 500, "无法确定配置目录")
+			return
+		}
+		if _, err := os.Stat(path); err != nil {
+			writeError(w, 400, "尚未下载城市数据库，请先点击「下载/更新」")
+			return
+		}
+		if err := proxy.LoadGeoIPDatabaseFile(path); err != nil {
+			writeError(w, 500, "加载城市数据库失败: "+err.Error())
+			return
+		}
+		h.log.Info("已启用 GeoIP 城市级数据库")
+	} else {
+		// 回退为内置 Country 库
+		if err := proxy.LoadBuiltinGeoDatabase(); err != nil {
+			h.log.Warnf("回退内置 GeoIP 库失败: %v", err)
+		}
+		h.log.Info("已切换回内置 GeoIP Country 数据库")
+	}
+
+	if err := proxy.SaveGeoIPSettings(proxy.GeoIPSettings{Enabled: req.Enabled}); err != nil {
+		writeError(w, 500, "保存设置失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 0, "success", proxy.CurrentGeoIPStatus())
 }
 
 // handleLogin 登录接口

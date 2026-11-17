@@ -9,11 +9,16 @@ const emit = defineEmits<{ 'update:modelValue': [ProxyListener[]] }>()
 
 // GeoIP 数据库是否可用（用于国家规则提示）
 const geoReady = ref(false)
+// 当前加载的是否为城市级数据库（城市规则才生效）
+const geoCityReady = ref(false)
 onMounted(async () => {
   try {
-    geoReady.value = await api.geoIPAvailable()
+    const st = await api.getGeoIPStatus()
+    geoReady.value = !!st.loaded
+    geoCityReady.value = !!st.city_ready
   } catch {
     geoReady.value = false
+    geoCityReady.value = false
   }
 })
 
@@ -174,6 +179,23 @@ function onIPTextInput(idx: number, id: string, text: string) {
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
   updateFirewall(idx, { ips })
+}
+
+// 城市规则文本框（每行一条「国家/省/城市」）
+const cityTexts = ref<Record<string, string>>({})
+
+function cityTextOf(pl: ProxyListener): string {
+  if (cityTexts.value[pl.id] !== undefined) return cityTexts.value[pl.id]
+  return (pl.firewall?.cities || []).join('\n')
+}
+
+function onCityTextInput(idx: number, id: string, text: string) {
+  cityTexts.value = { ...cityTexts.value, [id]: text }
+  const cities = text
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+  updateFirewall(idx, { cities })
 }
 
 function setFirewallMode(idx: number, mode: FirewallMode) {
@@ -346,7 +368,26 @@ async function handleTestProxy(pl: ProxyListener) {
               />
             </el-select>
             <div v-if="!geoReady" class="fw-tip">
-              服务器未配置 GeoIP 数据库（--geoip-db），国家规则不会生效；IP/IP 段规则不受影响。
+              服务器未加载 GeoIP 数据库，国家规则不会生效；IP/IP 段规则不受影响。
+            </div>
+          </el-col>
+        </el-row>
+
+        <el-row :gutter="12" style="margin-top: 12px">
+          <el-col :span="24">
+            <div class="field-label">城市规则（每行一条：国家/省/城市，各段可用 * 通配）</div>
+            <el-input
+              type="textarea"
+              :rows="3"
+              :model-value="cityTextOf(pl)"
+              placeholder="CN/GD/Shenzhen&#10;CN/*/Shenzhen&#10;*/GD/*"
+              @update:model-value="(v: string) => onCityTextInput(idx, pl.id, v)"
+            />
+            <div v-if="!geoCityReady && (pl.firewall.cities || []).length > 0" class="fw-tip">
+              城市规则需要城市级 GeoIP 数据库：请到「系统设置 → GeoIP 城市级数据库」下载并启用。
+            </div>
+            <div v-else class="fw-hint">
+              省可用 ISO 代码（GD）或英文名（Guangdong）；城市用英文名（Shenzhen）。匹配不区分大小写。
             </div>
           </el-col>
         </el-row>
@@ -445,6 +486,12 @@ async function handleTestProxy(pl: ProxyListener) {
   margin-top: 6px;
   font-size: 12px;
   color: #ebb563;
+  line-height: 1.5;
+}
+.fw-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #8a8d95;
   line-height: 1.5;
 }
 .probe-error {

@@ -61,7 +61,7 @@ var (
 	flagVersion     = flag.Bool("version", false, "打印版本信息并退出")
 	flagCheckUpdate = flag.Bool("check-update", false, "检查 GitHub Release 是否有新版本并退出")
 	flagRepo        = flag.String("repo", updater.DefaultRepo, "GitHub 仓库（owner/repo），用于版本检查与安装脚本")
-	flagGeoIPDB     = flag.String("geoip-db", "", "GeoLite2-Country .mmdb 路径；留空使用内置数据库，传 none 禁用")
+	flagGeoIPDB     = flag.String("geoip-db", "", "GeoIP .mmdb 路径（Country 或 City）；留空按系统设置加载，传 none 禁用")
 )
 
 func main() {
@@ -91,22 +91,18 @@ func main() {
 	// 解析鉴权配置（--auth 为启动参数，作为运行时设置的初始值/覆盖）
 	_, authUser, authPass := parseAuth(*flagAuth)
 
-	// 加载 GeoIP 数据库（用于代理防火墙的国家规则）
-	// 默认使用内嵌的 GeoLite2-Country；--geoip-db 可指定外部文件覆盖；传 none 禁用。
+	// 加载 GeoIP 数据库（用于代理防火墙的国家/城市规则）
+	// 优先级：--geoip-db 外部文件 > 系统设置中启用的已下载 City 库 > 内置 Country 库。
 	switch strings.ToLower(strings.TrimSpace(*flagGeoIPDB)) {
-	case "":
-		if err := proxy.LoadBuiltinGeoDatabase(); err != nil {
-			log.Printf("⚠️  内置 GeoIP 数据库加载失败（国家规则将不生效）: %v", err)
-		} else {
-			log.Printf("已加载内置 GeoIP 数据库（GeoLite2-Country）")
-		}
 	case "none", "off", "disabled":
-		log.Printf("已按 --geoip-db=%s 禁用 GeoIP（国家规则不生效）", *flagGeoIPDB)
+		log.Printf("已按 --geoip-db=%s 禁用 GeoIP（国家/城市规则不生效）", *flagGeoIPDB)
+	case "":
+		loadGeoIPBySettings()
 	default:
-		if err := proxy.SetGeoIPDatabase(*flagGeoIPDB); err != nil {
-			log.Printf("⚠️  GeoIP 数据库加载失败（国家规则将不生效）: %v", err)
+		if err := proxy.LoadGeoIPDatabaseFile(*flagGeoIPDB); err != nil {
+			log.Printf("⚠️  GeoIP 数据库加载失败（国家/城市规则将不生效）: %v", err)
 		} else {
-			log.Printf("GeoIP 数据库已加载: %s", *flagGeoIPDB)
+			log.Printf("GeoIP 数据库已加载: %s (%s)", *flagGeoIPDB, proxy.CurrentGeoIPStatus().Type)
 		}
 	}
 
@@ -256,6 +252,28 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.tunnelMgr != nil {
 		a.tunnelMgr.StopAll()
 	}
+}
+
+// loadGeoIPBySettings 依据系统设置决定加载已下载的 City 库还是内置 Country 库。
+// 城市库缺失或损坏时自动回退内置库，保证国家规则始终可用。
+func loadGeoIPBySettings() {
+	if s := proxy.LoadGeoIPSettings(); s.Enabled {
+		path := proxy.CityDatabasePath()
+		if err := proxy.LoadGeoIPDatabaseFile(path); err != nil {
+			log.Printf("⚠️  已启用城市数据库但加载失败，回退内置 Country 库: %v", err)
+			if err2 := proxy.LoadBuiltinGeoDatabase(); err2 != nil {
+				log.Printf("⚠️  内置 GeoIP 数据库加载失败（国家规则将不生效）: %v", err2)
+			}
+			return
+		}
+		log.Printf("已加载城市级 GeoIP 数据库: %s", path)
+		return
+	}
+	if err := proxy.LoadBuiltinGeoDatabase(); err != nil {
+		log.Printf("⚠️  内置 GeoIP 数据库加载失败（国家规则将不生效）: %v", err)
+		return
+	}
+	log.Printf("已加载内置 GeoIP 数据库（GeoLite2-Country）")
 }
 
 // printVersion 打印版本信息。

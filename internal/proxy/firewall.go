@@ -5,101 +5,68 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"sync"
-
-	"github.com/oschwald/geoip2-golang"
 
 	"sshtunnel/internal/config"
 )
 
 // builtinGeoDB 内置的 GeoLite2-Country 数据库。
 // 数据来源：MaxMind GeoLite2 Country（CC BY-SA 4.0），见 geodata/README.md。
+// 城市级数据（GeoLite2-City）体积较大，改为在系统设置中按需下载。
 //
 //go:embed geodata/GeoLite2-Country.mmdb
 var builtinGeoDB []byte
 
-// GeoResolver 将 IP 解析为国家代码（ISO 3166-1 alpha-2）。
-// 抽象为接口便于测试替换。
-type GeoResolver interface {
-	// Country 返回国家代码；无法判定时返回空字符串与错误
-	Country(ip net.IP) (string, error)
-}
-
-// geoipDB 全局 GeoIP 数据库（由 main 依据 --geoip-db 加载）
-var (
-	geoipMu sync.RWMutex
-	geoipDB *geoip2.Reader
-)
-
-// SetGeoIPDatabase 加载外部 GeoLite2-Country 数据库（.mmdb），覆盖内置库。
-// 传空字符串表示卸载（之后可再调用 LoadBuiltinGeoDatabase 恢复内置库）。
+// SetGeoIPDatabase 兼容入口：加载外部 mmdb（空字符串表示卸载）
 func SetGeoIPDatabase(path string) error {
-	geoipMu.Lock()
-	defer geoipMu.Unlock()
-
-	if geoipDB != nil {
-		_ = geoipDB.Close()
-		geoipDB = nil
-	}
 	if path == "" {
+		geoipMu.Lock()
+		old := geoipDB
+		geoipDB = nil
+		geoipSource = ""
+		geoipType = ""
+		geoipSize = 0
+		geoipMu.Unlock()
+		if old != nil {
+			_ = old.Close()
+		}
 		return nil
 	}
-	db, err := geoip2.Open(path)
-	if err != nil {
-		return fmt.Errorf("加载 GeoIP 数据库失败: %w", err)
-	}
-	geoipDB = db
-	return nil
+	return LoadGeoIPDatabaseFile(path)
 }
 
-// LoadBuiltinGeoDatabase 从内嵌数据加载 GeoLite2-Country 数据库（无需外部文件）。
-// 若已加载外部数据库则会被替换。
-func LoadBuiltinGeoDatabase() error {
-	if len(builtinGeoDB) == 0 {
-		return fmt.Errorf("内置 GeoIP 数据库为空")
-	}
-	db, err := geoip2.FromBytes(builtinGeoDB)
-	if err != nil {
-		return fmt.Errorf("解析内置 GeoIP 数据库失败: %w", err)
-	}
-	geoipMu.Lock()
-	if geoipDB != nil {
-		_ = geoipDB.Close()
-	}
-	geoipDB = db
-	geoipMu.Unlock()
-	return nil
+// cityRule 城市规则：国家/省/城市，各段支持 * 通配
+type cityRule struct {
+	country  string
+	province string
+	city     string
 }
 
-// GeoIPAvailable 当前是否已加载 GeoIP 数据库
-func GeoIPAvailable() bool {
-	geoipMu.RLock()
-	defer geoipMu.RUnlock()
-	return geoipDB != nil
+// parseCityRule 解析 "国家/省/城市" 规则
+func parseCityRule(raw string) (cityRule, error) {
+	parts := strings.Split(strings.TrimSpace(raw), "/")
+	if len(parts) == 1 {
+		// 仅给出国家：等价于国家规则
+		return cityRule{country: strings.ToLower(parts[0]), province: "*", city: "*"}, nil
+	}
+	if len(parts) != 3 {
+		return cityRule{}, fmt.Errorf("格式应为 国家/省/城市（如 CN/GD/Shenzhen），当前: %q", raw)
+	}
+	rule := cityRule{
+		country:  strings.ToLower(strings.TrimSpace(parts[0])),
+		province: strings.ToLower(strings.TrimSpace(parts[1])),
+		city:     strings.ToLower(strings.TrimSpace(parts[2])),
+	}
+	if rule.country == "" {
+		rule.country = "*"
+	}
+	if rule.province == "" {
+		rule.province = "*"
+	}
+	if rule.city == "" {
+		rule.city = "*"
+	}
+	return rule, nil
 }
-
-// lookupCountry 使用全局数据库解析国家代码
-func lookupCountry(ip net.IP) (string, error) {
-	geoipMu.RLock()
-	db := geoipDB
-	geoipMu.RUnlock()
-	if db == nil {
-		return "", fmt.Errorf("未加载 GeoIP 数据库")
-	}
-	rec, err := db.Country(ip)
-	if err != nil {
-		return "", err
-	}
-	if rec == nil || rec.Country.IsoCode == "" {
-		return "", nil
-	}
-	return strings.ToUpper(rec.Country.IsoCode), nil
-}
-
-// defaultGeoResolver 使用全局 GeoIP 数据库解析国家
-type defaultGeoResolver struct{}
-
-func (defaultGeoResolver) Country(ip net.IP) (string, error) { return lookupCountry(ip) }
 
 // Firewall 代理监听器的简易防火墙
 type Firewall struct {
@@ -107,6 +74,7 @@ type Firewall struct {
 	mode      config.FirewallMode
 	nets      []*net.IPNet
 	countries map[string]bool
+	cities    []cityRule
 	geo       GeoResolver
 }
 
@@ -147,6 +115,18 @@ func NewFirewall(cfg *config.FirewallConfig, geo GeoResolver) (*Firewall, error)
 			}
 		}
 	}
+
+	for _, raw := range cfg.Cities {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		rule, err := parseCityRule(entry)
+		if err != nil {
+			return nil, fmt.Errorf("无效的城市规则 %q: %w", entry, err)
+		}
+		fw.cities = append(fw.cities, rule)
+	}
 	return fw, nil
 }
 
@@ -175,7 +155,7 @@ func (f *Firewall) Enforced() bool {
 	if f == nil || !f.enabled {
 		return false
 	}
-	return len(f.nets) > 0 || len(f.countries) > 0
+	return len(f.nets) > 0 || len(f.countries) > 0 || len(f.cities) > 0
 }
 
 // Allow 判断给定 IP 是否允许通过。
@@ -185,8 +165,8 @@ func (f *Firewall) Enforced() bool {
 //   - 黑名单（默认）：命中 → 拒绝；未命中 → 放行
 //   - 白名单：命中 → 放行；未命中 → 拒绝
 //
-// IP 规则与 GeoIP 国家规则取并集（任一命中即视为"命中名单"）。
-// 解析失败 / 未启用 GeoIP 时按"未命中"处理，白名单模式下即拒绝（更安全）。
+// IP 规则、GeoIP 国家规则与城市规则取并集（任一命中即视为"命中名单"）。
+// 解析失败 / 未加载 GeoIP 时按"未命中"处理，白名单模式下即拒绝（更安全）。
 func (f *Firewall) Allow(ip net.IP) bool {
 	if f == nil || !f.enabled {
 		return true
@@ -197,9 +177,9 @@ func (f *Firewall) Allow(ip net.IP) bool {
 	}
 
 	matched := f.matchIP(ip)
-	if !matched && len(f.countries) > 0 && f.geo != nil {
-		if code, err := f.geo.Country(ip); err == nil && code != "" && f.countries[strings.ToUpper(code)] {
-			matched = true
+	if !matched && f.needsGeo() && f.geo != nil {
+		if info, err := f.geo.Lookup(ip); err == nil && info != nil {
+			matched = f.matchGeo(info)
 		}
 	}
 
@@ -207,6 +187,50 @@ func (f *Firewall) Allow(ip net.IP) bool {
 		return matched
 	}
 	return !matched
+}
+
+// needsGeo 是否需要查询 GeoIP（配置了国家或城市规则）
+func (f *Firewall) needsGeo() bool {
+	return len(f.countries) > 0 || len(f.cities) > 0
+}
+
+// matchGeo 判断地理位置是否命中名单
+func (f *Firewall) matchGeo(info *GeoInfo) bool {
+	if info == nil {
+		return false
+	}
+	if len(f.countries) > 0 && info.Country != "" && f.countries[strings.ToUpper(info.Country)] {
+		return true
+	}
+	for _, rule := range f.cities {
+		if rule.match(info) {
+			return true
+		}
+	}
+	return false
+}
+
+// match 城市规则匹配：国家代码、省（代码或英文名）、城市英文名，均大小写不敏感
+func (r cityRule) match(info *GeoInfo) bool {
+	if !segmentMatch(r.country, info.Country) {
+		return false
+	}
+	// 省支持 ISO 代码（GD）或英文名（Guangdong）
+	if !segmentMatch(r.province, info.ProvinceCode) && !segmentMatch(r.province, info.Province) {
+		return false
+	}
+	return segmentMatch(r.city, info.City)
+}
+
+// segmentMatch 单段匹配：* 表示通配；否则大小写不敏感相等
+func segmentMatch(pattern, value string) bool {
+	if pattern == "" || pattern == "*" {
+		return true
+	}
+	if value == "" {
+		return false
+	}
+	return strings.EqualFold(pattern, value)
 }
 
 // matchIP 判断 IP 是否命中自定义 IP/CIDR 列表

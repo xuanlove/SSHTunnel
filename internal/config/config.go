@@ -90,8 +90,12 @@ type FirewallConfig struct {
 	Mode    FirewallMode `json:"mode"`          // blacklist(默认) | whitelist
 	IPs     []string     `json:"ips,omitempty"` // 自定义 IP / CIDR，支持 IPv4 与 IPv6
 	// Countries GeoIP 国家代码列表（ISO 3166-1 alpha-2，如 CN、US）。
-	// 需要服务器配置 GeoLite2-Country 数据库（--geoip-db）才会生效。
+	// 使用内置 GeoLite2-Country 数据库即可生效。
 	Countries []string `json:"countries,omitempty"`
+	// Cities 城市级规则，格式「国家/省/城市」（如 CN/GD/Shenzhen），各段支持 * 通配：
+	//   CN/*/Shenzhen、CN/GD/*、*/GD/Shenzhen
+	// 需要启用城市级 GeoLite2-City 数据库（系统设置中下载并开启）才会生效。
+	Cities []string `json:"cities,omitempty"`
 }
 
 // ProxyListener 代理监听器
