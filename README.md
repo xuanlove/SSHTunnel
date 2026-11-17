@@ -943,6 +943,18 @@ npm run preview    # 预览构建产物
 
 ## 版本更新说明
 
+### v1.3.5
+
+- **WEB 面板 HTTPS 可在系统设置中配置**：「系统设置 → WEB 面板 HTTPS（SSL）」开启开关并直接粘贴证书/私钥 PEM 内容，保存后同端口热重启立即生效（无需重启进程），配置持久化到 `web_tls.json`
+  - 证书无法加载时自动退回 HTTP 并告警，避免面板失联
+  - `--tls-cert` / `--tls-key` 启动参数保留，并写入同一份持久化配置
+- **新增 certd 证书自动部署 API**（独立 Token 鉴权，请求头 `X-API-Token`）
+  - `GET /api/cert/targets` 列出可部署目标（WEB 面板与所有 HTTPS 监听器）
+  - `GET /api/cert/read` 读取 WEB 面板或指定 HTTPS 监听器的证书与私钥
+  - `POST /api/cert/deploy` 部署证书内容：`target=web` 写面板证书并热重启监听；`target=tunnel` 写入监听器证书、写回配置并重启对应隧道
+  - 部署 Token 在设置页可查看/复制/重置，重置后旧 Token 立即失效
+- **操作日志时间只显示到秒**（`YYYY-MM-DD HH:mm:ss`，列表与导出统一）
+
 ### v1.3.4
 
 - **城市规则改为下拉选取**：配置页通过三级联动下拉（国家 → 省/州 → 城市）生成规则，选「全部（*）」表示通配
