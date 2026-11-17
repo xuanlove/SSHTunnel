@@ -90,7 +90,7 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 curl -fsSL https://raw.githubusercontent.com/xuanlove/SSHTunnel/main/scripts/install.sh | sudo bash
 ```
 
-默认会安装为 **systemd 服务并以 WEB 模式运行**（监听 `127.0.0.1:8080`，开机自启）。安装完成后：
+默认会安装为 **systemd 服务并以 WEB 模式运行**（监听 `0.0.0.0:8080`，开机自启）。安装完成后：
 
 ```bash
 sshtunnel --version                # 查看版本
@@ -98,7 +98,7 @@ systemctl status sshtunnel         # 查看服务状态
 journalctl -u sshtunnel -f         # 实时日志
 ```
 
-浏览器访问 `http://<服务器IP>:8080` 进入管理面板（如需公网访问或密码保护，见 [安装](#安装) 中的 `WEB_HOST` / `WEB_AUTH` 配置）。
+浏览器访问 `http://<服务器IP>:8080` 进入管理面板（公网环境建议配置 `WEB_AUTH` 启用访问密码）。
 
 ### 下载预编译二进制
 
@@ -157,7 +157,7 @@ sudo bash scripts/install.sh -u
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `WEB_HOST` | `127.0.0.1` | WEB 监听地址（公网访问用 `0.0.0.0`） |
+| `WEB_HOST` | `0.0.0.0` | WEB 监听地址（默认监听所有网卡；仅本机访问用 `127.0.0.1`） |
 | `WEB_PORT` | `8080` | WEB 监听端口 |
 | `WEB_AUTH` | 空 | 访问密码 `user:password`，留空无密码 |
 

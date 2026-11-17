@@ -25,7 +25,7 @@
 #   -h, --help              显示帮助
 #
 # 服务参数（非交互模式 / 管道安装时生效，交互终端下会询问）：
-#   WEB_HOST   监听地址（默认 127.0.0.1）
+#   WEB_HOST   监听地址（默认 0.0.0.0）
 #   WEB_PORT   监听端口（默认 8080）
 #   WEB_AUTH   访问密码 user:password（默认无密码）
 #
@@ -74,7 +74,7 @@ ${BOLD}选项:${NC}
   -h, --help               显示此帮助
 
 ${BOLD}服务参数${NC}（非交互模式生效，交互终端下会询问）:
-  WEB_HOST   监听地址（默认 127.0.0.1）
+  WEB_HOST   监听地址（默认 0.0.0.0）
   WEB_PORT   监听端口（默认 8080）
   WEB_AUTH   访问密码 user:password（默认无密码）
 
@@ -270,11 +270,11 @@ verify_install() {
 # ==================== systemd 服务安装 ====================
 # 以 WEB 模式安装为 systemd 服务。
 # 交互终端下询问监听地址/端口/密码；非交互（管道安装）时使用默认值或环境变量：
-#   WEB_HOST（默认 127.0.0.1）、WEB_PORT（默认 8080）、WEB_AUTH（user:password，默认无密码）
+#   WEB_HOST（默认 0.0.0.0）、WEB_PORT（默认 8080）、WEB_AUTH（user:password，默认无密码）
 install_service() {
     local target="${INSTALL_DIR}/${BINARY_NAME}"
     local svc_path="/etc/systemd/system/${BINARY_NAME}.service"
-    local web_host="${WEB_HOST:-127.0.0.1}"
+    local web_host="${WEB_HOST:-0.0.0.0}"
     local web_port="${WEB_PORT:-8080}"
     local auth="${WEB_AUTH:-}"
     local start_now="Y"
@@ -294,6 +294,11 @@ install_service() {
     if ! [[ "$web_port" =~ ^[0-9]+$ ]] || (( web_port < 1 || web_port > 65535 )); then
         error "无效的 WEB 端口: ${web_port}（应为 1-65535）"
         exit 1
+    fi
+
+    # 安全提示：默认监听所有网卡且无密码时，任何能访问该端口的设备都可控制隧道
+    if [[ "$web_host" == "0.0.0.0" || "$web_host" == "::" ]] && [[ -z "$auth" ]]; then
+        warn "服务将监听所有网卡且未设置密码，请确保防火墙限制来源 IP，或改用 WEB_AUTH=user:password 启用访问密码"
     fi
 
     local exec_args="--mode=web --web-host=${web_host} --web-port=${web_port}"
