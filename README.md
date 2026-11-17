@@ -954,6 +954,13 @@ npm run preview    # 预览构建产物
 
 ## 版本更新说明
 
+### v1.3.7
+
+- **城市库多镜像下载 + 测速选优**：内置 6 个下载地址（GitHub 直连 + 5 个加速镜像），下载前并发测速（采样 1MB，8 秒超时），自动选择最快的可用镜像
+  - 测速失败的镜像自动跳过，下载失败时按速度顺序依次回退
+  - 测速结果写入服务日志，便于排查网络问题
+  - 仍可通过 `POST /api/geoip/download` 的 `url` 字段指定单一地址（此时不做测速）
+
 ### v1.3.6
 
 - **城市级数据库来源改为 Merged-IP**：`https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb`（城市 + ASN 合并库，约 93MB）
