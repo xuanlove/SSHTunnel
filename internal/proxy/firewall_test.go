@@ -5,6 +5,7 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -307,6 +308,70 @@ func TestGeoIPSettingsPersistence(t *testing.T) {
 		t.Errorf("城市库缓存路径不符: %s", got)
 	}
 }
+
+// TestFirewallBlockLogThrottle 同一来源 IP 的拦截日志十分钟内只记录一次
+func TestFirewallBlockLogThrottle(t *testing.T) {
+	var mu sync.Mutex
+	var warns []string
+	b := &BaseServer{
+		fw: mustFW(t, &config.FirewallConfig{Enabled: true, IPs: []string{"203.0.113.0/24"}}, nil),
+		log: func(level, msg string) {
+			if level != "warn" {
+				return
+			}
+			mu.Lock()
+			warns = append(warns, msg)
+			mu.Unlock()
+		},
+	}
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(warns)
+	}
+	connFrom := func(ip string) net.Conn {
+		return fakeConn{addr: &net.TCPAddr{IP: net.ParseIP(ip), Port: 5000}}
+	}
+
+	// 同一 IP 连续被拒 5 次，只记录 1 条
+	for i := 0; i < 5; i++ {
+		if b.allowConn(connFrom("203.0.113.5")) {
+			t.Fatalf("黑名单命中的来源应被拒绝")
+		}
+	}
+	if got := count(); got != 1 {
+		t.Fatalf("同一 IP 应只记录 1 条拦截日志，实际 %d", got)
+	}
+
+	// 另一个被拒 IP 应单独记录
+	b.allowConn(connFrom("203.0.113.6"))
+	if got := count(); got != 2 {
+		t.Errorf("不同 IP 应各自记录，实际 %d 条", got)
+	}
+
+	// 放行的 IP 不记录
+	b.allowConn(connFrom("198.51.100.1"))
+	if got := count(); got != 2 {
+		t.Errorf("放行来源不应记录日志，实际 %d 条", got)
+	}
+
+	// 超过十分钟窗口后应再次记录
+	b.blockLogMu.Lock()
+	b.blockLogAt["203.0.113.5"] = time.Now().Add(-firewallBlockLogInterval - time.Minute)
+	b.blockLogMu.Unlock()
+	b.allowConn(connFrom("203.0.113.5"))
+	if got := count(); got != 3 {
+		t.Errorf("窗口期后应再次记录，实际 %d 条", got)
+	}
+}
+
+// fakeConn 仅提供 RemoteAddr 的测试连接
+type fakeConn struct {
+	net.Conn
+	addr net.Addr
+}
+
+func (f fakeConn) RemoteAddr() net.Addr { return f.addr }
 
 // unloadGeoDB 测试辅助：卸载全局数据库，避免用例间相互影响
 func unloadGeoDB() {

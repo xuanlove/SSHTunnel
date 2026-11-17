@@ -459,6 +459,8 @@ user1@host1:22, user2@host2:2222, user3@host3
 | `whitelist` | 放行 | 拒绝 |
 
 > GeoIP 国家规则使用**编译期内置**的 GeoLite2-Country 数据库，无需任何额外配置即可使用；可用 `--geoip-db /path/to.mmdb` 指定外部数据库覆盖，或用 `--geoip-db none` 禁用。IP/IP 段规则始终可用。
+>
+> 连接被拒绝时会记录一条告警日志（含来源 IP）；**同一来源 IP 在 10 分钟内只提示一次**，避免被扫描时日志刷屏。
 
 #### 城市级 GeoIP（GeoLite2-City）
 

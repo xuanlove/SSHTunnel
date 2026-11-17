@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"sshtunnel/internal/config"
 	"sshtunnel/internal/port"
@@ -19,9 +20,9 @@ type Dialer interface {
 type ListenerStatus string
 
 const (
-	StatusListenerStopped  ListenerStatus = "stopped"
-	StatusListenerRunning  ListenerStatus = "running"
-	StatusListenerError    ListenerStatus = "error"
+	StatusListenerStopped ListenerStatus = "stopped"
+	StatusListenerRunning ListenerStatus = "running"
+	StatusListenerError   ListenerStatus = "error"
 )
 
 // Server 代理服务器统一接口
@@ -51,10 +52,38 @@ type BaseServer struct {
 	dialer     Dialer
 	log        func(level string, msg string)
 	fw         *Firewall // 简易防火墙（nil 表示不限制）
+
+	// 防火墙拦截日志去重：同一来源 IP 在窗口期内只记录一次
+	blockLogMu sync.Mutex
+	blockLogAt map[string]time.Time
+}
+
+// firewallBlockLogInterval 同一来源 IP 的防火墙拦截日志最小间隔
+const firewallBlockLogInterval = 10 * time.Minute
+
+// shouldLogBlock 判断该来源的拦截日志是否应记录（同一 IP 十分钟内仅一次）
+func (b *BaseServer) shouldLogBlock(src string) bool {
+	now := time.Now()
+	b.blockLogMu.Lock()
+	defer b.blockLogMu.Unlock()
+	if b.blockLogAt == nil {
+		b.blockLogAt = make(map[string]time.Time)
+	}
+	if last, ok := b.blockLogAt[src]; ok && now.Sub(last) < firewallBlockLogInterval {
+		return false
+	}
+	// 顺带清理过期条目，避免长期运行内存增长
+	for k, t := range b.blockLogAt {
+		if now.Sub(t) >= firewallBlockLogInterval {
+			delete(b.blockLogAt, k)
+		}
+	}
+	b.blockLogAt[src] = now
+	return true
 }
 
 // allowConn 依据防火墙规则判断是否允许该连接接入。
-// 各协议在 handleConn 开头调用；拒绝时记录一条告警日志。
+// 各协议在 handleConn 开头调用；拒绝时记录告警日志（同一来源 IP 十分钟内只记一次）。
 func (b *BaseServer) allowConn(conn net.Conn) bool {
 	if b.fw == nil {
 		return true
@@ -67,8 +96,8 @@ func (b *BaseServer) allowConn(conn net.Conn) bool {
 	if ip != nil {
 		src = ip.String()
 	}
-	if b.log != nil {
-		b.log("warn", "防火墙已拒绝来源 "+src)
+	if b.log != nil && b.shouldLogBlock(src) {
+		b.log("warn", "防火墙已拒绝来源 "+src+"（同一来源 10 分钟内仅提示一次）")
 	}
 	return false
 }
