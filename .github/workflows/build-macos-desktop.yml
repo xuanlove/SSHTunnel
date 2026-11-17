@@ -21,16 +21,8 @@ permissions:
 
 jobs:
   build:
-    name: build ${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-13
-            arch: amd64
-          - runner: macos-14
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
+    name: build macOS desktop
+    runs-on: macos-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
     steps:
@@ -54,29 +46,29 @@ jobs:
             VERSION=$(git describe --tags --abbrev=0)
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "building $VERSION"
+          echo "building $VERSION on $(uname -m)"
 
-      - name: Build macOS desktop binary
+      - name: Build desktop binaries
         env:
           CGO_ENABLED: '1'
-          GOOS: darwin
-          GOARCH: ${{ matrix.arch }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           SHORT=$(git rev-parse --short HEAD)
           BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          OUT="sshtunnel-darwin-${{ matrix.arch }}-desktop"
-          go build -trimpath -tags "desktop,production" \
-            -ldflags "-s -w -X main.version=$VERSION -X main.commit=$SHORT -X main.buildTime=$BUILD_TIME -X main.buildVariant=desktop" \
-            -o "$OUT" .
-          file "$OUT"
-          ./"$OUT" --version
+          for ARCH in amd64 arm64; do
+            OUT="sshtunnel-darwin-${ARCH}-desktop"
+            GOOS=darwin GOARCH="$ARCH" go build -trimpath -tags "desktop,production" \
+              -ldflags "-s -w -X main.version=$VERSION -X main.commit=$SHORT -X main.buildTime=$BUILD_TIME -X main.buildVariant=desktop" \
+              -o "$OUT" .
+            file "$OUT"
+            ./"$OUT" --version
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sshtunnel-darwin-${{ matrix.arch }}-desktop
-          path: sshtunnel-darwin-${{ matrix.arch }}-desktop
+          name: sshtunnel-darwin-desktop
+          path: sshtunnel-darwin-*-desktop
           if-no-files-found: error
 
   upload:
