@@ -250,16 +250,23 @@ func LoadBuiltinGeoDatabase() error {
 
 // replaceGeoDB 原子替换全局数据库
 func replaceGeoDB(db *geoip2.Reader, source, dbType string, size int64, mtime time.Time) {
+	normalized := normalizeDBType(dbType)
 	geoipMu.Lock()
 	old := geoipDB
 	geoipDB = db
 	geoipSource = source
-	geoipType = normalizeDBType(dbType)
+	geoipType = normalized
 	geoipSize = size
 	geoipMTime = mtime
 	geoipMu.Unlock()
 	if old != nil {
 		_ = old.Close()
+	}
+
+	// 城市下拉索引随数据库切换重建（内置 Country 库没有城市数据）
+	resetCityCatalog()
+	if normalized == GeoDBTypeCity {
+		ensureCityCatalogAsync()
 	}
 }
 

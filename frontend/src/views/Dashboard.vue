@@ -101,7 +101,10 @@ async function handleStopAll() {
         <el-card class="tunnel-card" shadow="hover">
           <div class="card-header">
             <span class="name">{{ cfg.name }}</span>
-            <el-tag :type="statusType(cfg.status)" size="small">{{ statusText(cfg.status) }}</el-tag>
+            <div class="tags">
+              <el-tag v-if="cfg.auto_start" size="small" type="info">开机启动</el-tag>
+              <el-tag :type="statusType(cfg.status)" size="small">{{ statusText(cfg.status) }}</el-tag>
+            </div>
           </div>
           <div class="hop-chain">{{ hopSummary(cfg) || '未配置跳板' }}</div>
           <div class="listeners">
@@ -172,6 +175,11 @@ async function handleStopAll() {
   font-size: 15px;
   font-weight: 600;
   color: #f5f6f7;
+}
+.tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .hop-chain {
   font-size: 12px;

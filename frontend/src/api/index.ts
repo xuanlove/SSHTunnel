@@ -312,6 +312,28 @@ export async function setGeoIPEnabled(enabled: boolean): Promise<GeoIPStatus> {
   return httpPut<GeoIPStatus>('/api/geoip/settings', { enabled })
 }
 
+// ===== GeoIP 城市下拉选项 =====
+export interface CityProvince {
+  code: string // ISO 3166-2 省级后缀（可能为空）
+  name: string // 省级英文名
+  cities: string[] // 城市英文名列表
+}
+
+export interface CityCatalog {
+  ready: boolean // 索引是否已就绪
+  building: boolean // 是否正在构建索引
+  country: string
+  provinces: CityProvince[]
+}
+
+// 查询指定国家的省/城市列表；首次调用会在服务端后台扫描城市库
+export async function getCityCatalog(country: string): Promise<CityCatalog> {
+  if (!isWeb) {
+    return Call.ByName('App.CityCatalog', country) as Promise<CityCatalog>
+  }
+  return httpGet<CityCatalog>(`/api/geoip/cities?country=${encodeURIComponent(country)}`)
+}
+
 // ===== WEB 访问密码设置（仅 WEB 模式）=====
 export interface WebAuthSettings {
   enabled: boolean

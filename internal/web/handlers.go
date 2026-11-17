@@ -107,6 +107,7 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/geoip/status", h.handleGeoIPStatus)
 	mux.HandleFunc("/geoip/download", h.handleGeoIPDownload)
 	mux.HandleFunc("/geoip/settings", h.handleGeoIPSettings)
+	mux.HandleFunc("/geoip/cities", h.handleGeoIPCities)
 
 	return mux
 }
@@ -182,6 +183,15 @@ func (h *Handler) handleGeoIPDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Infof("GeoIP 城市数据库下载完成: %s (%.1f MB)", src, float64(size)/1024/1024)
 	writeJSON(w, 0, "success", proxy.CurrentGeoIPStatus())
+}
+
+// handleGeoIPCities 返回指定国家的省/城市下拉选项（首次调用会在后台构建索引）
+func (h *Handler) handleGeoIPCities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	writeJSON(w, 0, "success", proxy.CityCatalog(r.URL.Query().Get("country")))
 }
 
 // handleGeoIPSettings 开关城市级数据库（立即热加载，无需重启）

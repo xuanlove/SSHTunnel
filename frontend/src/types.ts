@@ -67,6 +67,8 @@ export interface TunnelConfig {
   local_forwards?: LocalForward[]
   proxy_listeners?: ProxyListener[]
   auto_reconnect: boolean
+  // 程序/服务启动时自动启动该隧道（配合 systemd 服务实现开机自启）
+  auto_start: boolean
   status: TunnelStatus
 }
 

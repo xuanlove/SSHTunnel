@@ -40,8 +40,30 @@ func (a *App) Init() error {
 
 	a.tunnelMgr = tunnel.NewManager(a.logger)
 
+	// 启动已勾选「开机启动」的隧道（异步执行，避免阻塞界面/服务启动）
+	go a.startAutoStartTunnels()
+
 	a.logger.Info("SSH Tunnel Manager 启动完成")
 	return nil
+}
+
+// startAutoStartTunnels 启动所有标记为开机启动的隧道
+func (a *App) startAutoStartTunnels() {
+	for _, cfg := range a.cfgMgr.List() {
+		if !cfg.AutoStart {
+			continue
+		}
+		c := cfg
+		a.logger.Infof("开机启动隧道: %s (ID: %s)", c.Name, c.ID)
+		a.cfgMgr.SetStatus(c.ID, config.StatusStarting)
+		if err := a.tunnelMgr.Start(&c); err != nil {
+			a.cfgMgr.SetStatus(c.ID, config.StatusError)
+			a.logger.Errorf("开机启动失败: %s - %v", c.Name, err)
+			continue
+		}
+		a.cfgMgr.SetStatus(c.ID, config.StatusRunning)
+		a.logger.Infof("开机启动成功: %s (ID: %s)", c.Name, c.ID)
+	}
 }
 
 // ==================== 配置相关 ====================
@@ -196,6 +218,11 @@ func (a *App) GeoIPAvailable() bool {
 // GeoIPStatus 返回当前 GeoIP 能力状态（桌面端）
 func (a *App) GeoIPStatus() proxy.GeoIPStatus {
 	return proxy.CurrentGeoIPStatus()
+}
+
+// CityCatalog 返回指定国家的省/城市下拉选项（桌面端）
+func (a *App) CityCatalog(country string) proxy.CityCatalogResponse {
+	return proxy.CityCatalog(country)
 }
 
 // DownloadGeoIPDatabase 下载/更新城市级数据库（桌面端）

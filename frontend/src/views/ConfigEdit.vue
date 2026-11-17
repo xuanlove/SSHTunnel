@@ -20,6 +20,7 @@ const form = reactive<TunnelConfig>({
   local_forwards: [],
   proxy_listeners: [],
   auto_reconnect: false,
+  auto_start: false,
   status: 'stopped',
 })
 
@@ -121,6 +122,11 @@ onMounted(async () => {
         <el-switch v-model="form.auto_reconnect" />
       </el-form-item>
 
+      <el-form-item label="开机启动">
+        <el-switch v-model="form.auto_start" />
+        <span class="form-hint">程序/服务启动时自动启动该隧道（配合 systemd 服务即开机自启）</span>
+      </el-form-item>
+
       <el-form-item v-if="form.tunnel_type === 'local_forward'" label="本地转发">
         <div class="forward-list">
           <div v-for="(lf, idx) in form.local_forwards" :key="lf.id" class="forward-row">
@@ -186,5 +192,10 @@ onMounted(async () => {
 .add-btn {
   border-style: dashed;
   width: 100%;
+}
+.form-hint {
+  margin-left: 12px;
+  font-size: 12px;
+  color: #8a8d95;
 }
 </style>

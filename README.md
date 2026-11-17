@@ -61,6 +61,7 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **多协议代理**：单条隧道可同时监听 HTTP / HTTPS / SOCKS4 / SOCKS5 多端口
 - **认证方式**：密码认证 / 密钥认证（密钥以 PEM 文本形式存储，便于跨设备同步）
 - **自动重连**：SSH 断开后指数退避重连（初始 2s，上限 60s，可配置无限重试）
+- **开机启动**：每条隧道可独立勾选「开机启动」，程序/服务启动时自动拉起（配合 systemd 服务即开机自启）
 - **端口冲突检测**：监听启动前自动检测端口占用，避免冲突
 - **代理防火墙**：每个代理监听端口可独立配置简易防火墙，支持黑名单（默认）/白名单模式、自定义 IP 与 IP 段（IPv4 + IPv6 CIDR）、GeoIP 国家规则（**内置 GeoLite2-Country，开箱即用**）与城市级规则（按需下载 GeoLite2-City）
 - **代理连通性自检**：每个代理监听器可一键「测试代理端口」，经该监听端口访问 `https://api.ip.sb/ip` 并显示出口 IP，直观验证隧道是否走通
@@ -387,6 +388,7 @@ user1@host1:22, user2@host2:2222, user3@host3
       }
     ],
     "auto_reconnect": true,          // 是否自动重连
+    "auto_start": true,              // 程序/服务启动时自动启动（配合 systemd 即开机自启）
     "status": "stopped"              // 运行时状态，加载时强制重置为 stopped，不持久化
   }
 ]
@@ -403,6 +405,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 | `local_forwards` | array | 本地转发规则（仅 `local_forward` 类型） |
 | `proxy_listeners` | array | 代理监听器（仅 `proxy` 类型） |
 | `auto_reconnect` | bool | 是否启用自动重连 |
+| `auto_start` | bool | 程序/服务启动时自动启动该隧道（配合 systemd 服务实现开机自启） |
 | `status` | string | 运行时状态，不持久化（`stopped` / `starting` / `running` / `error`） |
 
 ### 代理监听器
@@ -450,7 +453,8 @@ user1@host1:22, user2@host2:2222, user3@host3
 
 内置数据库只精确到国家。如需按城市过滤，请在 **系统设置 → GeoIP 城市级数据库** 点击「下载城市数据库」（约 49MB，服务端从公开镜像下载，保存到配置目录下的 `GeoLite2-City.mmdb`），下载完成后打开「启用城市级数据库」开关，**即时热加载、无需重启**；可随时再次点击「更新城市数据库」获取新数据。
 
-- 城市规则格式为 `国家/省/城市`，各段可用 `*` 通配；省支持 ISO 3166-2 代码（`GD`）或英文名（`Guangdong`），城市使用英文名（`Shenzhen`），匹配不区分大小写
+- 城市规则在配置页通过**三级下拉**选取（国家 → 省/州 → 城市），选「全部（*）」表示通配；下拉数据由城市库自动生成（服务端首次扫描约需数十秒，之后使用本地缓存秒开）
+- 规则存储格式为 `国家/省/城市`（如 `CN/GD/Shenzhen`）；省可用 ISO 3166-2 代码（`GD`）或英文名（`Guangdong`），城市使用英文名（`Shenzhen`），匹配不区分大小写
 - 关闭开关即回退到内置国家库（城市规则不再生效，国家与 IP 规则不受影响）
 - 已启用但城市库文件缺失/损坏时，启动会自动回退内置国家库并记录告警
 - 也可用 `--geoip-db` 显式指定任意 Country / City 类型的 `.mmdb` 文件
@@ -500,6 +504,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 | GET | `/api/auth/settings` | 查询访问密码设置（是否开启、用户名） |
 | PUT | `/api/auth/settings` | 开启/关闭访问密码并设置凭据（开启成功返回 token） |
 | GET | `/api/geoip/status` | 查询 GeoIP 状态（当前库类型、来源、大小、是否已下载城市库、是否启用） |
+| GET | `/api/geoip/cities?country=CN` | 查询指定国家的省/城市下拉选项（首次调用后台构建索引，就绪前返回 `ready=false`） |
 | POST | `/api/geoip/download` | 下载/更新 GeoLite2-City 数据库（可选 body `{"url": "..."}` 指定地址），完成后热加载 |
 | PUT | `/api/geoip/settings` | 启用/关闭城市级数据库（body `{"enabled": true}`），启用前校验文件已下载 |
 
@@ -626,6 +631,7 @@ SSH 多跳串联拨号与隧道 Dial 复用。
   - `auth.go` — 统一认证辅助
   - `firewall.go` — 简易防火墙（IP/国家/城市规则匹配）
   - `geoip.go` — GeoIP 数据库管理（内置 Country 库、城市库下载与热加载、设置持久化）
+  - `cityindex.go` — 城市下拉索引（扫描 City 库生成国家/省/城市列表，带磁盘缓存）
   - `util.go` — `Bridge` 双向桥接
 - **设计要点**：
   - 接口抽象 + `BaseServer` 嵌入复用，`BuildServer` 工厂按协议分发

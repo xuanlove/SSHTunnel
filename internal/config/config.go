@@ -119,7 +119,9 @@ type TunnelConfig struct {
 	LocalForwards  []LocalForward  `json:"local_forwards,omitempty"`
 	ProxyListeners []ProxyListener `json:"proxy_listeners,omitempty"`
 	AutoReconnect  bool            `json:"auto_reconnect"`
-	Status         TunnelStatus    `json:"status"` // 运行时状态
+	// AutoStart 程序/服务启动时自动启动该隧道（配合 systemd 服务可实现开机自启）
+	AutoStart bool         `json:"auto_start"`
+	Status    TunnelStatus `json:"status"` // 运行时状态
 }
 
 // userConfigDir 默认使用系统配置目录（可被测试覆盖）

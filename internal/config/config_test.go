@@ -28,9 +28,9 @@ func TestManagerSaveAndGet(t *testing.T) {
 	m := newTestManager(t)
 
 	cfg := TunnelConfig{
-		Name:          "测试隧道",
-		HopChain:      []HopConfig{{User: "u", Host: "h", Port: 22, AuthType: "password", Password: "p"}},
-		TunnelType:    TunnelProxy,
+		Name:       "测试隧道",
+		HopChain:   []HopConfig{{User: "u", Host: "h", Port: 22, AuthType: "password", Password: "p"}},
+		TunnelType: TunnelProxy,
 		ProxyListeners: []ProxyListener{
 			{ID: "l1", Protocol: ProxySOCKS5, ListenPort: 1080, AllowExternal: false},
 		},
@@ -122,7 +122,7 @@ func TestManagerPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建 m1 失败: %v", err)
 	}
-	_ = m1.Save(&TunnelConfig{Name: "持久化测试", AutoReconnect: true})
+	_ = m1.Save(&TunnelConfig{Name: "持久化测试", AutoReconnect: true, AutoStart: true})
 
 	// 第二个 Manager 从同一文件加载
 	m2, err := newManagerWithPath(cfgPath)
@@ -138,6 +138,9 @@ func TestManagerPersistence(t *testing.T) {
 	}
 	if list[0].Status != StatusStopped {
 		t.Errorf("加载后 Status 应为 stopped, got %q", list[0].Status)
+	}
+	if !list[0].AutoStart {
+		t.Errorf("加载后 AutoStart 应保持 true")
 	}
 }
 
