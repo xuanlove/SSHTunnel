@@ -116,10 +116,12 @@ journalctl -u sshtunnel -f         # 实时日志
 | `sshtunnel-linux-arm64` | Linux arm64 | web |
 | `sshtunnel-darwin-amd64` | macOS Intel | web |
 | `sshtunnel-darwin-arm64` | macOS Apple Silicon | web |
+| `sshtunnel-darwin-amd64-desktop` | macOS Intel | desktop |
+| `sshtunnel-darwin-arm64-desktop` | macOS Apple Silicon | desktop |
 | `sshtunnel-windows-amd64.exe` | Windows x86_64 | web（控制台） |
 | `sshtunnel-windows-amd64-desktop.exe` | Windows x86_64 | desktop（GUI） |
 
-> macOS 桌面版（desktop 变体）需在 macOS 上原生构建或借助 osxcross 交叉编译，Release 暂不提供预编译包。
+> macOS 桌面版由 GitHub Actions 的 macOS runner 原生构建（见 [.github/workflows/build-macos-desktop.yml](.github/workflows/build-macos-desktop.yml)），也可在 macOS 本地构建。
 
 ---
 
@@ -892,12 +894,15 @@ CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
 CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
   go build -ldflags "${LDFLAGS_DESKTOP}" -o releases/sshtunnel-linux-amd64-desktop .
 
-# macOS 桌面版（需在 macOS 原生或 osxcross 交叉编译）
+# macOS 桌面版（在 macOS 原生构建；需额外链接 UniformTypeIdentifiers 框架）
 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
-  go build -ldflags "${LDFLAGS_DESKTOP}" -o releases/sshtunnel-darwin-arm64-desktop .
+  CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
+  go build -tags "desktop,production" -ldflags "${LDFLAGS_DESKTOP}" \
+  -o releases/sshtunnel-darwin-arm64-desktop .
 ```
 
 > `-H=windowsgui` 用于 Windows 桌面版，隐藏控制台窗口（GUI 子系统）。
+> macOS 桌面版也可通过工作流自动构建：更新 [.github/macos-build-trigger](.github/macos-build-trigger) 触发 Actions，构建产物会自动上传到最新 tag 对应的 Release。
 
 ### 资产命名规则
 
@@ -954,6 +959,7 @@ npm run preview    # 预览构建产物
   - `POST /api/cert/deploy` 部署证书内容：`target=web` 写面板证书并热重启监听；`target=tunnel` 写入监听器证书、写回配置并重启对应隧道
   - 部署 Token 在设置页可查看/复制/重置，重置后旧 Token 立即失效
 - **操作日志时间只显示到秒**（`YYYY-MM-DD HH:mm:ss`，列表与导出统一）
+- **提供 macOS 桌面版预编译包**：`sshtunnel-darwin-amd64-desktop`、`sshtunnel-darwin-arm64-desktop`（GitHub Actions macOS runner 原生构建）
 
 ### v1.3.4
 
