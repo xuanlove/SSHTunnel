@@ -1,0 +1,17 @@
+# macOS 桌面版构建触发文件
+
+更新（提交）本文件即可触发 `.github/workflows/build-macos-desktop.yml`，
+在 GitHub Actions 的 macOS runner 上原生构建 macOS 桌面版二进制：
+
+- `sshtunnel-darwin-amd64-desktop`
+- `sshtunnel-darwin-arm64-desktop`
+
+构建完成后会自动上传到最新 tag 对应的 Release（可在 Actions 页面查看运行结果）。
+
+在具备 Actions 写权限时，也可直接通过命令行触发：
+
+```bash
+gh workflow run build-macos-desktop.yml -f version=v1.3.5 -f upload_release=true
+```
+
+触发时间：2026-11-17 13:13:27 UTC

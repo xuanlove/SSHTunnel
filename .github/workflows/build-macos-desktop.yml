@@ -4,13 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 版本号（如 v1.3.5）
-        required: true
-        default: v1.3.5
+        description: 版本号（留空则使用最新 tag，如 v1.3.5）
+        required: false
+        default: ''
       upload_release:
         description: 构建完成后上传到同名 Release
         type: boolean
         default: true
+  # 通过更新该文件手动触发（适用于无 Actions 写权限的令牌）
+  push:
+    paths:
+      - '.github/macos-build-trigger'
 
 permissions:
   contents: write
@@ -27,26 +31,44 @@ jobs:
           - runner: macos-14
             arch: arm64
     runs-on: ${{ matrix.runner }}
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
           cache: true
 
+      - name: Resolve version
+        id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-}"
+          if [ -z "$VERSION" ]; then
+            VERSION=$(git describe --tags --abbrev=0)
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "building $VERSION"
+
       - name: Build macOS desktop binary
         env:
           CGO_ENABLED: '1'
           GOOS: darwin
           GOARCH: ${{ matrix.arch }}
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           SHORT=$(git rev-parse --short HEAD)
           BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           OUT="sshtunnel-darwin-${{ matrix.arch }}-desktop"
           go build -trimpath -tags "desktop,production" \
-            -ldflags "-s -w -X main.version=${{ inputs.version }} -X main.commit=$SHORT -X main.buildTime=$BUILD_TIME -X main.buildVariant=desktop" \
+            -ldflags "-s -w -X main.version=$VERSION -X main.commit=$SHORT -X main.buildTime=$BUILD_TIME -X main.buildVariant=desktop" \
             -o "$OUT" .
           file "$OUT"
           ./"$OUT" --version
@@ -60,7 +82,7 @@ jobs:
   upload:
     name: upload to release
     needs: build
-    if: ${{ inputs.upload_release }}
+    if: ${{ github.event_name == 'push' || inputs.upload_release }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -71,8 +93,9 @@ jobs:
       - name: Upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           ls -l dist
-          gh release upload "${{ inputs.version }}" dist/* \
+          gh release upload "$VERSION" dist/* \
             --repo "${{ github.repository }}" --clobber
