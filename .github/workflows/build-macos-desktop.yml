@@ -1,0 +1,78 @@
+name: Build macOS desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 版本号（如 v1.3.5）
+        required: true
+        default: v1.3.5
+      upload_release:
+        description: 构建完成后上传到同名 Release
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: amd64
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Build macOS desktop binary
+        env:
+          CGO_ENABLED: '1'
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          SHORT=$(git rev-parse --short HEAD)
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          OUT="sshtunnel-darwin-${{ matrix.arch }}-desktop"
+          go build -trimpath -tags "desktop,production" \
+            -ldflags "-s -w -X main.version=${{ inputs.version }} -X main.commit=$SHORT -X main.buildTime=$BUILD_TIME -X main.buildVariant=desktop" \
+            -o "$OUT" .
+          file "$OUT"
+          ./"$OUT" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sshtunnel-darwin-${{ matrix.arch }}-desktop
+          path: sshtunnel-darwin-${{ matrix.arch }}-desktop
+          if-no-files-found: error
+
+  upload:
+    name: upload to release
+    needs: build
+    if: ${{ inputs.upload_release }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          gh release upload "${{ inputs.version }}" dist/* \
+            --repo "${{ github.repository }}" --clobber
