@@ -34,20 +34,6 @@ type cityCatalogCache struct {
 	Countries   map[string][]CityProvince `json:"countries"`
 }
 
-// cityLookupRecord 扫描城市库时的最小解码结构
-type cityLookupRecord struct {
-	Country struct {
-		IsoCode string `maxminddb:"iso_code"`
-	} `maxminddb:"country"`
-	Subdivisions []struct {
-		IsoCode string            `maxminddb:"iso_code"`
-		Names   map[string]string `maxminddb:"names"`
-	} `maxminddb:"subdivisions"`
-	City struct {
-		Names map[string]string `maxminddb:"names"`
-	} `maxminddb:"city"`
-}
-
 var (
 	cityCatalogMu       sync.RWMutex
 	cityCatalog         map[string][]CityProvince
@@ -214,7 +200,7 @@ func buildCityCatalog(path string) (map[string][]CityProvince, error) {
 
 	nets := db.Networks(maxminddb.SkipAliasedNetworks)
 	for nets.Next() {
-		var rec cityLookupRecord
+		var rec mmdbCityRecord
 		if _, err := nets.Network(&rec); err != nil {
 			continue
 		}

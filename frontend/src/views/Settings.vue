@@ -232,11 +232,11 @@ async function handleGenCert() {
     <el-card class="panel">
       <template #header><span>GeoIP 城市级数据库</span></template>
       <p class="desc">
-        内置数据库精确到国家（约 3.3MB）；如需在代理防火墙中按「城市」过滤，请下载城市级数据库（约 49MB，服务端从公开镜像下载）。
+        内置数据库精确到国家（约 3.3MB）；如需在代理防火墙中按「城市」过滤，请下载城市级数据库（Merged-IP，约 93MB，服务端从 GitHub 发布下载）。
       </p>
       <div class="info-row">
         <span class="label">当前数据库</span>
-        <span>{{ geoStatus?.type === 'City' ? '城市级（GeoLite2-City）' : '内置国家库（GeoLite2-Country）' }}</span>
+        <span>{{ geoStatus?.type === 'City' ? '城市级（Merged-IP）' : '内置国家库（GeoLite2-Country）' }}</span>
       </div>
       <div class="info-row">
         <span class="label">数据来源</span>
@@ -252,7 +252,7 @@ async function handleGenCert() {
       </div>
       <div class="geo-actions">
         <el-button type="primary" :loading="geoDownloading" @click="handleDownloadGeo">
-          {{ geoDownloading ? '下载中…（约 49MB，请耐心等待）' : (geoCityDownloaded ? '更新城市数据库' : '下载城市数据库') }}
+          {{ geoDownloading ? '下载中…（约 93MB，请耐心等待）' : (geoCityDownloaded ? '更新城市数据库' : '下载城市数据库') }}
         </el-button>
         <el-switch
           :model-value="!!geoStatus?.enabled"

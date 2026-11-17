@@ -296,7 +296,7 @@ export async function getGeoIPStatus(): Promise<GeoIPStatus> {
   return httpGet<GeoIPStatus>('/api/geoip/status')
 }
 
-// 下载 / 更新城市级数据库（约 49MB，服务端发起下载）；url 可选，用于指定自定义下载地址
+// 下载 / 更新城市级数据库（Merged-IP，约 93MB，服务端发起下载）；url 可选，用于指定自定义下载地址
 export async function downloadGeoIPDatabase(url = ''): Promise<GeoIPStatus> {
   if (!isWeb) {
     return Call.ByName('App.DownloadGeoIPDatabase', url) as Promise<GeoIPStatus>

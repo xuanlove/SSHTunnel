@@ -94,7 +94,7 @@ type FirewallConfig struct {
 	Countries []string `json:"countries,omitempty"`
 	// Cities 城市级规则，格式「国家/省/城市」（如 CN/GD/Shenzhen），各段支持 * 通配：
 	//   CN/*/Shenzhen、CN/GD/*、*/GD/Shenzhen
-	// 需要启用城市级 GeoLite2-City 数据库（系统设置中下载并开启）才会生效。
+	// 需要启用城市级数据库（Merged-IP，系统设置中下载并开启）才会生效。
 	Cities []string `json:"cities,omitempty"`
 }
 

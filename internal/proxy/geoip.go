@@ -13,8 +13,28 @@ import (
 	"sync"
 	"time"
 
-	"github.com/oschwald/geoip2-golang"
+	"github.com/oschwald/maxminddb-golang"
 )
+
+// mmdbCityRecord 城市库（GeoLite2-City / Merged-IP 等）的通用解码结构。
+// 直接使用 maxminddb 读取，避免 geoip2 对数据库类型的白名单限制。
+type mmdbCityRecord struct {
+	Country struct {
+		IsoCode string `maxminddb:"iso_code"`
+	} `maxminddb:"country"`
+	Subdivisions []struct {
+		IsoCode string            `maxminddb:"iso_code"`
+		Names   map[string]string `maxminddb:"names"`
+	} `maxminddb:"subdivisions"`
+	City struct {
+		Names map[string]string `maxminddb:"names"`
+	} `maxminddb:"city"`
+	Location struct {
+		Latitude  float64 `maxminddb:"latitude"`
+		Longitude float64 `maxminddb:"longitude"`
+		TimeZone  string  `maxminddb:"time_zone"`
+	} `maxminddb:"location"`
+}
 
 // GeoInfo 结构化地理位置（国家 / 省 / 城市）
 type GeoInfo struct {
@@ -38,7 +58,7 @@ const (
 // 全局 GeoIP 数据库状态
 var (
 	geoipMu     sync.RWMutex
-	geoipDB     *geoip2.Reader
+	geoipDB     *maxminddb.Reader
 	geoipSource string    // "builtin" 或文件路径
 	geoipType   string    // Country / City
 	geoipSize   int64     // 数据库字节数
@@ -60,7 +80,7 @@ type GeoIPStatus struct {
 
 // GeoIPSettings 城市级数据库的用户设置（持久化到 geoip.json）
 type GeoIPSettings struct {
-	// Enabled 是否启用外部下载的 GeoLite2-City 数据库（关闭时使用内置 Country 库）
+	// Enabled 是否启用外部下载的城市级数据库（Merged-IP；关闭时使用内置 Country 库）
 	Enabled bool `json:"enabled"`
 }
 
@@ -82,13 +102,31 @@ func GeoIPSettingsPath() string {
 	return filepath.Join(dir, "geoip.json")
 }
 
-// CityDatabasePath 下载的城市库缓存路径
+// CityDatabasePath 下载的城市库缓存路径。
+// 数据库来源为 Merged-IP（含城市/ASN），文件名随之改为 Merged-IP.mmdb。
 func CityDatabasePath() string {
 	dir := GeoIPDataDir()
 	if dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, "GeoLite2-City.mmdb")
+	migrateLegacyCityDatabase(dir)
+	return filepath.Join(dir, "Merged-IP.mmdb")
+}
+
+// legacyCityDatabaseName 旧版 GeoLite2-City 缓存文件名（用于自动迁移）
+const legacyCityDatabaseName = "GeoLite2-City.mmdb"
+
+// migrateLegacyCityDatabase 将旧的 GeoLite2-City.mmdb 重命名为新缓存文件名，避免用户重新下载。
+func migrateLegacyCityDatabase(dir string) {
+	newPath := filepath.Join(dir, "Merged-IP.mmdb")
+	if _, err := os.Stat(newPath); err == nil {
+		return
+	}
+	oldPath := filepath.Join(dir, legacyCityDatabaseName)
+	if _, err := os.Stat(oldPath); err != nil {
+		return
+	}
+	_ = os.Rename(oldPath, newPath)
 }
 
 // LoadGeoIPSettings 读取设置；文件不存在或解析失败时返回默认（未启用）
@@ -122,17 +160,15 @@ func SaveGeoIPSettings(s GeoIPSettings) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// GeoIPDownloadMirrors 依次尝试的城市库下载地址（均为公开镜像）
+// GeoIPDownloadMirrors 城市级数据库下载地址（Merged-IP：城市 + ASN 合并库，数据更完整）
 var GeoIPDownloadMirrors = []string{
-	"https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb",
-	"https://raw.gitmirror.com/P3TERX/GeoLite.mmdb/download/GeoLite2-City.mmdb",
-	"https://ghproxy.net/https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb",
+	"https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb",
 }
 
 // geoipHTTPClient 下载客户端（超时较长，尊重环境变量代理）
 var geoipHTTPClient = &http.Client{Timeout: 15 * time.Minute}
 
-// DownloadCityDatabase 下载 GeoLite2-City 数据库到缓存路径并热加载。
+// DownloadCityDatabase 下载城市级数据库（Merged-IP）到缓存路径并热加载。
 // urlOverride 非空时仅使用该地址；否则依次尝试内置镜像。
 // 返回实际使用的下载地址与文件大小。
 func DownloadCityDatabase(urlOverride string) (string, int64, error) {
@@ -202,11 +238,11 @@ func downloadTo(url, dest string) (int64, error) {
 	}
 
 	// 校验数据库有效且包含城市数据
-	db, err := geoip2.Open(tmpPath)
+	db, err := maxminddb.Open(tmpPath)
 	if err != nil {
 		return 0, fmt.Errorf("下载内容不是有效的 mmdb: %w", err)
 	}
-	dbType := db.Metadata().DatabaseType
+	dbType := db.Metadata.DatabaseType
 	db.Close()
 	if !strings.Contains(strings.ToLower(dbType), "city") {
 		return 0, fmt.Errorf("下载的数据库不是 City 类型（got %q）", dbType)
@@ -220,7 +256,7 @@ func downloadTo(url, dest string) (int64, error) {
 
 // LoadGeoIPDatabaseFile 加载指定 mmdb 文件并记录库类型
 func LoadGeoIPDatabaseFile(path string) error {
-	db, err := geoip2.Open(path)
+	db, err := maxminddb.Open(path)
 	if err != nil {
 		return fmt.Errorf("加载 GeoIP 数据库失败: %w", err)
 	}
@@ -231,7 +267,7 @@ func LoadGeoIPDatabaseFile(path string) error {
 		size = info.Size()
 		mtime = info.ModTime()
 	}
-	replaceGeoDB(db, path, db.Metadata().DatabaseType, size, mtime)
+	replaceGeoDB(db, path, db.Metadata.DatabaseType, size, mtime)
 	return nil
 }
 
@@ -240,16 +276,16 @@ func LoadBuiltinGeoDatabase() error {
 	if len(builtinGeoDB) == 0 {
 		return errors.New("内置 GeoIP 数据库为空")
 	}
-	db, err := geoip2.FromBytes(builtinGeoDB)
+	db, err := maxminddb.FromBytes(builtinGeoDB)
 	if err != nil {
 		return fmt.Errorf("解析内置 GeoIP 数据库失败: %w", err)
 	}
-	replaceGeoDB(db, "builtin", db.Metadata().DatabaseType, int64(len(builtinGeoDB)), time.Time{})
+	replaceGeoDB(db, "builtin", db.Metadata.DatabaseType, int64(len(builtinGeoDB)), time.Time{})
 	return nil
 }
 
 // replaceGeoDB 原子替换全局数据库
-func replaceGeoDB(db *geoip2.Reader, source, dbType string, size int64, mtime time.Time) {
+func replaceGeoDB(db *maxminddb.Reader, source, dbType string, size int64, mtime time.Time) {
 	normalized := normalizeDBType(dbType)
 	geoipMu.Lock()
 	old := geoipDB
@@ -322,8 +358,8 @@ func lookupGeo(ip net.IP) (*GeoInfo, error) {
 	if db == nil {
 		return nil, errors.New("未加载 GeoIP 数据库")
 	}
-	rec, err := db.City(ip)
-	if err != nil {
+	var rec mmdbCityRecord
+	if err := db.Lookup(ip, &rec); err != nil {
 		return nil, err
 	}
 	info := &GeoInfo{

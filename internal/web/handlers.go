@@ -199,7 +199,7 @@ func (h *Handler) handleGeoIPStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 0, "success", proxy.CurrentGeoIPStatus())
 }
 
-// handleGeoIPDownload 下载 / 更新城市级数据库（GeoLite2-City）
+// handleGeoIPDownload 下载 / 更新城市级数据库（Merged-IP）
 func (h *Handler) handleGeoIPDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, 405, "方法不允许")
@@ -210,7 +210,7 @@ func (h *Handler) handleGeoIPDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	h.log.Info("开始下载 GeoIP 城市数据库（GeoLite2-City）...")
+	h.log.Info("开始下载 GeoIP 城市数据库（Merged-IP）...")
 	src, size, err := proxy.DownloadCityDatabase(req.URL)
 	if err != nil {
 		h.log.Errorf("GeoIP 城市数据库下载失败: %v", err)

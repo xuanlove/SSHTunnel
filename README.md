@@ -63,7 +63,7 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **自动重连**：SSH 断开后指数退避重连（初始 2s，上限 60s，可配置无限重试）
 - **开机启动**：每条隧道可独立勾选「开机启动」，程序/服务启动时自动拉起（配合 systemd 服务即开机自启）
 - **端口冲突检测**：监听启动前自动检测端口占用，避免冲突
-- **代理防火墙**：每个代理监听端口可独立配置简易防火墙，支持黑名单（默认）/白名单模式、自定义 IP 与 IP 段（IPv4 + IPv6 CIDR）、GeoIP 国家规则（**内置 GeoLite2-Country，开箱即用**）与城市级规则（按需下载 GeoLite2-City）
+- **代理防火墙**：每个代理监听端口可独立配置简易防火墙，支持黑名单（默认）/白名单模式、自定义 IP 与 IP 段（IPv4 + IPv6 CIDR）、GeoIP 国家规则（**内置 GeoLite2-Country，开箱即用**）与城市级规则（按需下载 Merged-IP 城市库）
 - **代理连通性自检**：每个代理监听器可一键「测试代理端口」，经该监听端口访问 `https://api.ip.sb/ip` 并显示出口 IP，直观验证隧道是否走通
 
 ### 代理协议细节
@@ -462,10 +462,12 @@ user1@host1:22, user2@host2:2222, user3@host3
 >
 > 连接被拒绝时会记录一条告警日志（含来源 IP）；**同一来源 IP 在 10 分钟内只提示一次**，避免被扫描时日志刷屏。
 
-#### 城市级 GeoIP（GeoLite2-City）
+#### 城市级 GeoIP（Merged-IP）
 
-内置数据库只精确到国家。如需按城市过滤，请在 **系统设置 → GeoIP 城市级数据库** 点击「下载城市数据库」（约 49MB，服务端从公开镜像下载，保存到配置目录下的 `GeoLite2-City.mmdb`），下载完成后打开「启用城市级数据库」开关，**即时热加载、无需重启**；可随时再次点击「更新城市数据库」获取新数据。
+内置数据库只精确到国家。如需按城市过滤，请在 **系统设置 → GeoIP 城市级数据库** 点击「下载城市数据库」（Merged-IP 城市/ASN 合并库，约 93MB，从 GitHub Releases 下载，保存到配置目录下的 `Merged-IP.mmdb`），下载完成后打开「启用城市级数据库」开关，**即时热加载、无需重启**；可随时再次点击「更新城市数据库」获取新数据。
 
+- 下载地址：`https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb`（可用 `POST /api/geoip/download` 的 `url` 字段指定其他地址）
+- 旧版本缓存 `GeoLite2-City.mmdb` 会在启动时自动重命名为 `Merged-IP.mmdb`，无需重新下载
 - 城市规则在配置页通过**三级下拉**选取（国家 → 省/州 → 城市），选「全部（*）」表示通配；下拉数据由城市库自动生成（服务端首次扫描约需数十秒，之后使用本地缓存秒开）
 - 规则存储格式为 `国家/省/城市`（如 `CN/GD/Shenzhen`）；省可用 ISO 3166-2 代码（`GD`）或英文名（`Guangdong`），城市使用英文名（`Shenzhen`），匹配不区分大小写
 - 关闭开关即回退到内置国家库（城市规则不再生效，国家与 IP 规则不受影响）
@@ -518,7 +520,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 | PUT | `/api/auth/settings` | 开启/关闭访问密码并设置凭据（开启成功返回 token） |
 | GET | `/api/geoip/status` | 查询 GeoIP 状态（当前库类型、来源、大小、是否已下载城市库、是否启用） |
 | GET | `/api/geoip/cities?country=CN` | 查询指定国家的省/城市下拉选项（首次调用后台构建索引，就绪前返回 `ready=false`） |
-| POST | `/api/geoip/download` | 下载/更新 GeoLite2-City 数据库（可选 body `{"url": "..."}` 指定地址），完成后热加载 |
+| POST | `/api/geoip/download` | 下载/更新城市级数据库（Merged-IP，可选 body `{"url": "..."}` 指定地址），完成后热加载 |
 | PUT | `/api/geoip/settings` | 启用/关闭城市级数据库（body `{"enabled": true}`），启用前校验文件已下载 |
 | GET | `/api/web/tls` | 查询 WEB 面板 HTTPS 设置（含当前证书/私钥内容与 certd 部署 Token） |
 | PUT | `/api/web/tls` | 保存 HTTPS 设置（body 可用 `cert_pem`/`key_pem` 直接提交证书内容），保存后热重启监听 |
@@ -966,7 +968,7 @@ npm run preview    # 预览构建产物
 ### v1.3.4
 
 - **城市规则改为下拉选取**：配置页通过三级联动下拉（国家 → 省/州 → 城市）生成规则，选「全部（*）」表示通配
-  - 下拉数据由 GeoLite2-City 库自动生成，扫描结果缓存到 `geoip-cities.json`（首次约需数十秒，之后秒开）
+  - 下拉数据由城市级数据库（Merged-IP）自动生成，扫描结果缓存到 `geoip-cities.json`（首次约需数十秒，之后秒开）
   - 新增 `GET /api/geoip/cities?country=CN` 与桌面端 `App.CityCatalog`
   - 未启用城市库时仍可手动输入规则
 - **隧道开机启动**：配置新增 `auto_start`，程序/服务启动时自动拉起已勾选的隧道（配合 systemd 服务即开机自启）
@@ -1058,11 +1060,11 @@ npm run preview    # 预览构建产物
 
 ## 第三方数据与许可
 
-本程序内置 **MaxMind GeoLite2 Country** 数据库（`internal/proxy/geodata/GeoLite2-Country.mmdb`），用于代理防火墙的国家判定；城市级数据库（GeoLite2-City）不随程序分发，由用户在「系统设置」中按需下载。
+本程序内置 **MaxMind GeoLite2 Country** 数据库（`internal/proxy/geodata/GeoLite2-Country.mmdb`），用于代理防火墙的国家判定；城市级数据库（Merged-IP）不随程序分发，由用户在「系统设置」中按需下载。
 
-- 数据来源：[MaxMind GeoLite2](https://www.maxmind.com/en/geoip2-databases)
-- 许可协议：**CC BY-SA 4.0**（GeoLite2 EULA）
-- 城市库由公开镜像（P3TERX/GeoLite.mmdb）提供下载，下载后保存于用户配置目录（`sshtunnel/GeoLite2-City.mmdb`）
+- 数据来源：[MaxMind GeoLite2](https://www.maxmind.com/en/geoip2-databases)（内置国家库）、[NetworkCats Merged-IP-Data](https://github.com/NetworkCats/Merged-IP-Data)（城市级，聚合 MaxMind/ipinfo 等公开数据）
+- 许可协议：GeoLite2 数据遵循 **CC BY-SA 4.0**；Merged-IP 数据请遵循其仓库声明
+- 城市库下载后保存于用户配置目录（`sshtunnel/Merged-IP.mmdb`）
 - 署名要求已在本节及 [geodata/README.md](internal/proxy/geodata/README.md) 中声明
 - 如需更新内置数据，替换该 `.mmdb` 文件后重新编译即可
 
@@ -1086,7 +1088,7 @@ npm run preview    # 预览构建产物
 | 实时通信 | `github.com/coder/websocket` | v1.8.15 |
 | 鉴权 | `github.com/golang-jwt/jwt/v5` | v5.3.1 |
 | 唯一标识 | `github.com/google/uuid` | v1.6.0 |
-| GeoIP | `github.com/oschwald/geoip2-golang` + 内置 GeoLite2-Country / 可选 GeoLite2-City | v1.8.0 |
+| GeoIP | `github.com/oschwald/maxminddb-golang` + 内置 GeoLite2-Country / 可选 Merged-IP 城市库 | v1.10.0 |
 
 ---
 

@@ -109,6 +109,32 @@ func TestDownloadCityDatabaseCityServer(t *testing.T) {
 	}
 }
 
+// TestMigrateLegacyCityDatabase 旧缓存文件应自动重命名为 Merged-IP.mmdb
+func TestMigrateLegacyCityDatabase(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	cfgDir := filepath.Join(dir, "sshtunnel")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatalf("创建目录失败: %v", err)
+	}
+	legacy := filepath.Join(cfgDir, "GeoLite2-City.mmdb")
+	if err := os.WriteFile(legacy, []byte("legacy"), 0644); err != nil {
+		t.Fatalf("写入旧文件失败: %v", err)
+	}
+
+	got := CityDatabasePath()
+	want := filepath.Join(cfgDir, "Merged-IP.mmdb")
+	if got != want {
+		t.Fatalf("缓存路径 = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("旧文件应已被重命名")
+	}
+	if data, err := os.ReadFile(want); err != nil || string(data) != "legacy" {
+		t.Errorf("新文件内容不符: %q %v", string(data), err)
+	}
+}
+
 // TestCityLookup 城市级解析返回国家/省/城市
 func TestCityLookup(t *testing.T) {
 	cityDB := os.Getenv("GEOLITE2_CITY_MMDB")

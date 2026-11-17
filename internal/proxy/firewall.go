@@ -11,7 +11,7 @@ import (
 
 // builtinGeoDB 内置的 GeoLite2-Country 数据库。
 // 数据来源：MaxMind GeoLite2 Country（CC BY-SA 4.0），见 geodata/README.md。
-// 城市级数据（GeoLite2-City）体积较大，改为在系统设置中按需下载。
+// 城市级数据（Merged-IP）体积较大，改为在系统设置中按需下载。
 //
 //go:embed geodata/GeoLite2-Country.mmdb
 var builtinGeoDB []byte

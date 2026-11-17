@@ -45,7 +45,7 @@ export interface FirewallConfig {
   // GeoIP 国家代码（ISO 3166-1 alpha-2，如 CN、US），内置 Country 库即可生效
   countries?: string[]
   // 城市级规则「国家/省/城市」，各段支持 * 通配，如 CN/GD/Shenzhen、CN/*/Shenzhen
-  // 需要启用城市级 GeoLite2-City 数据库（系统设置中下载并开启）
+  // 需要启用城市级数据库（Merged-IP，系统设置中下载并开启）
   cities?: string[]
 }
 

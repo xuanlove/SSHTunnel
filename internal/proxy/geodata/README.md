@@ -2,7 +2,7 @@
 
 `GeoLite2-Country.mmdb` 为**编译时内嵌**的 GeoIP 国家数据库，用于代理监听器防火墙的「GeoIP 国家」规则。用户无需下载任何文件即可使用。
 
-> 城市级过滤需要更高精度的 **GeoLite2-City** 数据库（约 49MB），不内嵌到二进制，改为在「系统设置 → GeoIP 城市级数据库」中按需下载并启用（下载后保存于用户配置目录的 `sshtunnel/GeoLite2-City.mmdb`）。
+> 城市级过滤需要更高精度的 **Merged-IP** 数据库（城市 + ASN 合并库，约 93MB），不内嵌到二进制，改为在「系统设置 → GeoIP 城市级数据库」中按需下载并启用（下载后保存于用户配置目录的 `sshtunnel/Merged-IP.mmdb`）。
 
 ## 数据来源与许可
 
@@ -20,9 +20,9 @@
 - 黑名单模式：放行
 - 白名单模式：拒绝（fail-closed）
 
-如需城市信息，请下载 GeoLite2-City：镜像地址为
-`https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb`，
-也可直接在 WEB/桌面界面「系统设置」中点击「下载城市数据库」（程序会自动尝试多个镜像并校验库类型）。
+如需城市信息，请下载 Merged-IP 城市库：
+`https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb`，
+也可直接在 WEB/桌面界面「系统设置」中点击「下载城市数据库」（程序会校验库类型后落盘）。
 
 ## 如何覆盖或更新
 

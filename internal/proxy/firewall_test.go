@@ -304,7 +304,7 @@ func TestGeoIPSettingsPersistence(t *testing.T) {
 	if s := LoadGeoIPSettings(); !s.Enabled {
 		t.Errorf("重新加载后应保持启用")
 	}
-	if got := CityDatabasePath(); got != filepath.Join(dir, "sshtunnel", "GeoLite2-City.mmdb") {
+	if got := CityDatabasePath(); got != filepath.Join(dir, "sshtunnel", "Merged-IP.mmdb") {
 		t.Errorf("城市库缓存路径不符: %s", got)
 	}
 }
