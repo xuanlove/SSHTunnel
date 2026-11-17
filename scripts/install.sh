@@ -40,10 +40,12 @@ else
     RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; NC=""
 fi
 
-info()  { echo "${GREEN}[INFO]${NC} $*"; }
-warn()  { echo "${YELLOW}[WARN]${NC} $*"; }
+# 注意：所有日志统一输出到 stderr，保证 stdout 仅用于函数返回值
+# （download_binary 通过 stdout 返回临时文件路径，被 $(...) 捕获）
+info()  { echo "${GREEN}[INFO]${NC} $*" >&2; }
+warn()  { echo "${YELLOW}[WARN]${NC} $*" >&2; }
 error() { echo "${RED}[ERROR]${NC} $*" >&2; }
-step()  { echo "${BLUE}==>${NC} ${BOLD}$*${NC}"; }
+step()  { echo "${BLUE}==>${NC} ${BOLD}$*${NC}" >&2; }
 
 # ==================== 帮助 ====================
 show_help() {
