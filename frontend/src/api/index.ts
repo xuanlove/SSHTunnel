@@ -212,6 +212,33 @@ export async function testTunnelConfig(cfg: TunnelConfig): Promise<void> {
   await httpPost('/api/tunnel/test', cfg)
 }
 
+// ===== 代理监听端口连通性测试 =====
+export interface ProxyProbeResult {
+  ip: string
+  raw: string
+  elapsed_ms: number
+  target: string
+}
+
+// 经指定代理监听端口访问目标（默认 https://api.ip.sb/ip），返回出口 IP
+export async function testProxyListener(payload: {
+  protocol: string
+  port: number
+  username?: string
+  password?: string
+}): Promise<ProxyProbeResult> {
+  if (!isWeb) {
+    return Call.ByName(
+      'App.TestProxyListener',
+      payload.protocol,
+      payload.port,
+      payload.username || '',
+      payload.password || '',
+    ) as Promise<ProxyProbeResult>
+  }
+  return httpPost<ProxyProbeResult>('/api/proxy/test', payload)
+}
+
 // ===== WEB 访问密码设置（仅 WEB 模式）=====
 export interface WebAuthSettings {
   enabled: boolean

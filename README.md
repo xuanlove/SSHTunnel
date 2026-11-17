@@ -62,6 +62,7 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **认证方式**：密码认证 / 密钥认证（密钥以 PEM 文本形式存储，便于跨设备同步）
 - **自动重连**：SSH 断开后指数退避重连（初始 2s，上限 60s，可配置无限重试）
 - **端口冲突检测**：监听启动前自动检测端口占用，避免冲突
+- **代理连通性自检**：每个代理监听器可一键「测试代理端口」，经该监听端口访问 `https://api.ip.sb/ip` 并显示出口 IP，直观验证隧道是否走通
 
 ### 代理协议细节
 
@@ -412,6 +413,14 @@ user1@host1:22, user2@host2:2222, user3@host3
 - 认证配置（HTTP Basic / SOCKS5 用户名密码 / SOCKS4 UserID）
 - TLS 证书（仅 HTTPS，可在设置页一键生成自签证书）
 
+### 代理端口连通性测试
+
+配置页每个代理监听器下方有「测试代理端口」按钮：点击后后端会**经该监听端口**（`127.0.0.1:<监听端口>`）访问 `https://api.ip.sb/ip`，并在按钮旁显示出口 IP 与耗时；失败时显示具体原因（如端口未监听、认证失败、隧道不通）。
+
+- 需先**启动隧道**（监听器处于运行状态）才能测试成功
+- 支持四种协议与认证；HTTPS 代理的自签证书会被接受（隧道内目标证书仍正常校验）
+- 出于安全考虑，仅允许探测本机回环上的代理端口，目标地址固定为 `https://api.ip.sb/ip`（可自定义 http/https URL）
+
 ---
 
 ## WEB API 文档
@@ -443,6 +452,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 | POST | `/api/cert/generate` | 生成 HTTPS 自签证书 |
 | POST | `/api/hopchain/parse` | 解析跳板链简写 |
 | POST | `/api/tunnel/test` | 测试隧道连通性（不启动监听） |
+| POST | `/api/proxy/test` | 测试代理监听端口连通性，经该端口访问 `https://api.ip.sb/ip` 并返回出口 IP |
 | GET | `/api/version` | 查询当前版本信息 |
 | GET | `/api/version/check` | 检查 GitHub Release 新版本 |
 | GET | `/api/auth/settings` | 查询访问密码设置（是否开启、用户名） |

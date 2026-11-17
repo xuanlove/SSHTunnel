@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as api from '@/api'
 import type { ProxyListener, ProxyProtocol } from '@/types'
@@ -101,6 +101,38 @@ const portCounts = computed(() => {
 function isPortDuplicated(port: number) {
   return (portCounts.value[port] || 0) > 1
 }
+
+// ===== 代理监听端口连通性测试 =====
+interface ProbeState {
+  loading: boolean
+  ip?: string
+  elapsed?: number
+  target?: string
+  error?: string
+}
+const probeStates = ref<Record<string, ProbeState>>({})
+
+async function handleTestProxy(pl: ProxyListener) {
+  probeStates.value[pl.id] = { loading: true }
+  try {
+    const res = await api.testProxyListener({
+      protocol: pl.protocol,
+      port: pl.listen_port,
+      username: pl.auth?.username || '',
+      password: pl.auth?.password || '',
+    })
+    probeStates.value[pl.id] = {
+      loading: false,
+      ip: res.ip,
+      elapsed: res.elapsed_ms,
+      target: res.target,
+    }
+    ElMessage.success(`代理连通，出口 IP: ${res.ip}`)
+  } catch (e: any) {
+    probeStates.value[pl.id] = { loading: false, error: e?.message || '测试失败' }
+    ElMessage.error(e?.message || '测试失败')
+  }
+}
 </script>
 
 <template>
@@ -183,6 +215,25 @@ function isPortDuplicated(port: number) {
           </el-col>
         </el-row>
       </div>
+
+      <div class="probe-row">
+        <el-button
+          size="small"
+          :loading="probeStates[pl.id]?.loading"
+          @click="handleTestProxy(pl)"
+        >
+          测试代理端口
+        </el-button>
+        <template v-if="probeStates[pl.id] && !probeStates[pl.id].loading">
+          <el-tag v-if="probeStates[pl.id].ip" type="success" size="small">
+            出口 IP: {{ probeStates[pl.id].ip }}（{{ probeStates[pl.id].elapsed }}ms）
+          </el-tag>
+          <el-tag v-else type="danger" size="small" class="probe-error">
+            {{ probeStates[pl.id].error }}
+          </el-tag>
+        </template>
+        <span class="hint">经该监听端口访问 {{ probeStates[pl.id]?.target || 'https://api.ip.sb/ip' }}，用于验证隧道连通性（需先启动隧道）</span>
+      </div>
     </div>
 
     <el-button class="add-btn" @click="addListener">+ 添加监听器</el-button>
@@ -231,6 +282,19 @@ function isPortDuplicated(port: number) {
 .hint {
   font-size: 12px;
   color: #ebb563;
+}
+.probe-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-top: 1px dashed #3a3f4b;
+  padding-top: 8px;
+}
+.probe-error {
+  max-width: 460px;
+  white-space: normal;
+  height: auto;
 }
 .add-btn {
   border-style: dashed;

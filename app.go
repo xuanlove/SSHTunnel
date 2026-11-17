@@ -177,5 +177,16 @@ func (a *App) TestTunnelConfig(cfg config.TunnelConfig) error {
 	return testSSHConnection(hops)
 }
 
+// TestProxyListener 测试代理监听端口连通性（经代理访问目标，返回出口 IP）
+func (a *App) TestProxyListener(protocol string, portNum int, username, password string) (*proxy.ProbeResult, error) {
+	return proxy.Probe(proxy.ProbeOptions{
+		Protocol: protocol,
+		Host:     "127.0.0.1",
+		Port:     portNum,
+		Username: username,
+		Password: password,
+	})
+}
+
 // 用于上下文传递（保留 context 引用）
 var _ = context.Background

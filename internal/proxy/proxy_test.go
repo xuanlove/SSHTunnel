@@ -327,7 +327,8 @@ func TestHTTPProxy_CONNECT(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for total < len(expected) && time.Now().Before(deadline) {
 		conn.SetReadDeadline(deadline)
-		n, err := conn.Read(buf[total:])
+		// 必须经 br 读取：CONNECT 响应后 bufio 可能已缓冲 "ECHO:" 前缀
+		n, err := br.Read(buf[total:])
 		if err != nil {
 			break
 		}

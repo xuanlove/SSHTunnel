@@ -97,6 +97,7 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/cert/generate", h.handleCertGenerate)
 	mux.HandleFunc("/hopchain/parse", h.handleHopChainParse)
 	mux.HandleFunc("/tunnel/test", h.handleTunnelTest)
+	mux.HandleFunc("/proxy/test", h.handleProxyTest)
 	mux.HandleFunc("/version", h.handleVersion)
 	mux.HandleFunc("/version/check", h.handleVersionCheck)
 	mux.HandleFunc("/auth/settings", h.handleAuthSettings)
@@ -474,6 +475,46 @@ func (h *Handler) handleTunnelTest(w http.ResponseWriter, r *http.Request) {
 	}
 	client.Close()
 	writeJSON(w, 0, "success", nil)
+}
+
+// handleProxyTest 测试代理监听端口连通性：经该代理访问目标地址（默认 api.ip.sb/ip）并返回出口 IP。
+// 安全约束：只探测本机回环 127.0.0.1 上的代理端口，避免被用作 SSRF 跳板。
+func (h *Handler) handleProxyTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	var req struct {
+		Protocol string `json:"protocol"`
+		Port     int    `json:"port"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Target   string `json:"target"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	if req.Port < 1 || req.Port > 65535 {
+		writeError(w, 400, "无效的代理端口")
+		return
+	}
+
+	res, err := proxy.Probe(proxy.ProbeOptions{
+		Protocol: req.Protocol,
+		Host:     "127.0.0.1",
+		Port:     req.Port,
+		Username: req.Username,
+		Password: req.Password,
+		Target:   req.Target,
+	})
+	if err != nil {
+		h.log.Warnf("代理连通性测试失败 (port=%d protocol=%s): %v", req.Port, req.Protocol, err)
+		writeError(w, 50002, "代理连通性测试失败: "+err.Error())
+		return
+	}
+	h.log.Infof("代理连通性测试成功 (port=%d protocol=%s): 出口 IP=%s 耗时 %dms", req.Port, req.Protocol, res.IP, res.ElapsedMS)
+	writeJSON(w, 0, "success", res)
 }
 
 // splitPath 拆分 URL 路径（忽略空段）
