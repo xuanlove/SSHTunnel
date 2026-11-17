@@ -22,8 +22,7 @@ type Handler struct {
 	tunnelMgr *tunnel.Manager
 	log       *logger.Logger
 	jwtSecret []byte
-	authUser  string
-	authPass  string // 明文密码（启动时传入）
+	auth      *AuthStore // 运行时鉴权状态（可在系统设置中动态开启/关闭）
 	hub       *Hub
 	version   string // 当前版本号（构建时注入）
 	commit    string // git commit
@@ -31,18 +30,41 @@ type Handler struct {
 	repo      string // GitHub 仓库，用于版本检查
 }
 
-// NewHandler 创建 API 处理器
+// NewHandler 创建 API 处理器。
+// authUser 非空时（--auth 启动参数）初始化为已启用状态（仅内存）。
 func NewHandler(cfgMgr *config.Manager, tunnelMgr *tunnel.Manager, log *logger.Logger,
 	jwtSecret []byte, authUser, authPass string, hub *Hub) *Handler {
-	return &Handler{
+	h := &Handler{
 		cfgMgr:    cfgMgr,
 		tunnelMgr: tunnelMgr,
 		log:       log,
 		jwtSecret: jwtSecret,
-		authUser:  authUser,
-		authPass:  authPass,
+		auth:      NewAuthStore(""),
 		hub:       hub,
 	}
+	if authUser != "" {
+		h.auth.initFromCLI(authUser, authPass)
+	}
+	return h
+}
+
+// UsePersistentAuth 加载持久化的访问密码设置（settings.json）。
+// 若启动时提供了 --auth 参数，则以此覆盖（仅内存，不落盘）。
+// WEB 模式由 main.go 调用；桌面模式无 WEB 服务，不调用。
+func (h *Handler) UsePersistentAuth(cliUser, cliPass string) {
+	h.auth = NewAuthStore(DefaultAuthStorePath())
+	if cliUser != "" {
+		h.auth.initFromCLI(cliUser, cliPass)
+		h.log.Info("已通过 --auth 启动参数启用访问密码（覆盖 settings.json）")
+	}
+	if h.auth.Enabled() {
+		h.log.Infof("WEB 访问密码保护已启用 (user=%s)", h.auth.Username())
+	}
+}
+
+// AuthEnabled 当前是否启用访问密码（供中间件动态判断）。
+func (h *Handler) AuthEnabled() bool {
+	return h.auth.Enabled()
 }
 
 // WithVersion 注入版本信息（构建时由 main.go 调用）。
@@ -77,6 +99,7 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/tunnel/test", h.handleTunnelTest)
 	mux.HandleFunc("/version", h.handleVersion)
 	mux.HandleFunc("/version/check", h.handleVersionCheck)
+	mux.HandleFunc("/auth/settings", h.handleAuthSettings)
 
 	return mux
 }
@@ -128,6 +151,10 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "方法不允许")
 		return
 	}
+	if !h.auth.Enabled() {
+		writeError(w, 40003, "访问密码未开启，无需登录")
+		return
+	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -136,7 +163,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
-	if req.Username != h.authUser || req.Password != h.authPass {
+	if !h.auth.Verify(req.Username, req.Password) {
 		h.log.Infof("登录失败: 用户名或密码错误 (user=%s)", req.Username)
 		writeError(w, 40001, "用户名或密码错误")
 		return
@@ -151,6 +178,54 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		"token":      token,
 		"expires_at": expiresAt,
 	})
+}
+
+// handleAuthSettings WEB 访问密码设置：GET 查询，PUT 开启/关闭并设置凭据。
+// 开启成功后返回 token，便于当前会话无缝续用（否则下一次请求即需登录）。
+func (h *Handler) handleAuthSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 0, "success", map[string]interface{}{
+			"enabled":  h.auth.Enabled(),
+			"username": h.auth.Username(),
+		})
+	case http.MethodPut:
+		var req struct {
+			Enabled  bool   `json:"enabled"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, 400, "请求格式错误")
+			return
+		}
+		var err error
+		if req.Enabled {
+			err = h.auth.Set(req.Username, req.Password)
+		} else {
+			err = h.auth.Disable()
+		}
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		resp := map[string]interface{}{
+			"enabled":  h.auth.Enabled(),
+			"username": h.auth.Username(),
+		}
+		if req.Enabled {
+			h.log.Infof("WEB 访问密码已开启 (user=%s)", req.Username)
+			if token, exp, err := generateJWT(req.Username, h.jwtSecret); err == nil {
+				resp["token"] = token
+				resp["expires_at"] = exp
+			}
+		} else {
+			h.log.Info("WEB 访问密码已关闭")
+		}
+		writeJSON(w, 0, "success", resp)
+	default:
+		writeError(w, 405, "方法不允许")
+	}
 }
 
 // handleConfigs 配置列表 CRUD

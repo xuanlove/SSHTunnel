@@ -75,9 +75,10 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 ### 管理界面
 
 - **桌面端**：Wails + WebView 原生应用（Windows / Linux / macOS）
-- **WEB 面板**：内置 HTTP/HTTPS 服务器，浏览器即可管理（可选密码访问）
+- **WEB 面板**：内置 HTTP/HTTPS 服务器，浏览器即可管理
+- **访问密码**：可在「系统设置」中随时开启/关闭（**默认不开启**），凭据以 bcrypt 哈希保存于服务器本地
 - **实时推送**：日志与隧道状态变更通过 WebSocket 实时推送到前端
-- **JWT 鉴权**：WEB 模式下可选启用密码访问，Token 有效期 24 小时
+- **JWT 鉴权**：开启访问密码后，登录获取 Token（24 小时有效）
 - **TLS 支持**：WEB 面板与 HTTPS 代理均可使用 TLS
 
 ---
@@ -249,11 +250,17 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 
 ### WEB 模式（密码保护）
 
+两种方式启用访问密码：
+
+1. 启动参数（临时覆盖，重启后以 `settings.json` 为准）：
+
 ```bash
 ./sshtunnel --mode=web --web-port=8090 --auth=admin:yourpassword
 ```
 
-首次访问跳转至登录页，输入凭据后获取 JWT Token（24 小时有效）。
+2. **系统设置页（推荐）**：打开 WEB 面板 → 左侧「系统设置」→「WEB 访问密码」卡片，打开「启用访问密码」开关，填写用户名与密码（至少 6 位）后保存。设置持久化到 `<配置目录>/sshtunnel/settings.json`，重启后仍然生效；无需重启即可下发登录要求。
+
+首次访问将跳转至登录页，输入凭据后获取 JWT Token（24 小时有效）。
 
 ### 启用 HTTPS（WEB 面板）
 
@@ -438,6 +445,8 @@ user1@host1:22, user2@host2:2222, user3@host3
 | POST | `/api/tunnel/test` | 测试隧道连通性（不启动监听） |
 | GET | `/api/version` | 查询当前版本信息 |
 | GET | `/api/version/check` | 检查 GitHub Release 新版本 |
+| GET | `/api/auth/settings` | 查询访问密码设置（是否开启、用户名） |
+| PUT | `/api/auth/settings` | 开启/关闭访问密码并设置凭据（开启成功返回 token） |
 
 ### WebSocket 端点
 
@@ -819,6 +828,10 @@ npm run preview    # 预览构建产物
 ---
 
 ## 版本更新说明
+
+### 开发中（下个版本）
+
+- **WEB 访问密码可在「系统设置」中动态开启/关闭**（默认不开启）：新增 `GET/PUT /api/auth/settings`，凭据以 bcrypt 哈希持久化到 `settings.json`，开启即时生效无需重启，开启成功自动为当前会话签发 token；`--auth` 启动参数保留为临时覆盖
 
 ### v1.1.0
 

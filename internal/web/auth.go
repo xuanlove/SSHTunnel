@@ -9,12 +9,12 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// authMiddleware 可选鉴权中间件
-// authEnabled=false 时直接放行；true 时校验 JWT Token
-func authMiddleware(authEnabled bool, jwtSecret []byte) func(http.Handler) http.Handler {
+// authMiddleware 可选鉴权中间件（支持运行时动态开关）
+// enabled() 返回 false 时直接放行；true 时校验 JWT Token
+func authMiddleware(enabled func() bool, jwtSecret []byte) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !authEnabled {
+			if !enabled() {
 				next.ServeHTTP(w, r)
 				return
 			}

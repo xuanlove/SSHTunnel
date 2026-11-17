@@ -12,7 +12,7 @@ import (
 
 // 测试鉴权状态接口（无密码模式）
 func TestAuthStatusDisabled(t *testing.T) {
-	srv := NewServer(Config{AuthEnabled: false}, NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil))
+	srv := NewServer(Config{}, NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil))
 	req := httptest.NewRequest("GET", "/api/auth/status", nil)
 	w := httptest.NewRecorder()
 	srv.handleAuthStatus(w, req)
@@ -35,7 +35,7 @@ func TestNoAuthMiddlewarePassThrough(t *testing.T) {
 		called = true
 		w.WriteHeader(200)
 	})
-	mw := authMiddleware(false, []byte("secret"))
+	mw := authMiddleware(func() bool { return false }, []byte("secret"))
 	mw(next).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 	if !called {
 		t.Error("无密码模式应该直接放行")
@@ -47,7 +47,7 @@ func TestAuthMiddlewareRejectNoToken(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("不应调用下一处理器")
 	})
-	mw := authMiddleware(true, []byte("secret"))
+	mw := authMiddleware(func() bool { return true }, []byte("secret"))
 	w := httptest.NewRecorder()
 	mw(next).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	if w.Code != http.StatusUnauthorized {
@@ -66,7 +66,7 @@ func TestAuthMiddlewareValidToken(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	})
-	mw := authMiddleware(true, secret)
+	mw := authMiddleware(func() bool { return true }, secret)
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	mw(next).ServeHTTP(httptest.NewRecorder(), req)
@@ -80,7 +80,7 @@ func TestAuthMiddlewareInvalidToken(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("不应调用下一处理器")
 	})
-	mw := authMiddleware(true, []byte("secret"))
+	mw := authMiddleware(func() bool { return true }, []byte("secret"))
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("Authorization", "Bearer invalid-token")
 	w := httptest.NewRecorder()

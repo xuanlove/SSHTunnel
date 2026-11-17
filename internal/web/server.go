@@ -17,14 +17,11 @@ var assetsFS embed.FS
 
 // Config WEB 服务配置
 type Config struct {
-	Host       string // 监听地址
-	Port       int    // 监听端口
-	AuthEnabled bool   // 是否启用密码
-	Username   string // 用户名
-	Password   string // 明文密码（启动时由 --auth=user:pass 解析）
-	JWTSecret  []byte // JWT 签名密钥
-	TLSCert    string // TLS 证书路径
-	TLSKey     string // TLS 私钥路径
+	Host      string // 监听地址
+	Port      int    // 监听端口
+	JWTSecret []byte // JWT 签名密钥
+	TLSCert   string // TLS 证书路径
+	TLSKey    string // TLS 私钥路径
 }
 
 // Server WEB API 服务器
@@ -56,8 +53,8 @@ func (s *Server) Start() error {
 	}
 
 	// 安全警告
-	if !s.cfg.AuthEnabled && (s.cfg.Host == "0.0.0.0" || s.cfg.Host == "::") {
-		log.Printf("⚠️  警告：WEB 面板以无密码模式监听所有网卡 %s，任何能访问本机端口 %d 的设备均可控制隧道，请确认网络环境可信", s.cfg.Host, s.cfg.Port)
+	if !s.handler.AuthEnabled() && (s.cfg.Host == "0.0.0.0" || s.cfg.Host == "::") {
+		log.Printf("⚠️  警告：WEB 面板以无密码模式监听所有网卡 %s，任何能访问本机端口 %d 的设备均可控制隧道；可在「系统设置」中开启访问密码，或确认网络环境可信", s.cfg.Host, s.cfg.Port)
 	}
 
 	log.Printf("WEB 面板启动: http://%s", addr)
@@ -83,13 +80,12 @@ func (s *Server) buildRoutes() *http.ServeMux {
 
 	// 公开路由
 	mux.HandleFunc("/api/auth/status", s.handleAuthStatus)
-	if s.cfg.AuthEnabled {
-		mux.HandleFunc("/api/login", s.handler.handleLogin)
-	}
+	// 登录接口始终注册；未开启访问密码时返回提示（兼容运行时动态开启）
+	mux.HandleFunc("/api/login", s.handler.handleLogin)
 
-	// 受保护 API（无密码模式直接放行，密码模式需 Token）
+	// 受保护 API（未启用密码时直接放行，启用后需 Token；支持运行时切换）
 	protected := http.StripPrefix("/api", s.handler.apiRouter())
-	authed := authMiddleware(s.cfg.AuthEnabled, s.cfg.JWTSecret)(protected)
+	authed := authMiddleware(s.handler.AuthEnabled, s.cfg.JWTSecret)(protected)
 	mux.Handle("/api/", authed)
 
 	// 静态文件（前端 SPA）
@@ -107,11 +103,11 @@ func (s *Server) buildRoutes() *http.ServeMux {
 	return mux
 }
 
-// handleAuthStatus 返回当前鉴权状态
+// handleAuthStatus 返回当前鉴权状态（动态）
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	tlsEnabled := s.cfg.TLSCert != "" && s.cfg.TLSKey != ""
 	writeJSON(w, 0, "success", map[string]interface{}{
-		"auth_enabled": s.cfg.AuthEnabled,
+		"auth_enabled": s.handler.AuthEnabled(),
 		"tls_enabled":  tlsEnabled,
 	})
 }

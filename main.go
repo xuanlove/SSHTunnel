@@ -86,15 +86,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 解析鉴权配置
-	authEnabled, authUser, authPass := parseAuth(*flagAuth)
+	// 解析鉴权配置（--auth 为启动参数，作为运行时设置的初始值/覆盖）
+	_, authUser, authPass := parseAuth(*flagAuth)
 
 	// 初始化共享业务层
 	app := NewApp()
 
 	// WEB 模式或混合模式：启动 WEB 服务
 	if mode == ModeWeb || mode == ModeBoth {
-		startWebServer(app, authEnabled, authUser, authPass)
+		startWebServer(app, authUser, authPass)
 	}
 
 	// 桌面模式或混合模式：启动 Wails
@@ -134,7 +134,7 @@ func generateJWTSecret() []byte {
 }
 
 // startWebServer 启动 WEB 服务器
-func startWebServer(app *App, authEnabled bool, authUser, authPass string) {
+func startWebServer(app *App, authUser, authPass string) {
 	// 初始化业务层
 	if err := app.Init(); err != nil {
 		log.Fatalf("业务层初始化失败: %v", err)
@@ -161,19 +161,19 @@ func startWebServer(app *App, authEnabled bool, authUser, authPass string) {
 
 	// 创建 API Handler
 	handler := web.NewHandler(app.cfgMgr, app.tunnelMgr, app.logger,
-		generateJWTSecret(), authUser, authPass, hub).
+		generateJWTSecret(), "", "", hub).
 		WithVersion(version, commit, buildVariant, *flagRepo)
+
+	// 加载持久化的访问密码设置；--auth 启动参数覆盖（仅内存）
+	handler.UsePersistentAuth(authUser, authPass)
 
 	// 创建并启动服务器
 	srv := web.NewServer(web.Config{
-		Host:        *flagWebHost,
-		Port:        *flagWebPort,
-		AuthEnabled: authEnabled,
-		Username:    authUser,
-		Password:    authPass,
-		JWTSecret:   handler.JWTSecret(),
-		TLSCert:     *flagTLSCert,
-		TLSKey:      *flagTLSKey,
+		Host:      *flagWebHost,
+		Port:      *flagWebPort,
+		JWTSecret: handler.JWTSecret(),
+		TLSCert:   *flagTLSCert,
+		TLSKey:    *flagTLSKey,
 	}, handler)
 
 	go func() {

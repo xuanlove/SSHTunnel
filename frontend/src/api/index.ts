@@ -212,6 +212,30 @@ export async function testTunnelConfig(cfg: TunnelConfig): Promise<void> {
   await httpPost('/api/tunnel/test', cfg)
 }
 
+// ===== WEB 访问密码设置（仅 WEB 模式）=====
+export interface WebAuthSettings {
+  enabled: boolean
+  username: string
+}
+
+export async function getWebAuthSettings(): Promise<WebAuthSettings> {
+  if (!isWeb) return { enabled: false, username: '' }
+  return httpGet<WebAuthSettings>('/api/auth/settings')
+}
+
+// 开启/关闭访问密码。开启成功后后端返回 token，自动保存当前会话以免立即掉线。
+export async function updateWebAuthSettings(payload: {
+  enabled: boolean
+  username: string
+  password: string
+}): Promise<WebAuthSettings> {
+  if (!isWeb) throw new Error('仅 WEB 模式支持访问密码设置')
+  const res = await httpPut<any>('/api/auth/settings', payload)
+  if (res?.token) setToken(res.token)
+  if (res && !res.enabled) setToken(null)
+  return { enabled: !!res?.enabled, username: res?.username || '' }
+}
+
 // ===== 事件订阅 =====
 export function onLogNew(callback: (entry: LogEntry) => void): () => void {
   if (!isWeb) {
