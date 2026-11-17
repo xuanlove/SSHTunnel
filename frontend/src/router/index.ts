@@ -78,4 +78,33 @@ router.beforeEach(async (to, from, next) => {
   next()
 })
 
+// 懒加载 chunk 失败（典型场景：升级后浏览器仍引用旧 hash 的文件）时，
+// 路由导航会被中止，表现为「点击菜单没有任何反应」。此处强制整页刷新拉取新资源。
+const RELOAD_FLAG = 'sshtunnel_chunk_reload'
+
+router.onError((err: unknown) => {
+  const msg = String((err as any)?.message || err || '')
+  if (/dynamically imported module|module script|Loading chunk|Importing a module/i.test(msg)) {
+    let reloaded = false
+    try {
+      reloaded = sessionStorage.getItem(RELOAD_FLAG) === '1'
+      if (!reloaded) sessionStorage.setItem(RELOAD_FLAG, '1')
+    } catch {
+      // 忽略隐私模式下的存储异常
+    }
+    if (!reloaded) {
+      window.location.reload()
+    }
+  }
+})
+
+// 导航成功说明资源正常，清除刷新标记
+router.afterEach(() => {
+  try {
+    sessionStorage.removeItem(RELOAD_FLAG)
+  } catch {
+    // 忽略
+  }
+})
+
 export default router

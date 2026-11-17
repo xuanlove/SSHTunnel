@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -92,10 +93,30 @@ func (s *Server) buildRoutes() *http.ServeMux {
 	staticFS, _ := fs.Sub(assetsFS, "assets")
 	fileServer := http.FileServer(http.FS(staticFS))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// SPA fallback：不存在的路径返回 index.html
 		path := r.URL.Path
+
+		// 资源不存在
 		if path != "/" && !fileExists(staticFS, path) {
+			// 带扩展名的静态资源缺失（典型场景：升级后浏览器仍引用旧 hash 的 chunk）
+			// 必须返回 404，不能回退成 index.html —— 否则浏览器拿 HTML 当 JS 解析，
+			// 动态导入失败会让前端路由导航被中止，表现为"点击菜单没有任何反应"。
+			if filepath.Ext(path) != "" {
+				http.NotFound(w, r)
+				return
+			}
+			// 前端路由（无扩展名）→ SPA fallback 到 index.html
 			r.URL.Path = "/"
+		}
+
+		// 缓存策略：
+		// - index.html（含 SPA fallback）禁止缓存，保证升级后能拿到新的资源引用
+		// - 带内容 hash 的 assets 长期缓存，提升加载速度
+		if r.URL.Path == "/" || strings.HasSuffix(r.URL.Path, ".html") {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
 		fileServer.ServeHTTP(w, r)
 	})
