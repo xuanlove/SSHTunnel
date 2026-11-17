@@ -1,12 +1,14 @@
 package web
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"sshtunnel/internal/config"
 	"sshtunnel/internal/logger"
@@ -24,6 +26,8 @@ type Handler struct {
 	log       *logger.Logger
 	jwtSecret []byte
 	auth      *AuthStore // 运行时鉴权状态（可在系统设置中动态开启/关闭）
+	tls       *TLSStore  // WEB 面板 HTTPS 设置（可在系统设置中动态开启/关闭）
+	reloadTLS func()     // 由 WEB Server 注入，用于热重启监听
 	hub       *Hub
 	version   string // 当前版本号（构建时注入）
 	commit    string // git commit
@@ -41,6 +45,7 @@ func NewHandler(cfgMgr *config.Manager, tunnelMgr *tunnel.Manager, log *logger.L
 		log:       log,
 		jwtSecret: jwtSecret,
 		auth:      NewAuthStore(""),
+		tls:       NewTLSStore(""),
 		hub:       hub,
 	}
 	if authUser != "" {
@@ -54,6 +59,7 @@ func NewHandler(cfgMgr *config.Manager, tunnelMgr *tunnel.Manager, log *logger.L
 // WEB 模式由 main.go 调用；桌面模式无 WEB 服务，不调用。
 func (h *Handler) UsePersistentAuth(cliUser, cliPass string) {
 	h.auth = NewAuthStore(DefaultAuthStorePath())
+	h.tls = NewTLSStore(DefaultWebTLSSettingsPath())
 	// 使用持久化的 JWT 密钥：服务重启/升级后已签发的 Token 仍然有效
 	h.jwtSecret = h.auth.Secret()
 	if cliUser != "" {
@@ -62,6 +68,9 @@ func (h *Handler) UsePersistentAuth(cliUser, cliPass string) {
 	}
 	if h.auth.Enabled() {
 		h.log.Infof("WEB 访问密码保护已启用 (user=%s)", h.auth.Username())
+	}
+	if s := h.tls.Settings(); s.Enabled {
+		h.log.Infof("已启用 WEB 面板 HTTPS（证书 %s）", s.CertFile)
 	}
 }
 
@@ -84,6 +93,16 @@ func (h *Handler) JWTSecret() []byte {
 	return h.jwtSecret
 }
 
+// SetTLSReloader 注入 TLS 热重启回调（由 WEB Server 调用）。
+func (h *Handler) SetTLSReloader(fn func()) {
+	h.reloadTLS = fn
+}
+
+// TLSActive 当前监听是否已启用 HTTPS。
+func (h *Handler) TLSActive() bool {
+	return h.tls.Active()
+}
+
 // apiRouter 构建 /api 子路由
 func (h *Handler) apiRouter() http.Handler {
 	mux := http.NewServeMux()
@@ -104,6 +123,7 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/version", h.handleVersion)
 	mux.HandleFunc("/version/check", h.handleVersionCheck)
 	mux.HandleFunc("/auth/settings", h.handleAuthSettings)
+	mux.HandleFunc("/web/tls", h.handleWebTLS)
 	mux.HandleFunc("/geoip/status", h.handleGeoIPStatus)
 	mux.HandleFunc("/geoip/download", h.handleGeoIPDownload)
 	mux.HandleFunc("/geoip/settings", h.handleGeoIPSettings)
@@ -316,6 +336,76 @@ func (h *Handler) handleAuthSettings(w http.ResponseWriter, r *http.Request) {
 			h.log.Info("WEB 访问密码已关闭")
 		}
 		writeJSON(w, 0, "success", resp)
+	default:
+		writeError(w, 405, "方法不允许")
+	}
+}
+
+// handleWebTLS WEB 面板 HTTPS 设置：GET 查询，PUT 保存并热切换监听。
+// 保存后监听会在短暂延迟后重启（当前连接会断开，需改用 https:// 重新访问）。
+func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s := h.tls.Settings()
+		writeJSON(w, 0, "success", map[string]interface{}{
+			"enabled":   s.Enabled,
+			"cert_file": s.CertFile,
+			"key_file":  s.KeyFile,
+			"active":    h.tls.Active(),
+		})
+	case http.MethodPut:
+		var req struct {
+			Enabled  bool   `json:"enabled"`
+			CertFile string `json:"cert_file"`
+			KeyFile  string `json:"key_file"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, 400, "请求格式错误")
+			return
+		}
+		req.CertFile = strings.TrimSpace(req.CertFile)
+		req.KeyFile = strings.TrimSpace(req.KeyFile)
+		if req.Enabled {
+			if req.CertFile == "" || req.KeyFile == "" {
+				writeError(w, 400, "启用 HTTPS 需要填写证书与私钥文件路径")
+				return
+			}
+			if _, err := tls.LoadX509KeyPair(req.CertFile, req.KeyFile); err != nil {
+				writeError(w, 400, "证书加载失败: "+err.Error())
+				return
+			}
+		}
+
+		old := h.tls.Settings()
+		next := WebTLSSettings{Enabled: req.Enabled, CertFile: req.CertFile, KeyFile: req.KeyFile}
+		if err := h.tls.Save(next); err != nil {
+			writeError(w, 500, "保存设置失败: "+err.Error())
+			return
+		}
+
+		// 配置发生变化时需要重启监听，使 HTTP/HTTPS 切换立即生效
+		changed := old.Enabled != next.Enabled || old.CertFile != next.CertFile || old.KeyFile != next.KeyFile
+		resp := map[string]interface{}{
+			"enabled":   next.Enabled,
+			"cert_file": next.CertFile,
+			"key_file":  next.KeyFile,
+			"active":    h.tls.Active(),
+			"restarting": changed,
+		}
+		if next.Enabled {
+			h.log.Infof("WEB 面板 HTTPS 已开启（证书 %s）", next.CertFile)
+		} else {
+			h.log.Info("WEB 面板 HTTPS 已关闭")
+		}
+		writeJSON(w, 0, "success", resp)
+
+		if changed && h.reloadTLS != nil {
+			// 先让响应返回给客户端，再重启监听
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				h.reloadTLS()
+			}()
+		}
 	default:
 		writeError(w, 405, "方法不允许")
 	}
