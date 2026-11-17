@@ -119,10 +119,18 @@ detect_platform() {
     case "$arch" in
         x86_64|amd64)  arch="amd64" ;;
         aarch64|arm64) arch="arm64" ;;
-        armv7l)        arch="arm64"; warn "armv7l 仅 arm64 二进制可尝试兼容，若无法运行请自行编译" ;;
+        armv6l|armv7l|armv8l)
+            # 32 位 ARM 用户态（含 64 位内核跑 32 位系统的情况），无法运行 arm64 二进制
+            error "检测到 32 位 ARM 架构（${arch}），当前未提供对应的预编译二进制"
+            error "解决方案："
+            error "  1) 使用 64 位系统（uname -m 显示 aarch64 后重试本脚本）"
+            error "  2) 从源码构建 32 位二进制："
+            error "     GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o sshtunnel ."
+            exit 1
+            ;;
         *)
             error "不支持的架构: $arch（当前仅提供 amd64/arm64 预编译二进制）"
-            error "可从源码构建: go build ."
+            error "可从源码构建: GOOS=linux GOARCH=<目标架构> CGO_ENABLED=0 go build -o sshtunnel ."
             exit 1
             ;;
     esac
