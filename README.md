@@ -829,9 +829,10 @@ npm run preview    # 预览构建产物
 
 ## 版本更新说明
 
-### 开发中（下个版本）
+### v1.2.0
 
-- **WEB 访问密码可在「系统设置」中动态开启/关闭**（默认不开启）：新增 `GET/PUT /api/auth/settings`，凭据以 bcrypt 哈希持久化到 `settings.json`，开启即时生效无需重启，开启成功自动为当前会话签发 token；`--auth` 启动参数保留为临时覆盖
+- **WEB 访问密码可在「系统设置」中动态开启/关闭**（默认不开启）：新增 `GET/PUT /api/auth/settings`，凭据以 bcrypt 哈希持久化到 `settings.json`（0600），开启即时生效无需重启，开启成功自动为当前会话签发 token；`--auth` 启动参数保留为临时覆盖
+- 安装脚本：默认以 WEB 模式安装 systemd 服务（`--no-service` 跳过），默认监听 `0.0.0.0:8080`；修复 systemd 无 `HOME` 导致的启动失败（unit 内置 XDG 环境）；`-v` 版本号自动补 `v` 前缀；32 位 ARM 明确报错
 
 ### v1.1.0
 
