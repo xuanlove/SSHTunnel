@@ -839,6 +839,15 @@ npm run preview    # 预览构建产物
 
 ## 版本更新说明
 
+### v1.3.0
+
+- **代理监听端口连通性测试**：配置页每个代理监听器新增「测试代理端口」按钮，经该监听端口访问 `https://api.ip.sb/ip` 并显示出口 IP 与耗时，用于验证代理监听是否真正走通隧道
+  - 支持 HTTP / HTTPS / SOCKS4 / SOCKS5 四种协议（含认证）
+  - HTTPS 代理的自签证书会被接受，隧道内目标证书仍严格校验
+  - 新增 `POST /api/proxy/test`（WEB）与 `App.TestProxyListener`（桌面）
+  - 安全约束：仅探测本机回环端口，防 SSRF
+- 修复 `TestHTTPProxy_CONNECT` 既有偶发失败（bufio 缓冲导致的回显错位）
+
 ### v1.2.0
 
 - **WEB 访问密码可在「系统设置」中动态开启/关闭**（默认不开启）：新增 `GET/PUT /api/auth/settings`，凭据以 bcrypt 哈希持久化到 `settings.json`（0600），开启即时生效无需重启，开启成功自动为当前会话签发 token；`--auth` 启动参数保留为临时覆盖
