@@ -952,6 +952,14 @@ npm run preview    # 预览构建产物
 
 ## 版本更新说明
 
+### v1.3.6
+
+- **城市级数据库来源改为 Merged-IP**：`https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb`（城市 + ASN 合并库，约 93MB）
+  - 缓存文件改为 `sshtunnel/Merged-IP.mmdb`；旧版 `GeoLite2-City.mmdb` 会自动重命名迁移，无需重新下载
+  - 改用 `maxminddb` 直接读取，兼容 `Merged-IP-City-ASN` 等非 GeoLite2 标准库类型
+  - 城市精度提升（例如 `182.91.80.200` 可解析到广西桂林，旧库仅有国家级与模糊坐标）
+- **防火墙拦截日志去重**：同一来源 IP 在 10 分钟内只记录一次告警，避免被扫描时日志刷屏
+
 ### v1.3.5
 
 - **WEB 面板 HTTPS 可在系统设置中配置**：「系统设置 → WEB 面板 HTTPS（SSL）」开启开关并直接粘贴证书/私钥 PEM 内容，保存后同端口热重启立即生效（无需重启进程），配置持久化到 `web_tls.json`
