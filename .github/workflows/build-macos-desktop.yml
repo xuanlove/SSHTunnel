@@ -13,6 +13,7 @@ on:
         default: true
   # 通过更新该文件手动触发（适用于无 Actions 写权限的令牌）
   push:
+    branches: [main]
     paths:
       - '.github/macos-build-trigger'
 
