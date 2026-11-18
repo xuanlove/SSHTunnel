@@ -8,6 +8,7 @@ const isWebMode = api.isWebMode
 const portToCheck = ref(1080)
 const portResult = ref<null | boolean>(null)
 const certInfo = ref<{ certPEM: string; keyPEM: string } | null>(null)
+const certMeta = ref<api.CertInfo | null>(null)
 
 // ===== WEB 访问密码 =====
 const authForm = ref({ enabled: false, username: '', password: '' })
@@ -181,10 +182,25 @@ async function handleCheckPort() {
 async function handleGenCert() {
   try {
     certInfo.value = await api.generateSelfSignedCert()
+    certMeta.value = null
+    if (certInfo.value.certPEM) {
+      try {
+        certMeta.value = await api.inspectCertificate(certInfo.value.certPEM)
+      } catch {
+        // 摘要失败不影响证书生成
+      }
+    }
     ElMessage.success('证书已生成')
   } catch (e: any) {
     ElMessage.error(e?.message || '生成失败')
   }
+}
+
+function formatCertTime(t: string): string {
+  const d = new Date(t)
+  if (Number.isNaN(d.getTime())) return t
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 </script>
 
@@ -324,6 +340,13 @@ async function handleGenCert() {
       <p class="desc">为 HTTPS 代理生成自签名证书（ECDSA，10 年有效期）。隧道 HTTPS 监听器采用 PEM 文本方式保存证书，可在监听器编辑页直接粘贴，或点击「生成自签证书」自动填入。</p>
       <el-button type="primary" @click="handleGenCert">生成自签证书</el-button>
       <template v-if="certInfo">
+        <div v-if="certMeta" class="cert-meta">
+          <el-tag size="small" type="info">使用者 CN: {{ certMeta.subject_cn || '（无）' }}</el-tag>
+          <el-tag size="small" :type="certMeta.expired ? 'danger' : (certMeta.days_left <= 30 ? 'warning' : 'success')">
+            到期: {{ formatCertTime(certMeta.not_after) }}
+            {{ certMeta.expired ? '（已过期）' : `（剩余 ${certMeta.days_left} 天）` }}
+          </el-tag>
+        </div>
         <div class="field-label">证书内容（PEM）</div>
         <el-input type="textarea" :rows="4" readonly :model-value="certInfo.certPEM" />
         <div class="field-label">私钥内容（PEM）</div>
@@ -395,6 +418,14 @@ async function handleGenCert() {
   font-size: 12px;
   color: #ebb563;
   line-height: 1.5;
+}
+.cert-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  margin-bottom: 4px;
 }
 .field-label {
   font-size: 12px;

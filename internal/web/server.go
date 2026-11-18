@@ -149,14 +149,18 @@ func (s *Server) buildRoutes() *http.ServeMux {
 	// 登录接口始终注册；未开启访问密码时返回提示（兼容运行时动态开启）
 	mux.HandleFunc("/api/login", s.handler.handleLogin)
 
-	// certd 等外部工具使用的证书部署 API：使用独立 Token 鉴权（不受 WEB 登录开关影响）
-	certd := http.StripPrefix("/api", certdTokenMiddleware(s.handler.tls.DeployToken)(s.handler.certRouter()))
-	mux.Handle("/api/cert/", certd)
-
 	// 受保护 API（未启用密码时直接放行，启用后需 Token；支持运行时切换）
 	protected := http.StripPrefix("/api", s.handler.apiRouter())
 	authed := authMiddleware(s.handler.AuthEnabled, s.cfg.JWTSecret)(protected)
 	mux.Handle("/api/", authed)
+
+	// 面板内部的证书工具接口（生成 / 解析）走登录鉴权，优先于下方 certd 的 /api/cert/ 前缀
+	mux.Handle("/api/cert/generate", authed)
+	mux.Handle("/api/cert/inspect", authed)
+
+	// certd 等外部工具使用的证书部署 API：使用独立 Token 鉴权（不受 WEB 登录开关影响）
+	certd := http.StripPrefix("/api", certdTokenMiddleware(s.handler.tls.DeployToken)(s.handler.certRouter()))
+	mux.Handle("/api/cert/", certd)
 
 	// 静态文件（前端 SPA）
 	staticFS, _ := fs.Sub(assetsFS, "assets")

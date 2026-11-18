@@ -132,6 +132,7 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/logs/stream", h.handleLogStream) // WebSocket
 	mux.HandleFunc("/port/check", h.handlePortCheck)
 	mux.HandleFunc("/cert/generate", h.handleCertGenerate)
+	mux.HandleFunc("/cert/inspect", h.handleCertInspect)
 	mux.HandleFunc("/hopchain/parse", h.handleHopChainParse)
 	mux.HandleFunc("/tunnel/test", h.handleTunnelTest)
 	mux.HandleFunc("/proxy/test", h.handleProxyTest)
@@ -680,6 +681,27 @@ func (h *Handler) handleCertGenerate(w http.ResponseWriter, r *http.Request) {
 		"cert_pem": certPEM,
 		"key_pem":  keyPEM,
 	})
+}
+
+// handleCertInspect 解析证书 PEM，返回使用者公用名与到期时间等摘要信息
+func (h *Handler) handleCertInspect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	var req struct {
+		CertPEM string `json:"cert_pem"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	info, err := proxy.InspectCertificate(req.CertPEM)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 0, "success", info)
 }
 
 // handleHopChainParse 解析简写跳板链

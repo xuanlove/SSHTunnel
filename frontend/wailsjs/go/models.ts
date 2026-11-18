@@ -202,3 +202,32 @@ export namespace logger {
 
 }
 
+
+export namespace proxy {
+	
+	export class CertInfo {
+	    subject_cn: string;
+	    issuer_cn: string;
+	    not_before: string;
+	    not_after: string;
+	    dns_names?: string[];
+	    expired: boolean;
+	    days_left: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new CertInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.subject_cn = source["subject_cn"];
+	        this.issuer_cn = source["issuer_cn"];
+	        this.not_before = source["not_before"];
+	        this.not_after = source["not_after"];
+	        this.dns_names = source["dns_names"];
+	        this.expired = source["expired"];
+	        this.days_left = source["days_left"];
+	    }
+	}
+
+}

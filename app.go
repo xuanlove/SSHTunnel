@@ -167,6 +167,15 @@ func (a *App) GenerateSelfSignedCert() (certPEM, keyPEM string, err error) {
 	return proxy.GenerateSelfSignedPEM()
 }
 
+// InspectCertificate 解析证书 PEM，返回使用者公用名与有效期（桌面端）
+func (a *App) InspectCertificate(certPEM string) (proxy.CertInfo, error) {
+	info, err := proxy.InspectCertificate(certPEM)
+	if err != nil {
+		return proxy.CertInfo{}, err
+	}
+	return *info, nil
+}
+
 // ParseHopChainString 解析简写格式跳板链字符串
 func (a *App) ParseHopChainString(s string) []config.HopConfig {
 	hops := parseSimpleHopChain(s)

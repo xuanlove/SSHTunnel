@@ -218,6 +218,23 @@ export async function generateSelfSignedCert(): Promise<{ certPEM: string; keyPE
   return { certPEM: result.cert_pem, keyPEM: result.key_pem }
 }
 
+// ===== 证书信息解析 =====
+export interface CertInfo {
+  subject_cn: string // 使用者公用名（CN）
+  issuer_cn: string // 颁发者公用名
+  not_before: string // 生效时间（RFC3339）
+  not_after: string // 到期时间（RFC3339）
+  dns_names?: string[]
+  expired: boolean
+  days_left: number
+}
+
+// 解析证书 PEM，返回 CN 与有效期（用于界面展示）
+export async function inspectCertificate(certPEM: string): Promise<CertInfo> {
+  if (!isWeb) return Call.ByName('App.InspectCertificate', certPEM) as Promise<CertInfo>
+  return httpPost<CertInfo>('/api/cert/inspect', { cert_pem: certPEM })
+}
+
 export async function parseHopChainString(s: string): Promise<HopConfig[]> {
   if (!isWeb) return Call.ByName('App.ParseHopChainString', s) as Promise<HopConfig[]>
   return httpPost<HopConfig[]>('/api/hopchain/parse', { chain: s })

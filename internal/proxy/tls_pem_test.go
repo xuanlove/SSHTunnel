@@ -75,6 +75,44 @@ func TestHTTPSProxyWithPEMCertificate(t *testing.T) {
 	}
 }
 
+// TestInspectCertificate 解析证书摘要：使用者 CN 与到期时间
+func TestInspectCertificate(t *testing.T) {
+	certPEM, _, err := GenerateSelfSignedPEM()
+	if err != nil {
+		t.Fatalf("生成自签证书失败: %v", err)
+	}
+	info, err := InspectCertificate(certPEM)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if info.SubjectCN != "sshtunnel-proxy" {
+		t.Errorf("使用者 CN = %q, want sshtunnel-proxy", info.SubjectCN)
+	}
+	if info.Expired {
+		t.Errorf("新生成证书不应过期")
+	}
+	if info.DaysLeft < 3000 {
+		t.Errorf("剩余天数 = %d, 期望约 3650", info.DaysLeft)
+	}
+	notAfter, err := time.Parse(time.RFC3339, info.NotAfter)
+	if err != nil || !notAfter.After(time.Now()) {
+		t.Errorf("到期时间异常: %q %v", info.NotAfter, err)
+	}
+
+	// 带证书链的 PEM（第一个块为叶子证书）也应可解析
+	chain := certPEM + certPEM
+	if info2, err := InspectCertificate(chain); err != nil || info2.SubjectCN != "sshtunnel-proxy" {
+		t.Errorf("证书链解析失败: %+v %v", info2, err)
+	}
+
+	// 非法输入
+	for _, bad := range []string{"", "not-a-cert", "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----"} {
+		if _, err := InspectCertificate(bad); err == nil {
+			t.Errorf("非法证书 %q 应返回错误", bad)
+		}
+	}
+}
+
 // TestHTTPSProxyMissingCertificate 未填写证书内容时应明确报错
 func TestHTTPSProxyMissingCertificate(t *testing.T) {
 	srv, err := BuildServer(config.ProxyListener{

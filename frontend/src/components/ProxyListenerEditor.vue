@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import * as api from '@/api'
 import type { FirewallConfig, FirewallMode, ProxyListener, ProxyProtocol } from '@/types'
 import CityRuleEditor from './CityRuleEditor.vue'
+import CertSummary from './CertSummary.vue'
 
 const props = defineProps<{ modelValue: ProxyListener[] }>()
 const emit = defineEmits<{ 'update:modelValue': [ProxyListener[]] }>()
@@ -21,7 +22,39 @@ onMounted(async () => {
     geoReady.value = false
     geoCityReady.value = false
   }
+  // 解析已有 HTTPS 证书的使用者与到期时间
+  for (const pl of props.modelValue) {
+    if (pl.protocol === 'https' && pl.tls?.cert_pem) {
+      void inspectCert(pl.id, pl.tls.cert_pem)
+    }
+  }
 })
+
+// ===== 证书摘要（使用者 CN / 到期时间）=====
+const certInfos = ref<Record<string, api.CertInfo | null>>({})
+const certErrors = ref<Record<string, string>>({})
+const certTimers: Record<string, number> = {}
+
+function scheduleInspect(id: string, pem: string) {
+  if (certTimers[id]) window.clearTimeout(certTimers[id])
+  certTimers[id] = window.setTimeout(() => void inspectCert(id, pem), 400)
+}
+
+async function inspectCert(id: string, pem: string) {
+  if (!pem.trim()) {
+    certInfos.value = { ...certInfos.value, [id]: null }
+    certErrors.value = { ...certErrors.value, [id]: '' }
+    return
+  }
+  try {
+    const info = await api.inspectCertificate(pem)
+    certInfos.value = { ...certInfos.value, [id]: info }
+    certErrors.value = { ...certErrors.value, [id]: '' }
+  } catch (e: any) {
+    certInfos.value = { ...certInfos.value, [id]: null }
+    certErrors.value = { ...certErrors.value, [id]: e?.message || '证书解析失败' }
+  }
+}
 
 // 常用国家选项（ISO 3166-1 alpha-2）
 const countryOptions = [
@@ -117,6 +150,7 @@ function updateTLS(idx: number, field: 'cert_pem' | 'key_pem', value: string) {
   if (cur.tls) {
     arr[idx] = { ...cur, tls: { ...cur.tls, [field]: value } }
     listeners.value = arr
+    if (field === 'cert_pem') scheduleInspect(cur.id, value)
   }
 }
 
@@ -128,6 +162,7 @@ async function genCert(idx: number) {
     if (cur.tls) {
       arr[idx] = { ...cur, tls: { ...cur.tls, cert_pem: certPEM, key_pem: keyPEM } }
       listeners.value = arr
+      void inspectCert(cur.id, certPEM)
     }
     ElMessage.success('自签证书已生成并填入')
   } catch (e: any) {
@@ -298,6 +333,7 @@ async function handleTestProxy(pl: ProxyListener) {
           <el-button size="small" @click="genCert(idx)">生成自签证书</el-button>
           <span class="fw-hint">也可由 certd 等工具通过部署 API 自动写入证书内容</span>
         </div>
+        <CertSummary :info="certInfos[pl.id] || null" :error="certErrors[pl.id]" />
       </div>
 
       <div class="fw-row">
@@ -429,6 +465,13 @@ async function handleTestProxy(pl: ProxyListener) {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-top: 8px;
+}
+.cert-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   margin-top: 8px;
 }
 .field-label {

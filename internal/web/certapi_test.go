@@ -307,6 +307,77 @@ func TestCertDeployTunnel(t *testing.T) {
 	}
 }
 
+// TestCertInspectEndpoint 证书摘要接口：返回使用者 CN 与到期时间
+func TestCertInspectEndpoint(t *testing.T) {
+	h := newCertTestHandler(t)
+	certPEM, _ := generateTestCertPEM(t)
+
+	body, _ := json.Marshal(map[string]string{"cert_pem": certPEM})
+	rec := httptest.NewRecorder()
+	h.handleCertInspect(rec, httptest.NewRequest("POST", "/cert/inspect", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("解析失败: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			SubjectCN string `json:"subject_cn"`
+			NotAfter  string `json:"not_after"`
+			Expired   bool   `json:"expired"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if resp.Data.SubjectCN != "test.local" {
+		t.Errorf("使用者 CN = %q, want test.local", resp.Data.SubjectCN)
+	}
+	if resp.Data.NotAfter == "" || resp.Data.Expired {
+		t.Errorf("到期信息异常: %+v", resp.Data)
+	}
+
+	// 非法证书 → 400
+	bad, _ := json.Marshal(map[string]string{"cert_pem": "bad"})
+	rec2 := httptest.NewRecorder()
+	h.handleCertInspect(rec2, httptest.NewRequest("POST", "/cert/inspect", bytes.NewReader(bad)))
+	if rec2.Code != http.StatusBadRequest {
+		t.Errorf("非法证书应返回 400，实际 %d", rec2.Code)
+	}
+
+	// 非 POST → 405
+	rec3 := httptest.NewRecorder()
+	h.handleCertInspect(rec3, httptest.NewRequest("GET", "/cert/inspect", nil))
+	if rec3.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET 应返回 405，实际 %d", rec3.Code)
+	}
+}
+
+// TestCertToolRoutesBypassCertdToken 面板内部的证书工具接口（生成/解析）走登录鉴权，
+// 不应被 certd 的 /api/cert/ Token 中间件拦截；部署接口仍必须携带 Token。
+func TestCertToolRoutesBypassCertdToken(t *testing.T) {
+	h := newCertTestHandler(t)
+	mux := NewServer(Config{}, h).buildRoutes()
+	certPEM, _ := generateTestCertPEM(t)
+	body, _ := json.Marshal(map[string]string{"cert_pem": certPEM})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/cert/inspect", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/cert/inspect 应放行，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/api/cert/generate", nil))
+	if rec2.Code != http.StatusOK {
+		t.Errorf("/api/cert/generate 应放行，实际 %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	rec3 := httptest.NewRecorder()
+	mux.ServeHTTP(rec3, httptest.NewRequest("GET", "/api/cert/targets", nil))
+	if rec3.Code != http.StatusUnauthorized {
+		t.Errorf("/api/cert/targets 应要求部署 Token，实际 %d", rec3.Code)
+	}
+}
+
 // TestCertTargets 目标列表包含 WEB 面板与 HTTPS 监听器
 func TestCertTargets(t *testing.T) {
 	h := newCertTestHandler(t)

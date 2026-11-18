@@ -513,6 +513,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 | GET | `/api/logs?limit=N` | 获取最近 N 条日志 |
 | POST | `/api/port/check` | 检测端口可用性 |
 | POST | `/api/cert/generate` | 生成 HTTPS 自签证书（返回 `cert_pem` / `key_pem` 文本） |
+| POST | `/api/cert/inspect` | 解析证书 PEM（body `{"cert_pem": "..."}`），返回使用者 CN、颁发者 CN、生效/到期时间、剩余天数与是否过期 |
 | POST | `/api/hopchain/parse` | 解析跳板链简写 |
 | POST | `/api/tunnel/test` | 测试隧道连通性（不启动监听） |
 | POST | `/api/proxy/test` | 测试代理监听端口连通性，经该端口访问 `https://api.ip.sb/ip` 并返回出口 IP |
@@ -953,6 +954,15 @@ npm run preview    # 预览构建产物
 ---
 
 ## 版本更新说明
+
+### v1.3.9
+
+- **隧道 HTTPS 证书摘要**：配置页 HTTPS 监听器在证书内容下方显示证书使用者公用名（CN）与到期日期
+  - 标签颜色随状态变化：正常为绿色、30 天内到期为橙色、已过期为红色，并显示剩余天数
+  - 粘贴/修改证书内容后自动解析（400ms 防抖），打开已有配置时立即显示
+  - 「系统设置 → WEB 面板 HTTPS」生成自签证书后同样显示 CN 与到期日期
+  - 新增 `POST /api/cert/inspect` 接口返回 `subject_cn / issuer_cn / not_before / not_after / dns_names / expired / days_left`
+- **修复证书工具接口鉴权**：`/api/cert/generate` 与 `/api/cert/inspect` 不再被 certd 部署 Token 拦截，面板内可正常调用
 
 ### v1.3.8
 
