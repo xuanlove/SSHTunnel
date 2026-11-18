@@ -11,18 +11,21 @@ const isLoginPage = computed(() => route.path === '/login')
 // 首次进入主界面时加载数据并订阅日志。
 // 用 watch 而非 onMounted：若页面首次落在登录页（onMounted 被跳过），
 // 登录成功跳回主界面后仍能正常加载，避免主界面空白。
-let initialized = false
+// 仅在实际加载成功后标记 loaded：初始进入时路由守卫可能尚未重定向到登录页，
+// 此时请求不带 Token 会失败（401），登录成功后需再次尝试加载。
+let loaded = false
 watch(
-  isLoginPage,
-  async (login) => {
-    if (login || initialized) return
-    initialized = true
+  () => route.path,
+  async (path) => {
+    if (path === '/login' || loaded) return
     try {
       await store.loadConfigs()
+      loaded = true
+      // 仅在加载成功后订阅日志，避免未授权时建立无效 WebSocket
+      store.setupLogListener()
     } catch {
-      // 失败时由 http 层统一处理（401 跳转登录等）
+      // 未授权等失败场景保持 loaded=false，待登录成功进入主界面后重试
     }
-    store.setupLogListener()
   },
   { immediate: true },
 )

@@ -36,6 +36,11 @@ function authHeaders(): Record<string, string> {
 let redirectingToLogin = false
 
 function handleUnauthorized(sentToken: string | null) {
+  // 请求发出时未携带 Token，但此后用户已登录获得新 Token：
+  // 这是一条迟到的 401，直接忽略，不能清掉刚登录的 Token 或把用户踢回登录页。
+  if (!sentToken && authToken) {
+    return
+  }
   // 仅当当前 Token 仍是本次请求发送的那个（或本就没带）时才清除，
   // 避免迟到的 401 清掉用户刚登录获得的新 Token，从而反复被踢回登录页。
   if (!sentToken || authToken === sentToken) {
