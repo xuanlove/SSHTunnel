@@ -957,10 +957,11 @@ npm run preview    # 预览构建产物
 
 ### v1.3.9
 
-- **隧道 HTTPS 证书摘要**：配置页 HTTPS 监听器在证书内容下方显示证书使用者公用名（CN）与到期日期
+- **HTTPS 证书摘要（隧道 + WEB 面板）**：证书内容下方显示证书使用者公用名（CN）与到期日期
+  - 隧道 HTTPS 监听器配置页与「系统设置 → WEB 面板 HTTPS（SSL）」均支持，打开已有证书（含 certd 部署的证书）立即显示
   - 标签颜色随状态变化：正常为绿色、30 天内到期为橙色、已过期为红色，并显示剩余天数
-  - 粘贴/修改证书内容后自动解析（400ms 防抖），打开已有配置时立即显示
-  - 「系统设置 → WEB 面板 HTTPS」生成自签证书后同样显示 CN 与到期日期
+  - 粘贴/修改证书内容后自动解析（400ms 防抖）
+  - 生成自签证书后同样显示 CN 与到期日期
   - 新增 `POST /api/cert/inspect` 接口返回 `subject_cn / issuer_cn / not_before / not_after / dns_names / expired / days_left`
 - **修复证书工具接口鉴权**：`/api/cert/generate` 与 `/api/cert/inspect` 不再被 certd 部署 Token 拦截，面板内可正常调用
 

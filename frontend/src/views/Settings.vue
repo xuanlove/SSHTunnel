@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as api from '@/api'
+import CertSummary from '@/components/CertSummary.vue'
 
 const isWebMode = api.isWebMode
 
@@ -110,6 +111,34 @@ const webTls = ref({
 })
 const webTlsSaving = ref(false)
 
+// WEB 面板证书摘要（使用者 CN / 到期时间）
+const webCertMeta = ref<api.CertInfo | null>(null)
+const webCertError = ref('')
+let webCertTimer = 0
+
+async function inspectWebCert(pem: string) {
+  if (!pem.trim()) {
+    webCertMeta.value = null
+    webCertError.value = ''
+    return
+  }
+  try {
+    webCertMeta.value = await api.inspectCertificate(pem)
+    webCertError.value = ''
+  } catch (e: any) {
+    webCertMeta.value = null
+    webCertError.value = e?.message || '证书解析失败'
+  }
+}
+
+watch(
+  () => webTls.value.certPem,
+  (pem) => {
+    if (webCertTimer) window.clearTimeout(webCertTimer)
+    webCertTimer = window.setTimeout(() => void inspectWebCert(pem), 400)
+  },
+)
+
 async function loadWebTLS() {
   try {
     const s = await api.getWebTLSSettings()
@@ -196,12 +225,6 @@ async function handleGenCert() {
   }
 }
 
-function formatCertTime(t: string): string {
-  const d = new Date(t)
-  if (Number.isNaN(d.getTime())) return t
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
 </script>
 
 <template>
@@ -301,6 +324,7 @@ function formatCertTime(t: string): string {
         :rows="5"
         placeholder="-----BEGIN CERTIFICATE-----"
       />
+      <CertSummary :info="webCertMeta" :error="webCertError" />
       <div class="field-label" style="margin-top: 10px">私钥内容（PEM）</div>
       <el-input
         v-model="webTls.keyPem"
@@ -340,13 +364,7 @@ function formatCertTime(t: string): string {
       <p class="desc">为 HTTPS 代理生成自签名证书（ECDSA，10 年有效期）。隧道 HTTPS 监听器采用 PEM 文本方式保存证书，可在监听器编辑页直接粘贴，或点击「生成自签证书」自动填入。</p>
       <el-button type="primary" @click="handleGenCert">生成自签证书</el-button>
       <template v-if="certInfo">
-        <div v-if="certMeta" class="cert-meta">
-          <el-tag size="small" type="info">使用者 CN: {{ certMeta.subject_cn || '（无）' }}</el-tag>
-          <el-tag size="small" :type="certMeta.expired ? 'danger' : (certMeta.days_left <= 30 ? 'warning' : 'success')">
-            到期: {{ formatCertTime(certMeta.not_after) }}
-            {{ certMeta.expired ? '（已过期）' : `（剩余 ${certMeta.days_left} 天）` }}
-          </el-tag>
-        </div>
+        <CertSummary :info="certMeta" />
         <div class="field-label">证书内容（PEM）</div>
         <el-input type="textarea" :rows="4" readonly :model-value="certInfo.certPEM" />
         <div class="field-label">私钥内容（PEM）</div>
@@ -418,14 +436,6 @@ function formatCertTime(t: string): string {
   font-size: 12px;
   color: #ebb563;
   line-height: 1.5;
-}
-.cert-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 12px;
-  margin-bottom: 4px;
 }
 .field-label {
   font-size: 12px;
