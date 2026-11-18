@@ -162,9 +162,9 @@ func (a *App) GetRecentLogs(limit int) []logger.Entry {
 	return a.logger.Recent(limit)
 }
 
-// GenerateSelfSignedCert 一键生成 HTTPS 代理自签证书
-func (a *App) GenerateSelfSignedCert() (certPath, keyPath string, err error) {
-	return proxy.GenerateSelfSignedCert()
+// GenerateSelfSignedCert 一键生成 HTTPS 代理自签证书（返回 PEM 文本）
+func (a *App) GenerateSelfSignedCert() (certPEM, keyPEM string, err error) {
+	return proxy.GenerateSelfSignedPEM()
 }
 
 // ParseHopChainString 解析简写格式跳板链字符串

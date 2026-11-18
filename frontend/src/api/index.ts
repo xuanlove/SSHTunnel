@@ -204,23 +204,18 @@ export async function getRecentLogs(limit: number): Promise<LogEntry[]> {
   return httpGet<LogEntry[]>(`/api/logs?limit=${limit}`)
 }
 
-export async function generateSelfSignedCert(): Promise<{ certPath: string; keyPath: string }> {
+export async function generateSelfSignedCert(): Promise<{ certPEM: string; keyPEM: string }> {
   if (!isWeb) {
     const result = await Call.ByName('App.GenerateSelfSignedCert')
     const r = result as any
-    if (r && typeof r === 'object' && !Array.isArray(r)) {
-      return {
-        certPath: r.certPath || r[0] || r.cert_path || '',
-        keyPath: r.keyPath || r[1] || r.key_path || '',
-      }
+    if (Array.isArray(r)) return { certPEM: r[0] || '', keyPEM: r[1] || '' }
+    if (r && typeof r === 'object') {
+      return { certPEM: r.certPEM || r.cert_pem || '', keyPEM: r.keyPEM || r.key_pem || '' }
     }
-    if (Array.isArray(r)) {
-      return { certPath: r[0] || '', keyPath: r[1] || '' }
-    }
-    return { certPath: String(r), keyPath: '' }
+    return { certPEM: '', keyPEM: '' }
   }
-  const result = await httpPost<{ cert_path: string; key_path: string }>('/api/cert/generate')
-  return { certPath: result.cert_path, keyPath: result.key_path }
+  const result = await httpPost<{ cert_pem: string; key_pem: string }>('/api/cert/generate')
+  return { certPEM: result.cert_pem, keyPEM: result.key_pem }
 }
 
 export async function parseHopChainString(s: string): Promise<HopConfig[]> {

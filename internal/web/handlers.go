@@ -665,20 +665,20 @@ func (h *Handler) handlePortCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleCertGenerate 生成自签证书
+// handleCertGenerate 生成自签证书（返回 PEM 文本）
 func (h *Handler) handleCertGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, 405, "方法不允许")
 		return
 	}
-	certPath, keyPath, err := proxy.GenerateSelfSignedCert()
+	certPEM, keyPEM, err := proxy.GenerateSelfSignedPEM()
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 0, "success", map[string]string{
-		"cert_path": certPath,
-		"key_path":  keyPath,
+		"cert_pem": certPEM,
+		"key_pem":  keyPEM,
 	})
 }
 

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"sshtunnel/internal/config"
@@ -27,12 +26,11 @@ type CertTargetInfo struct {
 	TunnelName string `json:"tunnel_name,omitempty"`
 	ListenerID string `json:"listener_id,omitempty"`
 	Protocol   string `json:"protocol,omitempty"`
-	CertFile   string `json:"cert_file"`
-	KeyFile    string `json:"key_file"`
-	CertExists bool   `json:"cert_exists"`
-	KeyExists  bool   `json:"key_exists"`
-	Enabled    bool   `json:"enabled"`
-	Running    bool   `json:"running"`
+	// CertConfigured 是否已配置证书：
+	// WEB 面板表示证书文件存在；隧道监听器表示配置中已保存 cert_pem/key_pem 文本
+	CertConfigured bool `json:"cert_configured"`
+	Enabled        bool `json:"enabled"`
+	Running        bool `json:"running"`
 }
 
 // CertTargets 列出全部可部署证书的目标（WEB 面板 + 所有 HTTPS 代理监听器）
@@ -41,14 +39,11 @@ func (h *Handler) CertTargets() []CertTargetInfo {
 
 	web := h.tls.Settings()
 	out = append(out, CertTargetInfo{
-		Target:     CertTargetWeb,
-		Label:      "WEB 面板",
-		CertFile:   web.CertFile,
-		KeyFile:    web.KeyFile,
-		CertExists: fileExistsAt(web.CertFile),
-		KeyExists:  fileExistsAt(web.KeyFile),
-		Enabled:    web.Enabled,
-		Running:    h.tls.Active(),
+		Target:         CertTargetWeb,
+		Label:          "WEB 面板",
+		CertConfigured: fileExistsAt(web.CertFile) && fileExistsAt(web.KeyFile),
+		Enabled:        web.Enabled,
+		Running:        h.tls.Active(),
 	})
 
 	for _, cfg := range h.cfgMgr.List() {
@@ -56,24 +51,20 @@ func (h *Handler) CertTargets() []CertTargetInfo {
 			if pl.Protocol != config.ProxyHTTPS {
 				continue
 			}
-			certFile, keyFile := "", ""
-			if pl.TLS != nil {
-				certFile, keyFile = pl.TLS.CertFile, pl.TLS.KeyFile
-			}
+			configured := pl.TLS != nil &&
+				strings.TrimSpace(pl.TLS.CertPEM) != "" &&
+				strings.TrimSpace(pl.TLS.KeyPEM) != ""
 			running := h.tunnelMgr != nil && h.tunnelMgr.IsRunning(cfg.ID)
 			out = append(out, CertTargetInfo{
-				Target:     CertTargetTunnel,
-				Label:      fmt.Sprintf("%s / %s :%d", cfg.Name, pl.Protocol, pl.ListenPort),
-				TunnelID:   cfg.ID,
-				TunnelName: cfg.Name,
-				ListenerID: pl.ID,
-				Protocol:   string(pl.Protocol),
-				CertFile:   certFile,
-				KeyFile:    keyFile,
-				CertExists: fileExistsAt(certFile),
-				KeyExists:  fileExistsAt(keyFile),
-				Enabled:    true,
-				Running:    running,
+				Target:         CertTargetTunnel,
+				Label:          fmt.Sprintf("%s / %s :%d", cfg.Name, pl.Protocol, pl.ListenPort),
+				TunnelID:       cfg.ID,
+				TunnelName:     cfg.Name,
+				ListenerID:     pl.ID,
+				Protocol:       string(pl.Protocol),
+				CertConfigured: configured,
+				Enabled:        true,
+				Running:        running,
 			})
 		}
 	}
@@ -133,28 +124,16 @@ func (h *Handler) handleCertRead(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "方法不允许")
 		return
 	}
-	target, certFile, keyFile, err := h.resolveTarget(r.URL.Query().Get("target"),
+	target, certPEM, keyPEM, err := h.resolveTargetPEM(r.URL.Query().Get("target"),
 		r.URL.Query().Get("tunnel_id"), r.URL.Query().Get("listener_id"))
 	if err != nil {
 		writeError(w, 404, err.Error())
 		return
 	}
-	certPEM, err := os.ReadFile(certFile)
-	if err != nil {
-		writeError(w, 404, "证书文件不存在: "+err.Error())
-		return
-	}
-	keyPEM, err := os.ReadFile(keyFile)
-	if err != nil {
-		writeError(w, 404, "私钥文件不存在: "+err.Error())
-		return
-	}
 	writeJSON(w, 0, "success", map[string]interface{}{
-		"target":    target,
-		"cert_file": certFile,
-		"key_file":  keyFile,
-		"cert_pem":  string(certPEM),
-		"key_pem":   string(keyPEM),
+		"target":   target,
+		"cert_pem": certPEM,
+		"key_pem":  keyPEM,
 	})
 }
 
@@ -251,7 +230,7 @@ func (h *Handler) deployToWeb(certPEM, keyPEM string, enable, restart bool) (map
 	}, nil
 }
 
-// deployToTunnel 写入 HTTPS 监听器证书文件、更新配置并按需重启隧道
+// deployToTunnel 将证书 PEM 写入监听器配置（文本模式）并按需重启隧道
 func (h *Handler) deployToTunnel(certPEM, keyPEM, tunnelID, listenerID string, restart bool) (map[string]interface{}, error) {
 	if h.cfgMgr == nil {
 		return nil, fmt.Errorf("配置管理不可用")
@@ -270,39 +249,18 @@ func (h *Handler) deployToTunnel(certPEM, keyPEM, tunnelID, listenerID string, r
 	if idx < 0 {
 		return nil, fmt.Errorf("监听器不存在: %s", listenerID)
 	}
-	pl := &cfg.ProxyListeners[idx]
-	if pl.Protocol != config.ProxyHTTPS {
+	if cfg.ProxyListeners[idx].Protocol != config.ProxyHTTPS {
 		return nil, fmt.Errorf("监听器 %s 不是 HTTPS 协议，无法部署 TLS 证书", listenerID)
-	}
-
-	certFile, keyFile := "", ""
-	if pl.TLS != nil {
-		certFile, keyFile = pl.TLS.CertFile, pl.TLS.KeyFile
-	}
-	if certFile == "" || keyFile == "" {
-		dir := WebCertDir()
-		if dir == "" {
-			return nil, fmt.Errorf("无法确定证书存放目录")
-		}
-		base := sanitizeFileName(tunnelID) + "-" + sanitizeFileName(listenerID)
-		certFile = filepath.Join(dir, base+".crt")
-		keyFile = filepath.Join(dir, base+".key")
-	}
-	if err := WritePEMFile(certFile, []byte(certPEM), 0644); err != nil {
-		return nil, fmt.Errorf("保存证书失败: %w", err)
-	}
-	if err := WritePEMFile(keyFile, []byte(keyPEM), 0600); err != nil {
-		return nil, fmt.Errorf("保存私钥失败: %w", err)
 	}
 
 	// 复制一份用于持久化，避免修改 Manager 内部状态后才失败
 	updated := *cfg
 	updated.ProxyListeners = append([]config.ProxyListener(nil), cfg.ProxyListeners...)
-	updated.ProxyListeners[idx].TLS = &config.TLSConfig{CertFile: certFile, KeyFile: keyFile}
+	updated.ProxyListeners[idx].TLS = &config.TLSConfig{CertPEM: certPEM, KeyPEM: keyPEM}
 	if err := h.cfgMgr.Save(&updated); err != nil {
 		return nil, fmt.Errorf("保存配置失败: %w", err)
 	}
-	h.log.Infof("certd 已部署证书到隧道 %s 的 HTTPS 监听器 %s", cfg.Name, listenerID)
+	h.log.Infof("certd 已部署证书到隧道 %s 的 HTTPS 监听器 %s（文本模式）", cfg.Name, listenerID)
 
 	running := h.tunnelMgr != nil && h.tunnelMgr.IsRunning(cfg.ID)
 	restarted := false
@@ -319,26 +277,33 @@ func (h *Handler) deployToTunnel(certPEM, keyPEM, tunnelID, listenerID string, r
 		h.log.Infof("隧道已重启以加载新证书: %s", cfg.Name)
 	}
 	return map[string]interface{}{
-		"target":      CertTargetTunnel,
-		"tunnel_id":   cfg.ID,
-		"tunnel_name": cfg.Name,
-		"listener_id": listenerID,
-		"cert_file":   certFile,
-		"key_file":    keyFile,
-		"running":     running,
-		"restarted":   restarted,
+		"target":          CertTargetTunnel,
+		"tunnel_id":       cfg.ID,
+		"tunnel_name":     cfg.Name,
+		"listener_id":     listenerID,
+		"cert_configured": true,
+		"running":         running,
+		"restarted":       restarted,
 	}, nil
 }
 
-// resolveTarget 解析部署目标对应的证书/私钥路径
-func (h *Handler) resolveTarget(target, tunnelID, listenerID string) (string, string, string, error) {
+// resolveTargetPEM 解析部署目标对应的证书/私钥 PEM 文本
+func (h *Handler) resolveTargetPEM(target, tunnelID, listenerID string) (string, string, string, error) {
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case CertTargetWeb:
 		s := h.tls.Settings()
 		if s.CertFile == "" || s.KeyFile == "" {
 			return "", "", "", fmt.Errorf("WEB 面板尚未配置证书")
 		}
-		return CertTargetWeb, s.CertFile, s.KeyFile, nil
+		certPEM, err := os.ReadFile(s.CertFile)
+		if err != nil {
+			return "", "", "", fmt.Errorf("证书文件不存在: %w", err)
+		}
+		keyPEM, err := os.ReadFile(s.KeyFile)
+		if err != nil {
+			return "", "", "", fmt.Errorf("私钥文件不存在: %w", err)
+		}
+		return CertTargetWeb, string(certPEM), string(keyPEM), nil
 	case CertTargetTunnel:
 		if h.cfgMgr == nil {
 			return "", "", "", fmt.Errorf("配置管理不可用")
@@ -351,30 +316,14 @@ func (h *Handler) resolveTarget(target, tunnelID, listenerID string) (string, st
 			if pl.ID != listenerID {
 				continue
 			}
-			if pl.Protocol != config.ProxyHTTPS || pl.TLS == nil || pl.TLS.CertFile == "" {
+			if pl.Protocol != config.ProxyHTTPS || pl.TLS == nil ||
+				strings.TrimSpace(pl.TLS.CertPEM) == "" || strings.TrimSpace(pl.TLS.KeyPEM) == "" {
 				return "", "", "", fmt.Errorf("监听器未配置 HTTPS 证书")
 			}
-			return CertTargetTunnel, pl.TLS.CertFile, pl.TLS.KeyFile, nil
+			return CertTargetTunnel, pl.TLS.CertPEM, pl.TLS.KeyPEM, nil
 		}
 		return "", "", "", fmt.Errorf("监听器不存在: %s", listenerID)
 	default:
 		return "", "", "", fmt.Errorf("未知的部署目标: %s", target)
 	}
-}
-
-// sanitizeFileName 过滤文件名中的不安全字符
-func sanitizeFileName(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
-	}
-	if b.Len() == 0 {
-		return "cert"
-	}
-	return b.String()
 }

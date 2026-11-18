@@ -64,10 +64,37 @@ type AuthConfig struct {
 	Password string `json:"password"`
 }
 
-// TLSConfig TLS 证书配置（HTTPS 代理专用）
+// TLSConfig TLS 证书配置（HTTPS 代理专用）。
+// 采用 PEM 文本方式存储，便于在界面中直接展示与编辑（certd 部署也写入此处）。
 type TLSConfig struct {
-	CertFile string `json:"cert_file"`
-	KeyFile  string `json:"key_file"`
+	CertPEM string `json:"cert_pem,omitempty"` // 证书 PEM（可含完整证书链）
+	KeyPEM  string `json:"key_pem,omitempty"`  // 私钥 PEM
+	// CertFile / KeyFile 旧版文件路径字段：仅在加载旧配置时用于自动迁移为 PEM，之后不再写入
+	CertFile string `json:"cert_file,omitempty"`
+	KeyFile  string `json:"key_file,omitempty"`
+}
+
+// migrateTLSFromFiles 将旧版文件路径配置迁移为 PEM 文本（读取成功后清空路径字段）
+func migrateTLSFromFiles(listeners []ProxyListener) {
+	for i := range listeners {
+		t := listeners[i].TLS
+		if t == nil {
+			continue
+		}
+		if t.CertPEM == "" && t.CertFile != "" {
+			if data, err := os.ReadFile(t.CertFile); err == nil {
+				t.CertPEM = string(data)
+			}
+		}
+		if t.KeyPEM == "" && t.KeyFile != "" {
+			if data, err := os.ReadFile(t.KeyFile); err == nil {
+				t.KeyPEM = string(data)
+			}
+		}
+		if t.CertPEM != "" && t.KeyPEM != "" {
+			t.CertFile, t.KeyFile = "", ""
+		}
+	}
 }
 
 // FirewallMode 防火墙模式
@@ -175,6 +202,8 @@ func (m *Manager) load() error {
 	defer m.mu.Unlock()
 	for i := range list {
 		list[i].Status = StatusStopped
+		// 兼容旧版：把 cert_file/key_file 文件内容读入 cert_pem/key_pem
+		migrateTLSFromFiles(list[i].ProxyListeners)
 		m.configs[list[i].ID] = &list[i]
 	}
 	return nil

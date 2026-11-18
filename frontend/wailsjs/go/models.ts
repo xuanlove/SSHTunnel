@@ -59,8 +59,8 @@ export namespace config {
 	    }
 	}
 	export class TLSConfig {
-	    cert_file: string;
-	    key_file: string;
+	    cert_pem?: string;
+	    key_pem?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new TLSConfig(source);
@@ -68,8 +68,8 @@ export namespace config {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.cert_file = source["cert_file"];
-	        this.key_file = source["key_file"];
+	        this.cert_pem = source["cert_pem"];
+	        this.key_pem = source["key_pem"];
 	    }
 	}
 	export class ProxyListener {

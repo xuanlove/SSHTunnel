@@ -7,7 +7,7 @@ const isWebMode = api.isWebMode
 
 const portToCheck = ref(1080)
 const portResult = ref<null | boolean>(null)
-const certInfo = ref<{ certPath: string; keyPath: string } | null>(null)
+const certInfo = ref<{ certPEM: string; keyPEM: string } | null>(null)
 
 // ===== WEB 访问密码 =====
 const authForm = ref({ enabled: false, username: '', password: '' })
@@ -321,17 +321,15 @@ async function handleGenCert() {
 
     <el-card class="panel">
       <template #header><span>HTTPS 代理证书</span></template>
-      <p class="desc">为 HTTPS 代理生成自签名证书（ECDSA，10 年有效期）。生成后可在 HTTPS 监听器配置中引用。</p>
+      <p class="desc">为 HTTPS 代理生成自签名证书（ECDSA，10 年有效期）。隧道 HTTPS 监听器采用 PEM 文本方式保存证书，可在监听器编辑页直接粘贴，或点击「生成自签证书」自动填入。</p>
       <el-button type="primary" @click="handleGenCert">生成自签证书</el-button>
-      <el-alert
-        v-if="certInfo"
-        type="success"
-        :closable="false"
-        style="margin-top: 12px"
-      >
-        <div>证书文件：{{ certInfo.certPath }}</div>
-        <div>私钥文件：{{ certInfo.keyPath }}</div>
-      </el-alert>
+      <template v-if="certInfo">
+        <div class="field-label">证书内容（PEM）</div>
+        <el-input type="textarea" :rows="4" readonly :model-value="certInfo.certPEM" />
+        <div class="field-label">私钥内容（PEM）</div>
+        <el-input type="textarea" :rows="3" readonly :model-value="certInfo.keyPEM" />
+        <div class="fw-tip">certd 等工具也可通过部署 API 自动写入 HTTPS 监听器的证书内容。</div>
+      </template>
     </el-card>
 
     <el-card class="panel">

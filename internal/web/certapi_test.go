@@ -267,11 +267,15 @@ func TestCertDeployTunnel(t *testing.T) {
 	if !ok || got.ProxyListeners[0].TLS == nil {
 		t.Fatalf("配置未更新 TLS 信息")
 	}
-	if _, err := os.Stat(got.ProxyListeners[0].TLS.CertFile); err != nil {
-		t.Errorf("监听器证书未写入: %v", err)
+	tlsCfg := got.ProxyListeners[0].TLS
+	if !strings.Contains(tlsCfg.CertPEM, "BEGIN CERTIFICATE") {
+		t.Errorf("监听器证书应保存为 PEM 文本")
 	}
-	if !strings.HasSuffix(got.ProxyListeners[0].TLS.KeyFile, ".key") {
-		t.Errorf("私钥路径异常: %s", got.ProxyListeners[0].TLS.KeyFile)
+	if !strings.Contains(tlsCfg.KeyPEM, "PRIVATE KEY") {
+		t.Errorf("监听器私钥应保存为 PEM 文本")
+	}
+	if tlsCfg.CertFile != "" || tlsCfg.KeyFile != "" {
+		t.Errorf("文本模式下不应再记录文件路径: %q %q", tlsCfg.CertFile, tlsCfg.KeyFile)
 	}
 
 	// 读取证书内容

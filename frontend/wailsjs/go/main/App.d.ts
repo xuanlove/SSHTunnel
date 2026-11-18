@@ -7,7 +7,7 @@ export function CheckPort(arg1:number):Promise<boolean>;
 
 export function DeleteConfig(arg1:string):Promise<void>;
 
-export function GenerateSelfSignedCert():Promise<string>;
+export function GenerateSelfSignedCert():Promise<Array<string>>;
 
 export function GetRecentLogs(arg1:number):Promise<Array<logger.Entry>>;
 

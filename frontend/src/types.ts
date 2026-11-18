@@ -30,8 +30,10 @@ export interface AuthConfig {
 }
 
 export interface TLSConfig {
-  cert_file: string
-  key_file: string
+  // 证书 PEM 文本（可含完整证书链）
+  cert_pem?: string
+  // 私钥 PEM 文本
+  key_pem?: string
 }
 
 // 防火墙模式：blacklist=黑名单（默认，命中拒绝）；whitelist=白名单（仅命中放行）

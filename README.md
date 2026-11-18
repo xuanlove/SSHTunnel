@@ -392,9 +392,9 @@ user1@host1:22, user2@host2:2222, user3@host3
           "username": "proxyuser",
           "password": "proxypass"
         },
-        "tls": {                      // 仅 https 协议
-          "cert_file": "/path/to/cert.pem",
-          "key_file": "/path/to/key.pem"
+        "tls": {                      // 仅 https 协议，证书以 PEM 文本保存
+          "cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+          "key_pem": "-----BEGIN PRIVATE KEY-----\n..."
         }
       }
     ],
@@ -427,7 +427,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 - 监听端口
 - 是否允许外部访问（`0.0.0.0` 或 `127.0.0.1`）
 - 认证配置（HTTP Basic / SOCKS5 用户名密码 / SOCKS4 UserID）
-- TLS 证书（仅 HTTPS，可在设置页一键生成自签证书）
+- TLS 证书（仅 HTTPS，采用 PEM 文本方式，可在监听器编辑页直接粘贴或一键生成自签证书）
 - **简易防火墙**（可选，默认不启用）：黑名单/白名单模式、自定义 IP 与 IP 段、GeoIP 国家规则与城市级规则
 
 防火墙配置示例（`proxy_listeners[].firewall`）：
@@ -512,7 +512,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 | GET | `/api/tunnels/status` | 查询所有隧道状态 |
 | GET | `/api/logs?limit=N` | 获取最近 N 条日志 |
 | POST | `/api/port/check` | 检测端口可用性 |
-| POST | `/api/cert/generate` | 生成 HTTPS 自签证书 |
+| POST | `/api/cert/generate` | 生成 HTTPS 自签证书（返回 `cert_pem` / `key_pem` 文本） |
 | POST | `/api/hopchain/parse` | 解析跳板链简写 |
 | POST | `/api/tunnel/test` | 测试隧道连通性（不启动监听） |
 | POST | `/api/proxy/test` | 测试代理监听端口连通性，经该端口访问 `https://api.ip.sb/ip` 并返回出口 IP |
@@ -535,10 +535,10 @@ user1@host1:22, user2@host2:2222, user3@host3
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/cert/targets` | 列出可部署目标：WEB 面板与所有 HTTPS 代理监听器（含证书路径、是否存在、隧道运行状态） |
+| GET | `/api/cert/targets` | 列出可部署目标：WEB 面板与所有 HTTPS 代理监听器（含是否已配置证书、隧道运行状态） |
 | GET | `/api/cert/read?target=web` | 读取 WEB 面板证书与私钥 PEM 内容 |
 | GET | `/api/cert/read?target=tunnel&tunnel_id=X&listener_id=Y` | 读取指定 HTTPS 监听器的证书与私钥 PEM 内容 |
-| POST | `/api/cert/deploy` | 部署证书内容；`target=web` 写面板证书并热重启监听，`target=tunnel` 写监听器证书并按需重启隧道 |
+| POST | `/api/cert/deploy` | 部署证书内容；`target=web` 写面板证书并热重启监听，`target=tunnel` 将 PEM 文本写入监听器配置并按需重启隧道 |
 
 `POST /api/cert/deploy` 请求示例：
 
@@ -561,7 +561,7 @@ curl -k -X POST https://127.0.0.1:8080/api/cert/deploy \
   -d "{\"target\":\"web\",\"cert_pem\":\"$(cat fullchain.pem | sed ':a;N;$!ba;s/\n/\\n/g')\",\"key_pem\":\"$(cat privkey.pem | sed ':a;N;$!ba;s/\n/\\n/g')\"}"
 ```
 
-> 面板证书内容写入 `<配置目录>/sshtunnel/certs/web.crt|web.key`（私钥 0600）；隧道监听器若未配置证书路径，会自动生成 `<配置目录>/sshtunnel/certs/<隧道ID>-<监听器ID>.crt|.key` 并写回配置。
+> 面板证书内容写入 `<配置目录>/sshtunnel/certs/web.crt|web.key`（私钥 0600）；隧道 HTTPS 监听器的证书**直接以 PEM 文本保存在 `configs.json` 的 `tls.cert_pem / tls.key_pem` 中**，部署后可在配置页直接查看与编辑（旧版 `cert_file / key_file` 配置会在启动时自动读取文件并迁移为文本）。
 
 ### WebSocket 端点
 
@@ -953,6 +953,14 @@ npm run preview    # 预览构建产物
 ---
 
 ## 版本更新说明
+
+### v1.3.8
+
+- **隧道 HTTPS 证书改为 PEM 文本模式**：`proxy_listeners[].tls` 由 `cert_file / key_file` 文件路径改为 `cert_pem / key_pem` 文本
+  - 配置页 HTTPS 监听器直接显示/编辑证书与私钥内容，可一键生成自签证书填入
+  - certd 部署 API 将证书写入配置文本，部署后可在界面正常查看与修改
+  - 兼容旧配置：启动时自动读取旧 `cert_file / key_file` 指向的文件内容并迁移为文本
+  - `POST /api/cert/generate` 改为返回 `cert_pem / key_pem`；`GET /api/cert/targets` 使用 `cert_configured` 标识配置状态
 
 ### v1.3.7
 

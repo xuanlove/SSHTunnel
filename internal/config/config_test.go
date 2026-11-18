@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -155,5 +156,78 @@ func TestManagerSetStatus(t *testing.T) {
 	cfg, _ := m.Get(id)
 	if cfg.Status != StatusRunning {
 		t.Errorf("Status 应为 running, got %q", cfg.Status)
+	}
+}
+
+// TestTLSFileMigration 旧版 cert_file/key_file 配置应自动迁移为 PEM 文本
+func TestTLSFileMigration(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "c.pem")
+	keyPath := filepath.Join(dir, "k.pem")
+	if err := os.WriteFile(certPath, []byte("CERT-PEM"), 0644); err != nil {
+		t.Fatalf("写入证书失败: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte("KEY-PEM"), 0600); err != nil {
+		t.Fatalf("写入私钥失败: %v", err)
+	}
+	cfgPath := filepath.Join(dir, "configs.json")
+
+	// 模拟旧版配置文件（只含文件路径）
+	legacy := []map[string]interface{}{{
+		"id":   "t1",
+		"name": "迁移测试",
+		"proxy_listeners": []interface{}{map[string]interface{}{
+			"id": "l1", "protocol": "https", "listen_port": 8443,
+			"tls": map[string]string{"cert_file": certPath, "key_file": keyPath},
+		}},
+	}}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("构造旧配置失败: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, raw, 0644); err != nil {
+		t.Fatalf("写入旧配置失败: %v", err)
+	}
+
+	m, err := newManagerWithPath(cfgPath)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	cfg, ok := m.Get("t1")
+	if !ok || len(cfg.ProxyListeners) != 1 || cfg.ProxyListeners[0].TLS == nil {
+		t.Fatalf("配置结构异常: %+v", cfg)
+	}
+	tlsCfg := cfg.ProxyListeners[0].TLS
+	if tlsCfg.CertPEM != "CERT-PEM" || tlsCfg.KeyPEM != "KEY-PEM" {
+		t.Errorf("未迁移为 PEM 文本: %+v", tlsCfg)
+	}
+	if tlsCfg.CertFile != "" || tlsCfg.KeyFile != "" {
+		t.Errorf("迁移后应清空旧路径字段: %+v", tlsCfg)
+	}
+
+	// 新保存的配置不应再写 cert_file/key_file
+	if err := m.Save(cfg); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	saved, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("读取保存结果失败: %v", err)
+	}
+	var list []TunnelConfig
+	if err := json.Unmarshal(saved, &list); err != nil {
+		t.Fatalf("解析保存结果失败: %v", err)
+	}
+	if len(list) != 1 || list[0].ProxyListeners[0].TLS.CertPEM != "CERT-PEM" {
+		t.Errorf("保存结果未包含 PEM: %s", string(saved))
+	}
+	if string(saved) != "" && json.Valid(saved) {
+		var rawList []map[string]interface{}
+		_ = json.Unmarshal(saved, &rawList)
+		if l, ok := rawList[0]["proxy_listeners"].([]interface{}); ok {
+			tlsObj := l[0].(map[string]interface{})["tls"].(map[string]interface{})
+			if _, exists := tlsObj["cert_file"]; exists {
+				t.Errorf("新配置不应包含 cert_file 字段: %v", tlsObj)
+			}
+		}
 	}
 }

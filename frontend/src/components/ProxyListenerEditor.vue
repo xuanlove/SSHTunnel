@@ -91,7 +91,7 @@ function updateListener(idx: number, patch: Partial<ProxyListener>) {
 function onProtocolChange(idx: number, protocol: ProxyProtocol) {
   const patch: Partial<ProxyListener> = { protocol }
   if (protocol === 'https') {
-    patch.tls = { cert_file: '', key_file: '' }
+    patch.tls = { cert_pem: '', key_pem: '' }
   } else {
     patch.tls = null
   }
@@ -111,7 +111,7 @@ function updateAuth(idx: number, field: 'username' | 'password', value: string) 
   }
 }
 
-function updateTLS(idx: number, field: 'cert_file' | 'key_file', value: string) {
+function updateTLS(idx: number, field: 'cert_pem' | 'key_pem', value: string) {
   const arr = [...listeners.value]
   const cur = arr[idx]
   if (cur.tls) {
@@ -122,14 +122,14 @@ function updateTLS(idx: number, field: 'cert_file' | 'key_file', value: string) 
 
 async function genCert(idx: number) {
   try {
-    const { certPath, keyPath } = await api.generateSelfSignedCert()
+    const { certPEM, keyPEM } = await api.generateSelfSignedCert()
     const arr = [...listeners.value]
     const cur = arr[idx]
     if (cur.tls) {
-      arr[idx] = { ...cur, tls: { ...cur.tls, cert_file: certPath, key_file: keyPath } }
+      arr[idx] = { ...cur, tls: { ...cur.tls, cert_pem: certPEM, key_pem: keyPEM } }
       listeners.value = arr
     }
-    ElMessage.success('证书已生成并填入')
+    ElMessage.success('自签证书已生成并填入')
   } catch (e: any) {
     ElMessage.error(e?.message || '生成失败')
   }
@@ -278,28 +278,26 @@ async function handleTestProxy(pl: ProxyListener) {
       </div>
 
       <div v-if="pl.protocol === 'https'" class="tls-row">
-        <el-row :gutter="12">
-          <el-col :span="10">
-            <div class="field-label">证书文件</div>
-            <el-input
-              :model-value="pl.tls?.cert_file"
-              @update:model-value="(v: string) => updateTLS(idx, 'cert_file', v)"
-              placeholder="证书路径"
-            />
-          </el-col>
-          <el-col :span="10">
-            <div class="field-label">私钥文件</div>
-            <el-input
-              :model-value="pl.tls?.key_file"
-              @update:model-value="(v: string) => updateTLS(idx, 'key_file', v)"
-              placeholder="私钥路径"
-            />
-          </el-col>
-          <el-col :span="4">
-            <div class="field-label">&nbsp;</div>
-            <el-button size="small" @click="genCert(idx)">生成</el-button>
-          </el-col>
-        </el-row>
+        <div class="field-label">证书内容（PEM，可含完整证书链）</div>
+        <el-input
+          type="textarea"
+          :rows="4"
+          :model-value="pl.tls?.cert_pem"
+          placeholder="-----BEGIN CERTIFICATE-----"
+          @update:model-value="(v: string) => updateTLS(idx, 'cert_pem', v)"
+        />
+        <div class="field-label" style="margin-top: 8px">私钥内容（PEM）</div>
+        <el-input
+          type="textarea"
+          :rows="3"
+          :model-value="pl.tls?.key_pem"
+          placeholder="-----BEGIN PRIVATE KEY-----"
+          @update:model-value="(v: string) => updateTLS(idx, 'key_pem', v)"
+        />
+        <div class="tls-actions">
+          <el-button size="small" @click="genCert(idx)">生成自签证书</el-button>
+          <span class="fw-hint">也可由 certd 等工具通过部署 API 自动写入证书内容</span>
+        </div>
       </div>
 
       <div class="fw-row">
@@ -426,6 +424,12 @@ async function handleTestProxy(pl: ProxyListener) {
 .tls-row {
   border-top: 1px dashed #3a3f4b;
   padding-top: 8px;
+}
+.tls-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
 }
 .field-label {
   font-size: 12px;

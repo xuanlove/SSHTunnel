@@ -39,13 +39,19 @@ func (s *httpServer) Start(ctx context.Context) error {
 		return err
 	}
 
-	// HTTPS 代理：包装 TLS 监听器
+	// HTTPS 代理：包装 TLS 监听器（证书以 PEM 文本形式配置）
 	if s.tlsCfg != nil {
-		cert, err := tls.LoadX509KeyPair(s.tlsCfg.CertFile, s.tlsCfg.KeyFile)
+		if strings.TrimSpace(s.tlsCfg.CertPEM) == "" || strings.TrimSpace(s.tlsCfg.KeyPEM) == "" {
+			ln.Close()
+			s.setStatus(StatusListenerError)
+			s.log("error", "未配置 HTTPS 证书内容（证书/私钥 PEM）")
+			return errMissingTLSCert
+		}
+		cert, err := tls.X509KeyPair([]byte(s.tlsCfg.CertPEM), []byte(s.tlsCfg.KeyPEM))
 		if err != nil {
 			ln.Close()
 			s.setStatus(StatusListenerError)
-			s.log("error", "加载 TLS 证书失败: "+err.Error())
+			s.log("error", "解析 TLS 证书失败: "+err.Error())
 			return err
 		}
 		ln = tls.NewListener(ln, &tls.Config{
