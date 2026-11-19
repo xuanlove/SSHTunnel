@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"sshtunnel/internal/config"
+	"sshtunnel/internal/logger"
 )
 
 // TestTrafficStatsCounters 计数与快照
@@ -122,45 +123,7 @@ func TestSOCKS5StatsAndAccessLog(t *testing.T) {
 	defer srv.Stop()
 	time.Sleep(50 * time.Millisecond)
 
-	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-	if err != nil {
-		t.Fatalf("连接代理失败: %v", err)
-	}
-
-	// SOCKS5 握手（无认证）
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-		t.Fatalf("发送握手失败: %v", err)
-	}
-	resp := make([]byte, 2)
-	if _, err := io.ReadFull(conn, resp); err != nil || resp[1] != 0x00 {
-		t.Fatalf("握手失败: %v %v", resp, err)
-	}
-	// CONNECT 到 echo 服务器
-	req := []byte{0x05, 0x01, 0x00, 0x01}
-	req = append(req, net.ParseIP("127.0.0.1").To4()...)
-	req = append(req, byte(echoPortHigh(echoAddr)), byte(echoPortLow(echoAddr)))
-	if _, err := conn.Write(req); err != nil {
-		t.Fatalf("发送 CONNECT 失败: %v", err)
-	}
-	reply := make([]byte, 10)
-	if _, err := io.ReadFull(conn, reply); err != nil || reply[1] != 0x00 {
-		t.Fatalf("CONNECT 失败: %v %v", reply, err)
-	}
-
-	// 读取 echo 前缀 "ECHO:"（下行 5 字节）
-	prefix := make([]byte, 5)
-	if _, err := io.ReadFull(conn, prefix); err != nil {
-		t.Fatalf("读取下行数据失败: %v", err)
-	}
-	// 发送 4 字节（上行），并读回 4 字节（下行）
-	if _, err := conn.Write([]byte("ping")); err != nil {
-		t.Fatalf("发送数据失败: %v", err)
-	}
-	echoed := make([]byte, 4)
-	if _, err := io.ReadFull(conn, echoed); err != nil {
-		t.Fatalf("读取回显失败: %v", err)
-	}
-	_ = conn.Close()
+	doSOCKS5EchoSession(t, port, echoAddr)
 
 	// 等待连接结束并核对统计
 	deadline := time.Now().Add(2 * time.Second)
@@ -199,6 +162,104 @@ func TestSOCKS5StatsAndAccessLog(t *testing.T) {
 	if !found {
 		t.Errorf("未找到访问日志: %v", logs)
 	}
+}
+
+// doSOCKS5EchoSession 通过 SOCKS5 代理与 echo 服务器完成一次握手与数据往返
+func doSOCKS5EchoSession(t *testing.T, proxyPort int, echoAddr string) {
+	t.Helper()
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort)))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	defer conn.Close()
+
+	// SOCKS5 握手（无认证）
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatalf("发送握手失败: %v", err)
+	}
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, resp); err != nil || resp[1] != 0x00 {
+		t.Fatalf("握手失败: %v %v", resp, err)
+	}
+	// CONNECT 到 echo 服务器
+	req := []byte{0x05, 0x01, 0x00, 0x01}
+	req = append(req, net.ParseIP("127.0.0.1").To4()...)
+	req = append(req, byte(echoPortHigh(echoAddr)), byte(echoPortLow(echoAddr)))
+	if _, err := conn.Write(req); err != nil {
+		t.Fatalf("发送 CONNECT 失败: %v", err)
+	}
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(conn, reply); err != nil || reply[1] != 0x00 {
+		t.Fatalf("CONNECT 失败: %v %v", reply, err)
+	}
+	// 读取 echo 前缀并完成一次往返
+	prefix := make([]byte, 5)
+	if _, err := io.ReadFull(conn, prefix); err != nil {
+		t.Fatalf("读取下行数据失败: %v", err)
+	}
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("发送数据失败: %v", err)
+	}
+	echoed := make([]byte, 4)
+	if _, err := io.ReadFull(conn, echoed); err != nil {
+		t.Fatalf("读取回显失败: %v", err)
+	}
+}
+
+// TestManagerStatsPersistAfterRestart 隧道重连重建监听器后，累计统计不应清零
+func TestManagerStatsPersistAfterRestart(t *testing.T) {
+	echoAddr, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("分配端口失败: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	listeners := []config.ProxyListener{{
+		ID:            "persist-stats",
+		Protocol:      config.ProxySOCKS5,
+		ListenPort:    port,
+		AllowExternal: false,
+	}}
+	m := NewManager(&mockDialer{target: echoAddr}, logger.NewTest(), "persist")
+	ctx := context.Background()
+	if err := m.StartAll(ctx, listeners); err != nil {
+		t.Fatalf("首次启动失败: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	doSOCKS5EchoSession(t, port, echoAddr)
+
+	// 等待首次会话统计落账
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		st := m.Stats()
+		if (len(st) == 1 && st[0].ActiveConns == 0 && st[0].TotalConns == 1) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// 模拟隧道重连：停止并重新启动监听器
+	m.StopAll()
+	if err := m.StartAll(ctx, listeners); err != nil {
+		t.Fatalf("重新启动失败: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	st := m.Stats()
+	if len(st) != 1 {
+		t.Fatalf("应返回 1 个监听器统计，实际 %d", len(st))
+	}
+	if st[0].TotalConns != 1 {
+		t.Errorf("重连后累计连接数应保留为 1，实际 %d", st[0].TotalConns)
+	}
+	if st[0].BytesSent != 4 || st[0].BytesRecv != 9 {
+		t.Errorf("重连后累计流量应保留，实际 sent=%d recv=%d", st[0].BytesSent, st[0].BytesRecv)
+	}
+	m.StopAll()
 }
 
 // TestBaseServerAccessLog 访问日志开关

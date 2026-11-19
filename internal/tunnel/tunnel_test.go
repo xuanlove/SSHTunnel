@@ -297,6 +297,47 @@ func TestReconnect(t *testing.T) {
 	}
 }
 
+// TestReconnectMaxAttemptsMarksError 验证重连次数耗尽后隧道被移除运行列表并上报 error 状态。
+func TestReconnectMaxAttemptsMarksError(t *testing.T) {
+	d := &mockDialer{results: []dialResult{
+		{}, // 首次启动成功
+		{err: errors.New("dial fail")},
+		{err: errors.New("dial fail")},
+	}}
+	withMockDialer(t, d)
+	m := newTestManager(t)
+	sc := &statusCollector{}
+	m.OnStatusChange(sc.cb)
+
+	cfg := testConfig("max-attempts", true)
+	cfg.MaxReconnectAttempts = 2
+	if err := m.Start(cfg); err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+
+	d.lastClient().Close()
+
+	// 两次重连失败后应停止并移除运行实例
+	if !waitFor(2*time.Second, func() bool { return !m.IsRunning("max-attempts") }) {
+		t.Fatalf("重连耗尽后应从运行列表移除，拨号次数=%d", d.callCount())
+	}
+
+	statuses := sc.snapshot()
+	found := false
+	for _, s := range statuses {
+		if s == string(config.StatusError) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("应上报 error 状态，实际状态序列: %v", statuses)
+	}
+	if _, ok := m.Stats()["max-attempts"]; ok {
+		t.Errorf("重连耗尽后不应再出现在运行统计中")
+	}
+}
+
 // TestStartDialError 验证首次连接失败时 Start 返回错误且隧道未注册。
 func TestStartDialError(t *testing.T) {
 	d := &mockDialer{results: []dialResult{{err: errors.New("ssh unreachable")}}}

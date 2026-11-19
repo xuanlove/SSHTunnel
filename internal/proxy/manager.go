@@ -14,6 +14,7 @@ import (
 type Manager struct {
 	mu       sync.RWMutex
 	servers  map[string]Server // listenerID -> server
+	stats    map[string]*TrafficStats
 	dialer   Dialer
 	log      *logger.Logger
 	tunnelID string
@@ -23,10 +24,18 @@ type Manager struct {
 func NewManager(dialer Dialer, log *logger.Logger, tunnelID string) *Manager {
 	return &Manager{
 		servers:  make(map[string]Server),
+		stats:    make(map[string]*TrafficStats),
 		dialer:   dialer,
 		log:      log,
 		tunnelID: tunnelID,
 	}
+}
+
+// SetDialer 更新出站拨号器（隧道重连后需指向新的 SSH 连接）
+func (m *Manager) SetDialer(d Dialer) {
+	m.mu.Lock()
+	m.dialer = d
+	m.mu.Unlock()
 }
 
 // StartAll 启动所有配置的监听器
@@ -49,7 +58,13 @@ func (m *Manager) StartOne(ctx context.Context, lc config.ProxyListener) error {
 	if _, exists := m.servers[lc.ID]; exists {
 		return fmt.Errorf("监听器已存在: %s", lc.ID)
 	}
-	srv, err := BuildServer(lc, m.dialer, func(level, msg string) {
+	// 同一监听器 ID 复用统计对象：隧道重连重建监听器后「累计」数据不清零
+	st, ok := m.stats[lc.ID]
+	if !ok {
+		st = &TrafficStats{}
+		m.stats[lc.ID] = st
+	}
+	srv, err := buildServerWithStats(lc, m.dialer, func(level, msg string) {
 		switch level {
 		case "error":
 			m.log.TunnelError(m.tunnelID, "["+string(lc.Protocol)+":"+fmt.Sprintf("%d", lc.ListenPort)+"] "+msg)
@@ -58,7 +73,7 @@ func (m *Manager) StartOne(ctx context.Context, lc config.ProxyListener) error {
 		default:
 			m.log.TunnelInfo(m.tunnelID, "["+string(lc.Protocol)+":"+fmt.Sprintf("%d", lc.ListenPort)+"] "+msg)
 		}
-	})
+	}, st)
 	if err != nil {
 		return err
 	}

@@ -40,6 +40,12 @@ func (a *App) Init() error {
 
 	a.tunnelMgr = tunnel.NewManager(a.logger)
 
+	// 隧道状态变更同步到配置状态：确保异常终止（如重连次数耗尽）后，
+	// 界面查询到的状态与实际运行情况一致。
+	a.tunnelMgr.OnStatusChange(func(tunnelID, status string) {
+		a.cfgMgr.SetStatus(tunnelID, config.TunnelStatus(status))
+	})
+
 	// 启动已勾选「开机启动」的隧道（异步执行，避免阻塞界面/服务启动）
 	go a.startAutoStartTunnels()
 

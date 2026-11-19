@@ -165,8 +165,17 @@ func noopLog(level, msg string) {}
 
 // BuildServer 根据配置构建对应协议的服务器
 func BuildServer(lc config.ProxyListener, dialer Dialer, log LogFunc) (Server, error) {
+	return buildServerWithStats(lc, dialer, log, &TrafficStats{})
+}
+
+// buildServerWithStats 使用指定统计对象构建服务器。
+// Manager 在同一监听器 ID 重建时传入原对象，使「累计」数据跨重连保留。
+func buildServerWithStats(lc config.ProxyListener, dialer Dialer, log LogFunc, stats *TrafficStats) (Server, error) {
 	if log == nil {
 		log = noopLog
+	}
+	if stats == nil {
+		stats = &TrafficStats{}
 	}
 	addr := port.BindAddress(lc.ListenPort, lc.AllowExternal)
 
@@ -184,7 +193,7 @@ func BuildServer(lc config.ProxyListener, dialer Dialer, log LogFunc) (Server, e
 		log:        log,
 		fw:         fw,
 		accessLog:  lc.AccessLog,
-		stats:      &TrafficStats{},
+		stats:      stats,
 	}
 
 	switch lc.Protocol {

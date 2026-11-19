@@ -89,7 +89,12 @@ onMounted(async () => {
     if (!store.configs.length) await store.loadConfigs()
     const cfg = store.configs.find(c => c.id === route.params.id)
     if (cfg) {
-      Object.assign(form, JSON.parse(JSON.stringify(cfg)))
+      const parsed = JSON.parse(JSON.stringify(cfg))
+      Object.assign(form, parsed)
+      // 旧配置没有心跳字段时保持关闭，避免仅编辑保存就静默开启心跳
+      if (parsed.keepalive_seconds === undefined) form.keepalive_seconds = 0
+      if (parsed.max_reconnect_attempts === undefined) form.max_reconnect_attempts = 0
+      if (parsed.reconnect_max_delay_seconds === undefined) form.reconnect_max_delay_seconds = 60
     } else {
       ElMessage.error('配置不存在')
       router.push('/')

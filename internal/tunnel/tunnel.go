@@ -60,6 +60,8 @@ type Tunnel struct {
 	reconnecting  bool
 	stopCh        chan struct{}
 	keepAliveStop func() // 停止 SSH 心跳（nil 表示未启用）
+	// onFatal 致命错误回调（如重连次数耗尽），由 Manager 注入用于移除运行实例并更新状态
+	onFatal func()
 }
 
 // Manager 隧道管理器
@@ -98,6 +100,19 @@ func (m *Manager) Start(cfg *config.TunnelConfig) error {
 		cfg:    cfg,
 		log:    m.log,
 		stopCh: make(chan struct{}),
+	}
+	// 致命错误（如重连次数耗尽）：移除运行实例并通知状态变更，
+	// 避免隧道实际已断开却仍显示「运行中」。
+	t.onFatal = func() {
+		m.mu.Lock()
+		if cur, ok := m.tunnels[cfg.ID]; ok && cur == t {
+			delete(m.tunnels, cfg.ID)
+		}
+		m.mu.Unlock()
+		if t.cancel != nil {
+			t.cancel()
+		}
+		m.emitStatus(cfg.ID, string(config.StatusError))
 	}
 	t.ctx, t.cancel = context.WithCancel(context.Background())
 
@@ -292,12 +307,16 @@ func (t *Tunnel) connectAndServe() error {
 		}
 	}
 
-	// 启动代理监听
+	// 启动代理监听（复用同一个 Manager，使统计对象跨重连保留）
 	if len(t.cfg.ProxyListeners) > 0 {
-		pm := proxy.NewManager(client, t.log, t.cfg.ID)
 		t.mu.Lock()
-		t.proxyMgr = pm
+		pm := t.proxyMgr
+		if pm == nil {
+			pm = proxy.NewManager(client, t.log, t.cfg.ID)
+			t.proxyMgr = pm
+		}
 		t.mu.Unlock()
+		pm.SetDialer(client) // 重连后指向新的 SSH 连接
 		if err := pm.StartAll(t.ctx, t.cfg.ProxyListeners); err != nil {
 			t.log.TunnelError(t.cfg.ID, "代理监听启动失败: "+err.Error())
 		}
@@ -376,6 +395,9 @@ func (t *Tunnel) watchAndReconnect() {
 				if maxAttempts > 0 && attempts >= maxAttempts {
 					t.reconnecting = false
 					t.log.TunnelError(t.cfg.ID, fmt.Sprintf("已达到最大重连次数 %d，停止自动重连", maxAttempts))
+					if t.onFatal != nil {
+						t.onFatal()
+					}
 					return
 				}
 				// 指数退避
@@ -398,8 +420,8 @@ func (t *Tunnel) cleanupResources() {
 	t.mu.Lock()
 	listeners := t.fwdListeners
 	t.fwdListeners = nil
+	// 保留 proxyMgr 实例（只停止监听），以便重连后复用其统计计数
 	pm := t.proxyMgr
-	t.proxyMgr = nil
 	c := t.client
 	t.client = nil
 	stopKeepAlive := t.keepAliveStop
@@ -437,13 +459,17 @@ func (t *Tunnel) startLocalForward(lf config.LocalForward) error {
 	if err != nil {
 		return err
 	}
-	stats := &proxy.TrafficStats{}
 	t.mu.Lock()
 	t.fwdListeners = append(t.fwdListeners, ln)
 	if t.fwdStats == nil {
 		t.fwdStats = make(map[string]*proxy.TrafficStats)
 	}
-	t.fwdStats[lf.ID] = stats
+	// 复用同一转发 ID 的统计对象：重连后「累计」数据不清零
+	stats := t.fwdStats[lf.ID]
+	if stats == nil {
+		stats = &proxy.TrafficStats{}
+		t.fwdStats[lf.ID] = stats
+	}
 	t.mu.Unlock()
 
 	target := fmt.Sprintf("%s:%d", lf.RemoteHost, lf.RemotePort)
