@@ -54,6 +54,8 @@ type Tunnel struct {
 	proxyMgr      *proxy.Manager
 	fwdListeners  []net.Listener
 	fwdStats      map[string]*proxy.TrafficStats // 本地转发 ID -> 统计
+	conns         *proxy.ConnRegistry            // 活动连接注册表（由 Manager 注入）
+	history       *proxy.AccessHistory           // 结构化访问历史（由 Manager 注入）
 	ctx           context.Context
 	cancel        context.CancelFunc
 	log           *logger.Logger
@@ -68,15 +70,26 @@ type Tunnel struct {
 type Manager struct {
 	mu              sync.RWMutex
 	tunnels         map[string]*Tunnel
+	archived        map[string]TunnelStats // 已停止隧道的累计汇总（进程内保留）
+	conns           *proxy.ConnRegistry    // 活动连接注册表（全节点共享）
+	history         *proxy.AccessHistory   // 结构化访问历史（全节点共享）
 	log             *logger.Logger
+	startedAt       time.Time
 	statusCallbacks []func(tunnelID string, status string)
 }
+
+// accessHistoryCapacity 访问历史最大保留条数（进程内环形缓冲）
+const accessHistoryCapacity = 2000
 
 // NewManager 创建隧道管理器
 func NewManager(log *logger.Logger) *Manager {
 	return &Manager{
-		tunnels: make(map[string]*Tunnel),
-		log:     log,
+		tunnels:   make(map[string]*Tunnel),
+		archived:  make(map[string]TunnelStats),
+		conns:     proxy.NewConnRegistry(),
+		history:   proxy.NewAccessHistory(accessHistoryCapacity),
+		log:       log,
+		startedAt: time.Now(),
 	}
 }
 
@@ -97,9 +110,11 @@ func (m *Manager) Start(cfg *config.TunnelConfig) error {
 	m.mu.Unlock()
 
 	t := &Tunnel{
-		cfg:    cfg,
-		log:    m.log,
-		stopCh: make(chan struct{}),
+		cfg:     cfg,
+		log:     m.log,
+		stopCh:  make(chan struct{}),
+		conns:   m.conns,
+		history: m.history,
 	}
 	// 致命错误（如重连次数耗尽）：移除运行实例并通知状态变更，
 	// 避免隧道实际已断开却仍显示「运行中」。
@@ -108,13 +123,18 @@ func (m *Manager) Start(cfg *config.TunnelConfig) error {
 		if t.isStopped() {
 			return
 		}
+		archive := false
 		m.mu.Lock()
 		if cur, ok := m.tunnels[cfg.ID]; ok && cur == t {
 			delete(m.tunnels, cfg.ID)
+			archive = true
 		}
 		m.mu.Unlock()
 		if t.cancel != nil {
 			t.cancel()
+		}
+		if archive {
+			m.archive(cfg.ID, t)
 		}
 		m.emitStatus(cfg.ID, string(config.StatusError))
 	}
@@ -142,6 +162,7 @@ func (m *Manager) Stop(id string) error {
 		return fmt.Errorf("隧道未运行: %s", id)
 	}
 	t.stop()
+	m.archive(id, t)
 	m.emitStatus(id, string(config.StatusStopped))
 	m.log.TunnelInfo(id, "隧道已停止")
 	return nil
@@ -155,6 +176,7 @@ func (m *Manager) StopAll() {
 	m.mu.Unlock()
 	for id, t := range tunnels {
 		t.stop()
+		m.archive(id, t)
 		m.emitStatus(id, string(config.StatusStopped))
 	}
 }
@@ -233,18 +255,135 @@ func (t *Tunnel) Stats() TunnelStats {
 	return out
 }
 
-// Stats 返回所有运行中隧道的统计（以隧道 ID 为键）
+// Stats 返回所有隧道（含已停止）的统计（以隧道 ID 为键）。
+// 已停止隧道的累计值保留在归档中，重启后与新的运行统计相加，形成进程内累计。
 func (m *Manager) Stats() map[string]TunnelStats {
 	m.mu.RLock()
 	tunnels := make([]*Tunnel, 0, len(m.tunnels))
 	for _, t := range m.tunnels {
 		tunnels = append(tunnels, t)
 	}
+	archived := make(map[string]TunnelStats, len(m.archived))
+	for id, st := range m.archived {
+		archived[id] = st
+	}
 	m.mu.RUnlock()
 
-	out := make(map[string]TunnelStats, len(tunnels))
+	out := make(map[string]TunnelStats, len(tunnels)+len(archived))
+	for id, st := range archived {
+		out[id] = st
+	}
 	for _, t := range tunnels {
-		out[t.cfg.ID] = t.Stats()
+		st := t.Stats()
+		if prev, ok := archived[t.cfg.ID]; ok {
+			st.TotalConns += prev.TotalConns
+			st.BytesSent += prev.BytesSent
+			st.BytesRecv += prev.BytesRecv
+		}
+		out[t.cfg.ID] = st
+	}
+	return out
+}
+
+// archive 归档已停止隧道的累计汇总（不保留监听器/转发明细，避免展示不存在的监听端口）
+func (m *Manager) archive(id string, t *Tunnel) {
+	snap := t.Stats()
+	snap.ID = id
+	snap.Listeners = nil
+	snap.Forwards = nil
+	snap.ActiveConns = 0
+	m.mu.Lock()
+	prev := m.archived[id]
+	prev.ID = id
+	prev.TotalConns += snap.TotalConns
+	prev.BytesSent += snap.BytesSent
+	prev.BytesRecv += snap.BytesRecv
+	m.archived[id] = prev
+	m.mu.Unlock()
+}
+
+// Forget 清理隧道的历史累计与残留连接（删除配置时调用）
+func (m *Manager) Forget(id string) {
+	m.mu.Lock()
+	delete(m.archived, id)
+	m.mu.Unlock()
+	if m.conns != nil {
+		m.conns.RemoveTunnel(id)
+	}
+}
+
+// TunnelTraffic 单条隧道的流量汇总（供节点状态页展示）
+type TunnelTraffic struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Running     bool   `json:"running"`
+	ActiveConns int64  `json:"active_conns"`
+	TotalConns  int64  `json:"total_conns"`
+	BytesSent   int64  `json:"bytes_sent"`
+	BytesRecv   int64  `json:"bytes_recv"`
+}
+
+// NodeStatus 节点级运行状态（连接、流量与访问历史）
+type NodeStatus struct {
+	Version       string               `json:"version"`
+	StartedAt     time.Time            `json:"started_at"`
+	UptimeSeconds int64                `json:"uptime_seconds"`
+	TunnelTotal   int                  `json:"tunnel_total"`
+	TunnelRunning int                  `json:"tunnel_running"`
+	ListenerCount int                  `json:"listener_count"`
+	ForwardCount  int                  `json:"forward_count"`
+	ActiveConns   int64                `json:"active_conns"`
+	TotalConns    int64                `json:"total_conns"`
+	BytesSent     int64                `json:"bytes_sent"`
+	BytesRecv     int64                `json:"bytes_recv"`
+	Tunnels       []TunnelTraffic      `json:"tunnels"`
+	Connections   []proxy.ConnSnapshot `json:"connections"`
+	AccessHistory []proxy.AccessRecord `json:"access_history"`
+}
+
+// NodeStatus 汇总本节点运行状态。
+// cfgs 为全部隧道配置，用于区分运行/停止状态并补齐名称；historyLimit 为访问历史条数上限。
+func (m *Manager) NodeStatus(cfgs []config.TunnelConfig, historyLimit int) NodeStatus {
+	stats := m.Stats()
+	out := NodeStatus{
+		StartedAt:     m.startedAt,
+		UptimeSeconds: int64(time.Since(m.startedAt).Seconds()),
+		TunnelTotal:   len(cfgs),
+		Connections:   m.conns.Snapshot(),
+		Tunnels:       make([]TunnelTraffic, 0, len(cfgs)),
+	}
+	known := make(map[string]bool, len(cfgs))
+	for _, cfg := range cfgs {
+		known[cfg.ID] = true
+		st := stats[cfg.ID]
+		running := m.IsRunning(cfg.ID)
+		if running {
+			out.TunnelRunning++
+			out.ListenerCount += len(st.Listeners)
+			out.ForwardCount += len(st.Forwards)
+		}
+		out.ActiveConns += st.ActiveConns
+		out.TotalConns += st.TotalConns
+		out.BytesSent += st.BytesSent
+		out.BytesRecv += st.BytesRecv
+		out.Tunnels = append(out.Tunnels, TunnelTraffic{
+			ID:          cfg.ID,
+			Name:        cfg.Name,
+			Running:     running,
+			ActiveConns: st.ActiveConns,
+			TotalConns:  st.TotalConns,
+			BytesSent:   st.BytesSent,
+			BytesRecv:   st.BytesRecv,
+		})
+	}
+	// 访问历史可能包含已删除的隧道，按当前配置过滤
+	for _, rec := range m.history.Recent(historyLimit) {
+		if known[rec.TunnelID] {
+			out.AccessHistory = append(out.AccessHistory, rec)
+		}
+	}
+	if out.AccessHistory == nil {
+		out.AccessHistory = []proxy.AccessRecord{}
 	}
 	return out
 }
@@ -316,7 +455,8 @@ func (t *Tunnel) connectAndServe() error {
 		t.mu.Lock()
 		pm := t.proxyMgr
 		if pm == nil {
-			pm = proxy.NewManager(client, t.log, t.cfg.ID)
+			pm = proxy.NewManager(client, t.log, t.cfg.ID, t.cfg.Name)
+			pm.SetTracker(t.conns, t.history)
 			t.proxyMgr = pm
 		}
 		t.mu.Unlock()
@@ -492,13 +632,13 @@ func (t *Tunnel) startLocalForward(lf config.LocalForward) error {
 				t.log.TunnelError(t.cfg.ID, "接受本地转发连接失败: "+err.Error())
 				return
 			}
-			go t.handleForward(conn, target, stats)
+			go t.handleForward(conn, lf, target, stats)
 		}
 	}()
 	return nil
 }
 
-func (t *Tunnel) handleForward(conn net.Conn, target string, stats *proxy.TrafficStats) {
+func (t *Tunnel) handleForward(conn net.Conn, lf config.LocalForward, target string, stats *proxy.TrafficStats) {
 	defer conn.Close()
 	stats.BeginConn()
 	defer stats.EndConn()
@@ -513,7 +653,21 @@ func (t *Tunnel) handleForward(conn net.Conn, target string, stats *proxy.Traffi
 		return
 	}
 	defer targetConn.Close()
-	proxy.BridgeStats(conn, targetConn, stats)
+
+	// 目标已连通：登记为活动连接（桥接结束时注销）
+	var entry *proxy.ConnEntry
+	if t.conns != nil {
+		entry = t.conns.Open(conn, proxy.ConnMeta{
+			TunnelID:   t.cfg.ID,
+			TunnelName: t.cfg.Name,
+			ListenerID: lf.ID,
+			Protocol:   "local",
+			ListenPort: lf.LocalPort,
+			Target:     target,
+		})
+		defer t.conns.Close(entry)
+	}
+	proxy.BridgeStats(conn, targetConn, stats, entry)
 }
 
 // stop 停止隧道
@@ -523,6 +677,10 @@ func (t *Tunnel) stop() {
 	}
 	close(t.stopCh)
 	t.cleanupResources()
+	// 隧道停止后清理其活动连接，避免状态页展示已断开的残留连接
+	if t.conns != nil {
+		t.conns.RemoveTunnel(t.cfg.ID)
+	}
 }
 
 // 确保编译期接口实现

@@ -129,6 +129,7 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/tunnels/status", h.handleStatus)
 	mux.HandleFunc("/tunnels/status/stream", h.handleStatusStream) // WebSocket
 	mux.HandleFunc("/tunnels/stats", h.handleTunnelStats)
+	mux.HandleFunc("/node/status", h.handleNodeStatus)
 	mux.HandleFunc("/logs", h.handleLogs)
 	mux.HandleFunc("/logs/stream", h.handleLogStream) // WebSocket
 	mux.HandleFunc("/port/check", h.handlePortCheck)
@@ -638,7 +639,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 0, "success", statuses)
 }
 
-// handleTunnelStats 获取运行中隧道的连接与流量统计
+// handleTunnelStats 获取隧道的连接与流量统计（含已停止隧道的累计值）
 func (h *Handler) handleTunnelStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, 405, "方法不允许")
@@ -649,6 +650,33 @@ func (h *Handler) handleTunnelStats(w http.ResponseWriter, r *http.Request) {
 		stats = h.tunnelMgr.Stats()
 	}
 	writeJSON(w, 0, "success", stats)
+}
+
+// handleNodeStatus 获取节点级运行状态：概览、活动连接、流量与访问历史
+func (h *Handler) handleNodeStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	limit := 200
+	if l := r.URL.Query().Get("history_limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	status := tunnel.NodeStatus{
+		Connections:   []proxy.ConnSnapshot{},
+		AccessHistory: []proxy.AccessRecord{},
+		Tunnels:       []tunnel.TunnelTraffic{},
+	}
+	if h.tunnelMgr != nil && h.cfgMgr != nil {
+		status = h.tunnelMgr.NodeStatus(h.cfgMgr.List(), limit)
+	}
+	status.Version = h.version
+	writeJSON(w, 0, "success", status)
 }
 
 // handleLogs 获取最近日志

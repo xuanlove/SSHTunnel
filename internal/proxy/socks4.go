@@ -126,18 +126,22 @@ func (s *socks4Server) handleConn(conn net.Conn) {
 	targetConn, err := s.dialer.Dial("tcp", target)
 	if err != nil {
 		s.log("warn", "连接目标失败 "+target+": "+err.Error())
-		s.logAccess(target, start, "失败: 连接目标失败")
+		s.logAccess(conn, target, start, "失败: 连接目标失败")
 		s.reply(conn, 0x5B) // 失败
 		return
 	}
 	defer targetConn.Close()
 
+	// 目标已连通：登记为活动连接（桥接结束时注销）
+	entry := s.trackConn(conn, target)
+	defer s.closeConn(entry)
+
 	// 回复成功
 	s.reply(conn, 0x5A)
 
 	// 双向桥接
-	BridgeStats(conn, targetConn, s.stats)
-	s.logAccess(target, start, "成功")
+	BridgeStats(conn, targetConn, s.stats, entry)
+	s.logAccess(conn, target, start, "成功")
 }
 
 // reply 发送 SOCKS4 响应: VN(0x00) CD(1)

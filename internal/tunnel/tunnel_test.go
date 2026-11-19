@@ -350,8 +350,12 @@ func TestReconnectMaxAttemptsMarksError(t *testing.T) {
 	if !found {
 		t.Errorf("应上报 error 状态，实际状态序列: %v", statuses)
 	}
-	if _, ok := m.Stats()["max-attempts"]; ok {
-		t.Errorf("重连耗尽后不应再出现在运行统计中")
+	// 重连耗尽后不再运行，但累计统计应保留在归档中（活动连接归零）
+	st, ok := m.Stats()["max-attempts"]
+	if !ok {
+		t.Errorf("重连耗尽后应保留累计统计归档")
+	} else if st.ActiveConns != 0 {
+		t.Errorf("重连耗尽后活动连接应为 0，实际 %d", st.ActiveConns)
 	}
 }
 

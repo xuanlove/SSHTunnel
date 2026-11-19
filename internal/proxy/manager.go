@@ -12,25 +12,37 @@ import (
 
 // Manager 多端口多协议代理管理器，绑定到单条 SSH 隧道
 type Manager struct {
-	mu       sync.RWMutex
-	servers  map[string]Server // listenerID -> server
-	stats    map[string]*TrafficStats
-	meta     map[string]ListenerStats // listenerID -> 监听器元信息（断线期间仍可输出累计统计）
-	dialer   Dialer
-	log      *logger.Logger
-	tunnelID string
+	mu         sync.RWMutex
+	servers    map[string]Server // listenerID -> server
+	stats      map[string]*TrafficStats
+	meta       map[string]ListenerStats // listenerID -> 监听器元信息（断线期间仍可输出累计统计）
+	dialer     Dialer
+	log        *logger.Logger
+	tunnelID   string
+	tunnelName string
+	conns      *ConnRegistry  // 活动连接注册表（可跨隧道共享）
+	history    *AccessHistory // 结构化访问历史（可跨隧道共享）
 }
 
 // NewManager 创建代理管理器
-func NewManager(dialer Dialer, log *logger.Logger, tunnelID string) *Manager {
+func NewManager(dialer Dialer, log *logger.Logger, tunnelID, tunnelName string) *Manager {
 	return &Manager{
-		servers:  make(map[string]Server),
-		stats:    make(map[string]*TrafficStats),
-		meta:     make(map[string]ListenerStats),
-		dialer:   dialer,
-		log:      log,
-		tunnelID: tunnelID,
+		servers:    make(map[string]Server),
+		stats:      make(map[string]*TrafficStats),
+		meta:       make(map[string]ListenerStats),
+		dialer:     dialer,
+		log:        log,
+		tunnelID:   tunnelID,
+		tunnelName: tunnelName,
 	}
+}
+
+// SetTracker 注入连接与访问历史采集上下文（连接统计与访问历史可在多个隧道间共享）
+func (m *Manager) SetTracker(conns *ConnRegistry, history *AccessHistory) {
+	m.mu.Lock()
+	m.conns = conns
+	m.history = history
+	m.mu.Unlock()
 }
 
 // SetDialer 更新出站拨号器（隧道重连后需指向新的 SSH 连接）
@@ -66,10 +78,11 @@ func (m *Manager) StartOne(ctx context.Context, lc config.ProxyListener) error {
 		st = &TrafficStats{}
 		m.stats[lc.ID] = st
 	}
-	m.meta[lc.ID] = ListenerStats{
-		ID:         lc.ID,
-		Protocol:   string(lc.Protocol),
-		ListenPort: lc.ListenPort,
+	tracker := &Tracker{
+		TunnelID:   m.tunnelID,
+		TunnelName: m.tunnelName,
+		Conns:      m.conns,
+		History:    m.history,
 	}
 	srv, err := buildServerWithStats(lc, m.dialer, func(level, msg string) {
 		switch level {
@@ -80,9 +93,15 @@ func (m *Manager) StartOne(ctx context.Context, lc config.ProxyListener) error {
 		default:
 			m.log.TunnelInfo(m.tunnelID, "["+string(lc.Protocol)+":"+fmt.Sprintf("%d", lc.ListenPort)+"] "+msg)
 		}
-	}, st)
+	}, st, tracker)
 	if err != nil {
 		return err
+	}
+	// 构建成功后才登记元信息：构建失败（证书/参数错误）的监听器不应出现在统计中
+	m.meta[lc.ID] = ListenerStats{
+		ID:         lc.ID,
+		Protocol:   string(lc.Protocol),
+		ListenPort: lc.ListenPort,
 	}
 	m.servers[lc.ID] = srv
 	go func() {

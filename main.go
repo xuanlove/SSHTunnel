@@ -108,6 +108,7 @@ func main() {
 
 	// 初始化共享业务层
 	app := NewApp()
+	app.SetVersion(version)
 
 	// WEB 模式或混合模式：启动 WEB 服务
 	if mode == ModeWeb || mode == ModeBoth {

@@ -56,20 +56,32 @@ type ListenerStats struct {
 	BytesRecv   int64  `json:"bytes_recv"` // 下行（目标 -> 客户端）
 }
 
+// addTraffic 按方向同时累计到监听器统计与单连接统计（两者均可为 nil）
+func addTraffic(stats *TrafficStats, conn *ConnEntry, sent bool, n int64) {
+	if sent {
+		if stats != nil {
+			stats.AddSent(n)
+		}
+		conn.AddSent(n)
+		return
+	}
+	if stats != nil {
+		stats.AddRecv(n)
+	}
+	conn.AddRecv(n)
+}
+
 // countReadCloser 读取时累计字节数（sent=true 计上行，否则计下行）
 type countReadCloser struct {
 	r     io.ReadCloser
 	stats *TrafficStats
+	conn  *ConnEntry
 	sent  bool
 }
 
 func (c *countReadCloser) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
-	if c.sent {
-		c.stats.AddSent(int64(n))
-	} else {
-		c.stats.AddRecv(int64(n))
-	}
+	addTraffic(c.stats, c.conn, c.sent, int64(n))
 	return n, err
 }
 
@@ -79,26 +91,23 @@ func (c *countReadCloser) Close() error { return c.r.Close() }
 type countWriter struct {
 	w     io.Writer
 	stats *TrafficStats
+	conn  *ConnEntry
 	sent  bool
 }
 
 func (c *countWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
-	if c.sent {
-		c.stats.AddSent(int64(n))
-	} else {
-		c.stats.AddRecv(int64(n))
-	}
+	addTraffic(c.stats, c.conn, c.sent, int64(n))
 	return n, err
 }
 
 // BridgeStats 双向桥接并按方向统计流量（按写入字节实时累计）。
-// a 为客户端侧连接，b 为隧道目标侧连接；stats 可为 nil（仅桥接）。
-func BridgeStats(a, b net.Conn, stats *TrafficStats) {
+// a 为客户端侧连接，b 为隧道目标侧连接；stats 与 conn 均可为 nil。
+func BridgeStats(a, b net.Conn, stats *TrafficStats, conn *ConnEntry) {
 	aw, bw := io.Writer(a), io.Writer(b)
-	if stats != nil {
-		aw = &countWriter{w: a, stats: stats}             // 目标 -> 客户端 = 下行
-		bw = &countWriter{w: b, stats: stats, sent: true} // 客户端 -> 目标 = 上行
+	if stats != nil || conn != nil {
+		aw = &countWriter{w: a, stats: stats, conn: conn}             // 目标 -> 客户端 = 下行
+		bw = &countWriter{w: b, stats: stats, conn: conn, sent: true} // 客户端 -> 目标 = 上行
 	}
 	done := make(chan struct{}, 2)
 	go func() {

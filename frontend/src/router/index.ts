@@ -16,6 +16,11 @@ const router = createRouter({
       component: () => import('@/views/Dashboard.vue'),
     },
     {
+      path: '/status',
+      name: 'status',
+      component: () => import('@/views/Status.vue'),
+    },
+    {
       path: '/config/:id?',
       name: 'config',
       component: () => import('@/views/ConfigEdit.vue'),

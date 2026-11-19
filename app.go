@@ -17,11 +17,17 @@ type App struct {
 	logger    *logger.Logger
 	cfgMgr    *config.Manager
 	tunnelMgr *tunnel.Manager
+	version   string
 }
 
 // NewApp 创建应用实例
 func NewApp() *App {
 	return &App{}
+}
+
+// SetVersion 注入构建版本号（桌面端节点状态展示用）
+func (a *App) SetVersion(v string) {
+	a.version = v
 }
 
 // Init 初始化各模块
@@ -96,6 +102,8 @@ func (a *App) DeleteConfig(id string) error {
 	if err := a.cfgMgr.Delete(id); err != nil {
 		return err
 	}
+	// 清理该隧道的历史累计与残留连接
+	a.tunnelMgr.Forget(id)
 	a.logger.Infof("配置已删除: ID: %s", id)
 	return nil
 }
@@ -156,12 +164,27 @@ func (a *App) StopAll() error {
 	return nil
 }
 
-// GetTunnelStats 返回所有运行中隧道的连接与流量统计（桌面端）
+// GetTunnelStats 返回所有隧道的连接与流量统计（桌面端，含已停止隧道的累计值）
 func (a *App) GetTunnelStats() map[string]tunnel.TunnelStats {
 	if a.tunnelMgr == nil {
 		return map[string]tunnel.TunnelStats{}
 	}
 	return a.tunnelMgr.Stats()
+}
+
+// GetNodeStatus 返回本节点运行状态：概览、活动连接、流量与访问历史（桌面端）
+func (a *App) GetNodeStatus(historyLimit int) tunnel.NodeStatus {
+	if a.tunnelMgr == nil || a.cfgMgr == nil {
+		return tunnel.NodeStatus{
+			Connections:   []proxy.ConnSnapshot{},
+			AccessHistory: []proxy.AccessRecord{},
+			Tunnels:       []tunnel.TunnelTraffic{},
+			Version:       a.version,
+		}
+	}
+	st := a.tunnelMgr.NodeStatus(a.cfgMgr.List(), historyLimit)
+	st.Version = a.version
+	return st
 }
 
 // ==================== 系统服务 ====================

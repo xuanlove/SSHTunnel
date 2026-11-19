@@ -46,7 +46,7 @@ func TestBridgeStats(t *testing.T) {
 	stats.BeginConn()
 	done := make(chan struct{})
 	go func() {
-		BridgeStats(aProxy, bProxy, stats)
+		BridgeStats(aProxy, bProxy, stats, nil)
 		close(done)
 	}()
 
@@ -228,7 +228,7 @@ func TestManagerStatsPersistAfterRestart(t *testing.T) {
 		ListenPort:    port,
 		AllowExternal: false,
 	}}
-	m := NewManager(&mockDialer{target: echoAddr}, logger.NewTest(), "persist")
+	m := NewManager(&mockDialer{target: echoAddr}, logger.NewTest(), "persist", "持久统计")
 	ctx := context.Background()
 	if err := m.StartAll(ctx, listeners); err != nil {
 		t.Fatalf("首次启动失败: %v", err)
@@ -490,14 +490,14 @@ func TestBaseServerAccessLog(t *testing.T) {
 
 	// 关闭时不应记录
 	off := BaseServer{stats: &TrafficStats{}, log: logf}
-	off.logAccess("example.com:80", time.Now(), "成功")
+	off.logAccess(nil, "example.com:80", time.Now(), "成功")
 	if len(logs) != 0 {
 		t.Errorf("未开启访问日志时不应记录，实际 %v", logs)
 	}
 
 	// 开启时记录目标与结果
 	on := BaseServer{stats: &TrafficStats{}, log: logf, accessLog: true}
-	on.logAccess("example.com:80", time.Now(), "成功")
+	on.logAccess(nil, "example.com:80", time.Now(), "成功")
 	if len(logs) != 1 {
 		t.Fatalf("应记录一条访问日志，实际 %v", logs)
 	}

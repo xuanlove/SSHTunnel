@@ -52,6 +52,10 @@ watch(
           <el-icon><Odometer /></el-icon>
           <span>仪表盘</span>
         </el-menu-item>
+        <el-menu-item index="/status">
+          <el-icon><Monitor /></el-icon>
+          <span>节点状态</span>
+        </el-menu-item>
         <el-menu-item index="/config">
           <el-icon><Setting /></el-icon>
           <span>新建隧道</span>

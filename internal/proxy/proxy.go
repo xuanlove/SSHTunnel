@@ -43,6 +43,14 @@ type Server interface {
 	Stats() ListenerStats
 }
 
+// Tracker 连接与访问历史的采集上下文（由隧道层注入）
+type Tracker struct {
+	TunnelID   string
+	TunnelName string
+	Conns      *ConnRegistry
+	History    *AccessHistory
+}
+
 // BaseServer 公共基础结构
 type BaseServer struct {
 	mu         sync.Mutex
@@ -54,9 +62,13 @@ type BaseServer struct {
 	listener   net.Listener
 	dialer     Dialer
 	log        func(level string, msg string)
-	fw         *Firewall // 简易防火墙（nil 表示不限制）
-	accessLog  bool      // 是否记录代理访问日志
-	stats      *TrafficStats
+	fw         *Firewall     // 简易防火墙（nil 表示不限制）
+	accessLog  bool          // 是否记录代理访问日志
+	stats      *TrafficStats // 监听器级累计统计
+	tunnelID   string
+	tunnelName string
+	conns      *ConnRegistry  // 活动连接注册表（nil 表示不采集）
+	history    *AccessHistory // 结构化访问历史（nil 表示不采集）
 
 	// 防火墙拦截日志去重：同一来源 IP 在窗口期内只记录一次
 	blockLogMu sync.Mutex
@@ -134,10 +146,60 @@ func (b *BaseServer) Stats() ListenerStats {
 	return out
 }
 
+// trackConn 注册一条活动连接（未配置连接采集时返回 nil）
+func (b *BaseServer) trackConn(conn net.Conn, target string) *ConnEntry {
+	if b.conns == nil {
+		return nil
+	}
+	return b.conns.Open(conn, ConnMeta{
+		TunnelID:   b.tunnelID,
+		TunnelName: b.tunnelName,
+		ListenerID: b.id,
+		Protocol:   string(b.protocol),
+		ListenPort: b.listenPort,
+		Target:     target,
+	})
+}
+
+// closeConn 注销活动连接
+func (b *BaseServer) closeConn(e *ConnEntry) {
+	if b.conns != nil {
+		b.conns.Close(e)
+	}
+}
+
+// addAccessRecord 写入一条结构化访问历史（仅在开启访问日志时采集）
+func (b *BaseServer) addAccessRecord(conn net.Conn, target string, start time.Time, result string, denied bool) {
+	if b.history == nil {
+		return
+	}
+	src := ""
+	if ip := remoteIP(conn); ip != nil {
+		src = ip.String()
+	}
+	b.history.Add(AccessRecord{
+		Time:       time.Now(),
+		TunnelID:   b.tunnelID,
+		TunnelName: b.tunnelName,
+		ListenerID: b.id,
+		Protocol:   string(b.protocol),
+		ListenPort: b.listenPort,
+		Target:     target,
+		Source:     src,
+		Result:     result,
+		DurationMs: time.Since(start).Milliseconds(),
+		Denied:     denied,
+	})
+}
+
 // logAccess 记录一条代理访问日志（仅当监听器开启访问日志时）。
 // target 为目标地址，start 为请求开始时间，result 为结果描述（成功/失败原因）。
-func (b *BaseServer) logAccess(target string, start time.Time, result string) {
-	if !b.accessLog || b.log == nil {
+func (b *BaseServer) logAccess(conn net.Conn, target string, start time.Time, result string) {
+	if !b.accessLog {
+		return
+	}
+	b.addAccessRecord(conn, target, start, result, false)
+	if b.log == nil {
 		return
 	}
 	b.log("info", fmt.Sprintf("访问 %s · %s · 耗时 %dms", target, result, time.Since(start).Milliseconds()))
@@ -147,7 +209,7 @@ func (b *BaseServer) logAccess(target string, start time.Time, result string) {
 // target 为空表示目标未知（如防火墙在握手前拦截），此时只记录来源；
 // 同一来源与原因 10 分钟内仅记录一次。
 func (b *BaseServer) logAccessDenied(conn net.Conn, target, reason string) {
-	if !b.accessLog || b.log == nil {
+	if !b.accessLog {
 		return
 	}
 	src := "unknown"
@@ -155,6 +217,10 @@ func (b *BaseServer) logAccessDenied(conn net.Conn, target, reason string) {
 		src = ip.String()
 	}
 	if !b.shouldLogBlock("deny:" + src + ":" + reason) {
+		return
+	}
+	b.addAccessRecord(conn, target, time.Now(), "拒绝: "+reason, true)
+	if b.log == nil {
 		return
 	}
 	if target != "" {
@@ -189,12 +255,13 @@ func noopLog(level, msg string) {}
 
 // BuildServer 根据配置构建对应协议的服务器
 func BuildServer(lc config.ProxyListener, dialer Dialer, log LogFunc) (Server, error) {
-	return buildServerWithStats(lc, dialer, log, &TrafficStats{})
+	return buildServerWithStats(lc, dialer, log, &TrafficStats{}, nil)
 }
 
 // buildServerWithStats 使用指定统计对象构建服务器。
-// Manager 在同一监听器 ID 重建时传入原对象，使「累计」数据跨重连保留。
-func buildServerWithStats(lc config.ProxyListener, dialer Dialer, log LogFunc, stats *TrafficStats) (Server, error) {
+// Manager 在同一监听器 ID 重建时传入原对象，使「累计」数据跨重连保留；
+// tracker 为连接与访问历史采集上下文，nil 表示不采集。
+func buildServerWithStats(lc config.ProxyListener, dialer Dialer, log LogFunc, stats *TrafficStats, tracker *Tracker) (Server, error) {
 	if log == nil {
 		log = noopLog
 	}
@@ -218,6 +285,12 @@ func buildServerWithStats(lc config.ProxyListener, dialer Dialer, log LogFunc, s
 		fw:         fw,
 		accessLog:  lc.AccessLog,
 		stats:      stats,
+	}
+	if tracker != nil {
+		base.tunnelID = tracker.TunnelID
+		base.tunnelName = tracker.TunnelName
+		base.conns = tracker.Conns
+		base.history = tracker.History
 	}
 
 	switch lc.Protocol {

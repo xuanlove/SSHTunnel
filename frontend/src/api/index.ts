@@ -4,6 +4,7 @@ import type {
   HopConfig,
   LogEntry,
   TunnelStats,
+  NodeStatus,
 } from '@/types'
 
 // ===== 运行环境检测 =====
@@ -214,6 +215,14 @@ export async function getRecentLogs(limit: number): Promise<LogEntry[]> {
 export async function getTunnelStats(): Promise<Record<string, TunnelStats>> {
   if (!isWeb) return Call.ByName('App.GetTunnelStats') as Promise<Record<string, TunnelStats>>
   return httpGet<Record<string, TunnelStats>>('/api/tunnels/stats')
+}
+
+// 获取节点级运行状态：概览、活动连接、流量与访问历史
+export async function getNodeStatus(historyLimit = 200): Promise<NodeStatus> {
+  if (!isWeb) {
+    return Call.ByName('App.GetNodeStatus', historyLimit) as Promise<NodeStatus>
+  }
+  return httpGet<NodeStatus>(`/api/node/status?history_limit=${historyLimit}`)
 }
 
 export async function generateSelfSignedCert(): Promise<{ certPEM: string; keyPEM: string }> {

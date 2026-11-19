@@ -5,6 +5,7 @@ import { useTunnelStore } from '@/stores/tunnel'
 import { useRouter } from 'vue-router'
 import * as api from '@/api'
 import type { TunnelConfig, TunnelStats } from '@/types'
+import { formatBytes } from '@/utils/format'
 
 const store = useTunnelStore()
 const router = useRouter()
@@ -34,21 +35,6 @@ onMounted(() => {
 onUnmounted(() => {
   if (statsTimer) window.clearInterval(statsTimer)
 })
-
-function formatBytes(n?: number): string {
-  const v = n || 0
-  if (v <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let val = v
-  let i = 0
-  while (val >= 1024 && i < units.length - 1) {
-    val /= 1024
-    i++
-  }
-  // 字节单位不显示小数，其余单位按数值大小保留 0/1 位小数
-  const digits = i === 0 ? 0 : (val >= 100 ? 0 : 1)
-  return `${val.toFixed(digits)} ${units[i]}`
-}
 
 const statusType = (s: string) => {
   return { running: 'success', stopped: 'info', error: 'danger', starting: 'warning' }[s] || 'info'
@@ -180,11 +166,11 @@ async function handleStopAll() {
               </el-tag>
             </el-tooltip>
           </div>
-          <div v-if="stats[cfg.id]" class="traffic">
-            <span class="traffic-item">↑ {{ formatBytes(stats[cfg.id].bytes_sent) }}</span>
-            <span class="traffic-item">↓ {{ formatBytes(stats[cfg.id].bytes_recv) }}</span>
+          <div class="traffic">
+            <span class="traffic-item">累计上传 {{ formatBytes(stats[cfg.id]?.bytes_sent) }}</span>
+            <span class="traffic-item">累计下载 {{ formatBytes(stats[cfg.id]?.bytes_recv) }}</span>
             <span class="traffic-item">
-              连接 {{ stats[cfg.id].active_conns }} · 累计 {{ stats[cfg.id].total_conns }}
+              连接 {{ stats[cfg.id]?.active_conns ?? 0 }} · 累计 {{ stats[cfg.id]?.total_conns ?? 0 }}
             </span>
           </div>
           <div class="card-actions">

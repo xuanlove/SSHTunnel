@@ -36,6 +36,41 @@ func TestTunnelStatsEmpty(t *testing.T) {
 	}
 }
 
+// 测试节点状态接口（无运行实例时返回空结构）
+func TestNodeStatusEmpty(t *testing.T) {
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil).
+		WithVersion("v-test", "abc", "web", "")
+	w := httptest.NewRecorder()
+	h.handleNodeStatus(w, httptest.NewRequest("GET", "/node/status?history_limit=10", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d", w.Code)
+	}
+	var resp struct {
+		Data struct {
+			Version       string        `json:"version"`
+			TunnelTotal   int           `json:"tunnel_total"`
+			Connections   []interface{} `json:"connections"`
+			AccessHistory []interface{} `json:"access_history"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if resp.Data.Version != "v-test" || resp.Data.TunnelTotal != 0 {
+		t.Errorf("节点状态内容不符: %+v", resp.Data)
+	}
+	if resp.Data.Connections == nil || resp.Data.AccessHistory == nil {
+		t.Errorf("连接与访问历史应为空数组而非 null: %+v", resp.Data)
+	}
+
+	// 非 GET 方法应拒绝
+	w2 := httptest.NewRecorder()
+	h.handleNodeStatus(w2, httptest.NewRequest("POST", "/node/status", strings.NewReader("")))
+	if w2.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST 期望 405，实际 %d", w2.Code)
+	}
+}
+
 // 测试鉴权状态接口（无密码模式）
 func TestAuthStatusDisabled(t *testing.T) {
 	srv := NewServer(Config{}, NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil))

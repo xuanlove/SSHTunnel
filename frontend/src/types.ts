@@ -121,3 +121,60 @@ export interface LogEntry {
   message: string
   tunnel_id?: string
 }
+
+// ===== 节点状态（活动连接、流量、访问历史）=====
+
+export interface ConnSnapshot {
+  id: string
+  tunnel_id: string
+  tunnel_name: string
+  listener_id: string
+  protocol: string
+  listen_port: number
+  source: string
+  target: string
+  started_at: string
+  bytes_sent: number
+  bytes_recv: number
+}
+
+export interface AccessRecord {
+  time: string
+  tunnel_id: string
+  tunnel_name: string
+  listener_id: string
+  protocol: string
+  listen_port: number
+  target: string
+  source: string
+  result: string
+  duration_ms: number
+  denied: boolean
+}
+
+export interface TunnelTraffic {
+  id: string
+  name: string
+  running: boolean
+  active_conns: number
+  total_conns: number
+  bytes_sent: number
+  bytes_recv: number
+}
+
+export interface NodeStatus {
+  version: string
+  started_at: string
+  uptime_seconds: number
+  tunnel_total: number
+  tunnel_running: number
+  listener_count: number
+  forward_count: number
+  active_conns: number
+  total_conns: number
+  bytes_sent: number
+  bytes_recv: number
+  tunnels: TunnelTraffic[]
+  connections: ConnSnapshot[]
+  access_history: AccessRecord[]
+}
