@@ -105,7 +105,7 @@ func (b *BaseServer) allowConn(conn net.Conn) bool {
 		b.log("warn", "防火墙已拒绝来源 "+src+"（同一来源 10 分钟内仅提示一次）")
 	}
 	if b.accessLog {
-		b.logAccessDenied(conn, "防火墙规则")
+		b.logAccessDenied(conn, "", "防火墙规则")
 	}
 	return false
 }
@@ -144,8 +144,9 @@ func (b *BaseServer) logAccess(target string, start time.Time, result string) {
 }
 
 // logAccessDenied 记录一条被拒绝的访问（防火墙/认证失败等）。
-// 目标地址此时未知，改为记录来源地址；同一来源与原因 10 分钟内仅记录一次。
-func (b *BaseServer) logAccessDenied(conn net.Conn, reason string) {
+// target 为空表示目标未知（如防火墙在握手前拦截），此时只记录来源；
+// 同一来源与原因 10 分钟内仅记录一次。
+func (b *BaseServer) logAccessDenied(conn net.Conn, target, reason string) {
 	if !b.accessLog || b.log == nil {
 		return
 	}
@@ -154,6 +155,10 @@ func (b *BaseServer) logAccessDenied(conn net.Conn, reason string) {
 		src = ip.String()
 	}
 	if !b.shouldLogBlock("deny:" + src + ":" + reason) {
+		return
+	}
+	if target != "" {
+		b.log("info", fmt.Sprintf("访问 %s · 来源 %s · 拒绝: %s", target, src, reason))
 		return
 	}
 	b.log("info", fmt.Sprintf("访问来源 %s · 拒绝: %s", src, reason))

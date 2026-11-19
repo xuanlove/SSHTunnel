@@ -103,7 +103,7 @@ func (s *socks5Server) handleConn(conn net.Conn) {
 		}
 		if !supportsUserPass {
 			conn.Write([]byte{0x05, 0xFF}) // 拒绝
-			s.logAccessDenied(conn, "不支持的认证方式")
+			s.logAccessDenied(conn, "", "不支持的认证方式")
 			return
 		}
 		conn.Write([]byte{0x05, 0x02}) // 选中用户名密码
@@ -214,7 +214,7 @@ func (s *socks5Server) doUserPassAuth(conn net.Conn) bool {
 	if !s.helper.checkSocks5(string(uname), string(passwd)) {
 		conn.Write([]byte{0x01, 0x01}) // 失败
 		s.log("warn", "SOCKS5 认证失败: "+string(uname))
-		s.logAccessDenied(conn, "认证失败")
+		s.logAccessDenied(conn, "", "认证失败")
 		return false
 	}
 	conn.Write([]byte{0x01, 0x00}) // 成功

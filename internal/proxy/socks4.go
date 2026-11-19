@@ -116,7 +116,7 @@ func (s *socks4Server) handleConn(conn net.Conn) {
 	if !s.helper.checkUserID(userID) {
 		s.reply(conn, 0x5D) // 用户名不匹配
 		s.log("warn", "SOCKS4 认证失败: "+userID)
-		s.logAccessDenied(conn, "认证失败")
+		s.logAccessDenied(conn, "", "认证失败")
 		return
 	}
 

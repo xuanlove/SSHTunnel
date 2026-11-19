@@ -121,7 +121,8 @@ func (s *httpServer) handleConn(conn net.Conn) {
 		resp += "Content-Length: 0\r\n\r\n"
 		conn.Write([]byte(resp))
 		s.log("warn", "HTTP 认证失败")
-		s.logAccessDenied(conn, "认证失败")
+		// HTTP 请求已解析，目标地址已知，拒绝记录中一并输出
+		s.logAccessDenied(conn, req.URL.Host, "认证失败")
 		return
 	}
 

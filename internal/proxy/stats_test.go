@@ -366,8 +366,8 @@ func TestAccessLogDenied(t *testing.T) {
 	defer a.Close()
 	defer c.Close()
 
-	b.logAccessDenied(a, "认证失败")
-	b.logAccessDenied(a, "认证失败") // 10 分钟内重复拒绝不应重复记录
+	b.logAccessDenied(a, "", "认证失败")
+	b.logAccessDenied(a, "", "认证失败") // 10 分钟内重复拒绝不应重复记录
 
 	if len(logs) != 1 {
 		t.Fatalf("应只记录一条拒绝日志，实际 %v", logs)
@@ -376,11 +376,101 @@ func TestAccessLogDenied(t *testing.T) {
 		t.Errorf("日志内容不符: %s", logs[0])
 	}
 
+	// 目标已知时应同时输出目标地址（如 HTTP 认证失败）
+	var withTarget []string
+	bt := &BaseServer{
+		stats:     &TrafficStats{},
+		accessLog: true,
+		log:       func(level, msg string) { withTarget = append(withTarget, msg) },
+	}
+	bt.logAccessDenied(a, "example.com:443", "认证失败")
+	if len(withTarget) != 1 {
+		t.Fatalf("应记录一条带目标的拒绝日志，实际 %v", withTarget)
+	}
+	if !strings.Contains(withTarget[0], "访问 example.com:443") || !strings.Contains(withTarget[0], "拒绝: 认证失败") {
+		t.Errorf("带目标的拒绝日志内容不符: %s", withTarget[0])
+	}
+
 	// 未开启访问日志时不记录
 	off := &BaseServer{stats: &TrafficStats{}, log: func(level, msg string) { logs = append(logs, msg) }}
-	off.logAccessDenied(a, "防火墙规则")
+	off.logAccessDenied(a, "", "防火墙规则")
 	if len(logs) != 1 {
 		t.Errorf("未开启访问日志时不应记录，实际 %v", logs)
+	}
+}
+
+// TestHTTPAuthFailureLogsTarget HTTP 认证失败的访问日志应包含已解析出的目标地址
+func TestHTTPAuthFailureLogsTarget(t *testing.T) {
+	var mu sync.Mutex
+	var logs []string
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("分配端口失败: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	lc := config.ProxyListener{
+		ID:         "http-auth-log",
+		Protocol:   config.ProxyHTTP,
+		ListenPort: port,
+		AccessLog:  true,
+		Auth:       &config.AuthConfig{Username: "u", Password: "p"},
+	}
+	srv, err := BuildServer(lc, &mockDialer{target: "127.0.0.1:1"}, func(level, msg string) {
+		mu.Lock()
+		logs = append(logs, msg)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("构建 HTTP 代理失败: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	defer srv.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	defer conn.Close()
+	req := "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("发送请求失败: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("读取响应失败: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Fatalf("应返回 407，实际 %d", resp.StatusCode)
+	}
+
+	// 等待认证失败日志落账
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		found := false
+		for _, l := range logs {
+			if strings.Contains(l, "访问 example.com") && strings.Contains(l, "拒绝: 认证失败") {
+				found = true
+				break
+			}
+		}
+		mu.Unlock()
+		if found || time.Now().After(deadline) {
+			if !found {
+				mu.Lock()
+				t.Errorf("未找到包含目标的认证失败日志: %v", logs)
+				mu.Unlock()
+			}
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
