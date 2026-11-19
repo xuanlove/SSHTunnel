@@ -362,6 +362,17 @@ type NodeStatus struct {
 	AccessHistory []proxy.AccessRecord `json:"access_history"`
 }
 
+// NodeHistory 返回指定隧道最近的访问历史（时间倒序）
+func (m *Manager) NodeHistory(tunnelID string, limit int) []proxy.AccessRecord {
+	if tunnelID == "" {
+		return []proxy.AccessRecord{}
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	return m.history.RecentByTunnel(tunnelID, limit)
+}
+
 // NodeStatus 汇总本节点运行状态。
 // cfgs 为全部隧道配置，用于区分运行/停止状态并补齐名称；historyLimit 为访问历史条数上限。
 func (m *Manager) NodeStatus(cfgs []config.TunnelConfig, historyLimit int) NodeStatus {

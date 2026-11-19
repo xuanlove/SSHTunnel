@@ -6,6 +6,7 @@ import type {
   LogEntry,
   TunnelStats,
   NodeStatus,
+  AccessRecord,
 } from '@/types'
 
 // ===== 运行环境检测 =====
@@ -336,6 +337,14 @@ export async function getVersion(): Promise<VersionInfo> {
     return { version: await App.GetVersion() }
   }
   return httpGet<VersionInfo>('/api/version')
+}
+
+// 获取指定节点（隧道）最近的访问历史
+export async function getNodeHistory(tunnelID: string, limit = 500): Promise<AccessRecord[]> {
+  if (!isWeb) {
+    return App.GetNodeHistory(tunnelID, limit) as unknown as Promise<AccessRecord[]>
+  }
+  return httpGet<AccessRecord[]>(`/api/node/history?tunnel_id=${encodeURIComponent(tunnelID)}&limit=${limit}`)
 }
 
 export interface GeoIPStatus {

@@ -82,6 +82,10 @@ export function GetVersion() {
   return window['go']['main']['App']['GetVersion']();
 }
 
+export function GetNodeHistory(arg1, arg2) {
+  return window['go']['main']['App']['GetNodeHistory'](arg1, arg2);
+}
+
 export function GetNodeStatus(arg1) {
   return window['go']['main']['App']['GetNodeStatus'](arg1);
 }

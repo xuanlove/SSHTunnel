@@ -76,3 +76,29 @@ func (h *AccessHistory) Recent(limit int) []AccessRecord {
 	h.mu.Unlock()
 	return out
 }
+
+// RecentByTunnel 返回指定隧道最近的访问记录（时间倒序，最多 limit 条）
+func (h *AccessHistory) RecentByTunnel(tunnelID string, limit int) []AccessRecord {
+	if h == nil {
+		return []AccessRecord{}
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := h.next
+	if h.full {
+		n = len(h.buf)
+	}
+	out := make([]AccessRecord, 0, limit)
+	idx := (h.next - 1 + len(h.buf)) % len(h.buf)
+	for i := 0; i < n && len(out) < limit; i++ {
+		rec := h.buf[idx]
+		if rec.TunnelID == tunnelID {
+			out = append(out, rec)
+		}
+		idx = (idx - 1 + len(h.buf)) % len(h.buf)
+	}
+	return out
+}

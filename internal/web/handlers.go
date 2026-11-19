@@ -132,6 +132,7 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/tunnels/status/stream", h.handleStatusStream) // WebSocket
 	mux.HandleFunc("/tunnels/stats", h.handleTunnelStats)
 	mux.HandleFunc("/node/status", h.handleNodeStatus)
+	mux.HandleFunc("/node/history", h.handleNodeHistory)
 	mux.HandleFunc("/logs", h.handleLogs)
 	mux.HandleFunc("/logs/stream", h.handleLogStream) // WebSocket
 	mux.HandleFunc("/port/check", h.handlePortCheck)
@@ -695,6 +696,37 @@ func (h *Handler) handleNodeStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status.Version = h.version
 	writeJSON(w, 0, "success", status)
+}
+
+// handleNodeHistory 返回指定隧道最近的访问历史（节点详情页使用）
+func (h *Handler) handleNodeHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	tunnelID := r.URL.Query().Get("tunnel_id")
+	if tunnelID == "" {
+		writeError(w, 400, "缺少 tunnel_id")
+		return
+	}
+	limit := 500
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if h.tunnelMgr == nil {
+		writeJSON(w, 0, "success", []proxy.AccessRecord{})
+		return
+	}
+	recs := h.tunnelMgr.NodeHistory(tunnelID, limit)
+	if recs == nil {
+		recs = []proxy.AccessRecord{}
+	}
+	writeJSON(w, 0, "success", recs)
 }
 
 // handleLogs 获取最近日志

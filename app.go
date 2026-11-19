@@ -200,6 +200,14 @@ func (a *App) GetNodeStatus(historyLimit int) tunnel.NodeStatus {
 	return st
 }
 
+// GetNodeHistory 返回指定隧道最近的访问历史（节点详情页使用）
+func (a *App) GetNodeHistory(tunnelID string, limit int) []proxy.AccessRecord {
+	if a.tunnelMgr == nil {
+		return []proxy.AccessRecord{}
+	}
+	return a.tunnelMgr.NodeHistory(tunnelID, limit)
+}
+
 // ==================== 系统服务 ====================
 
 // CheckPort 检查端口是否可用

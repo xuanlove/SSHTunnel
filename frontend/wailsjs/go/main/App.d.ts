@@ -43,6 +43,8 @@ export function GeoIPStatus():Promise<any>;
 
 export function GetVersion():Promise<string>;
 
+export function GetNodeHistory(arg1:string,arg2:number):Promise<any>;
+
 export function GetNodeStatus(arg1:number):Promise<any>;
 
 export function SetGeoIPEnabled(arg1:boolean):Promise<any>;
