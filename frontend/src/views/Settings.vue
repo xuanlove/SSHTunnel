@@ -10,6 +10,7 @@ const portToCheck = ref(1080)
 const portResult = ref<null | boolean>(null)
 const certInfo = ref<{ certPEM: string; keyPEM: string } | null>(null)
 const certMeta = ref<api.CertInfo | null>(null)
+const versionText = ref('')
 
 // ===== WEB 访问密码 =====
 const authForm = ref({ enabled: false, username: '', password: '' })
@@ -17,6 +18,12 @@ const authSaving = ref(false)
 const authLoaded = ref(false)
 
 onMounted(async () => {
+  try {
+    const v = await api.getVersion()
+    versionText.value = v.version || ''
+  } catch {
+    // 版本获取失败时显示占位符
+  }
   await loadGeoStatus()
   await loadWebTLS()
   if (!isWebMode) return
@@ -234,7 +241,7 @@ async function handleGenCert() {
     <el-card class="panel">
       <template #header><span>关于</span></template>
       <div class="info-row"><span class="label">应用名称</span><span>SSHTunnel</span></div>
-      <div class="info-row"><span class="label">版本</span><span>v1.1.0</span></div>
+      <div class="info-row"><span class="label">版本</span><span>{{ versionText || '-' }}</span></div>
       <div class="info-row"><span class="label">技术栈</span><span>Wails v2 + Vue 3 + Go</span></div>
       <div class="info-row"><span class="label">功能</span><span>SSH 多跳隧道、本地端口转发、HTTP/HTTPS/SOCKS4/SOCKS5 代理</span></div>
     </el-card>

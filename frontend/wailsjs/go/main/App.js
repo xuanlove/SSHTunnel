@@ -78,6 +78,10 @@ export function GeoIPStatus() {
   return window['go']['main']['App']['GeoIPStatus']();
 }
 
+export function GetVersion() {
+  return window['go']['main']['App']['GetVersion']();
+}
+
 export function GetNodeStatus(arg1) {
   return window['go']['main']['App']['GetNodeStatus'](arg1);
 }

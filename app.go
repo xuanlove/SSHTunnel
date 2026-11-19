@@ -33,6 +33,11 @@ func (a *App) SetVersion(v string) {
 	a.version = v
 }
 
+// GetVersion 返回构建版本号（设置页展示用）
+func (a *App) GetVersion() string {
+	return a.version
+}
+
 // Init 初始化各模块（幂等：both 模式下 WEB 启动与 Wails startup 均会调用）
 func (a *App) Init() error {
 	a.initOnce.Do(func() { a.initErr = a.init() })

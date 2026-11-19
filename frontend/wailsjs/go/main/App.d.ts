@@ -41,6 +41,8 @@ export function GeoIPAvailable():Promise<boolean>;
 
 export function GeoIPStatus():Promise<any>;
 
+export function GetVersion():Promise<string>;
+
 export function GetNodeStatus(arg1:number):Promise<any>;
 
 export function SetGeoIPEnabled(arg1:boolean):Promise<any>;

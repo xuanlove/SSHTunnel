@@ -323,6 +323,21 @@ export async function geoIPAvailable(): Promise<boolean> {
 }
 
 // ===== GeoIP 城市级数据库 =====
+export interface VersionInfo {
+  version: string
+  commit?: string
+  variant?: string
+  repo?: string
+}
+
+// 获取当前构建版本（设置页展示，跟随发布包）
+export async function getVersion(): Promise<VersionInfo> {
+  if (!isWeb) {
+    return { version: await App.GetVersion() }
+  }
+  return httpGet<VersionInfo>('/api/version')
+}
+
 export interface GeoIPStatus {
   loaded: boolean
   type: string // Country | City
