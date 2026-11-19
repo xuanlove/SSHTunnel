@@ -22,6 +22,9 @@ const form = reactive<TunnelConfig>({
   auto_reconnect: false,
   auto_start: false,
   status: 'stopped',
+  keepalive_seconds: 60,
+  max_reconnect_attempts: 0,
+  reconnect_max_delay_seconds: 60,
 })
 
 // 包装 computed 解决 reactive 中可选数组 undefined 的类型问题
@@ -122,6 +125,42 @@ onMounted(async () => {
         <el-switch v-model="form.auto_reconnect" />
       </el-form-item>
 
+      <el-form-item label="SSH 心跳">
+        <el-input-number
+          v-model="form.keepalive_seconds"
+          :min="0"
+          :max="3600"
+          :step="10"
+          controls-position="right"
+          style="width: 140px"
+        />
+        <span class="form-hint">间隔秒数，0 表示关闭（建议 60），用于及时发现僵死连接</span>
+      </el-form-item>
+
+      <el-form-item label="重连策略">
+        <div class="reconnect-row">
+          <span class="row-label">最大次数</span>
+          <el-input-number
+            v-model="form.max_reconnect_attempts"
+            :min="0"
+            :max="1000"
+            controls-position="right"
+            style="width: 130px"
+          />
+          <span class="form-hint">0 表示无限</span>
+          <span class="row-label">最大间隔</span>
+          <el-input-number
+            v-model="form.reconnect_max_delay_seconds"
+            :min="0"
+            :max="3600"
+            :step="10"
+            controls-position="right"
+            style="width: 130px"
+          />
+          <span class="form-hint">秒，0 表示默认 60</span>
+        </div>
+      </el-form-item>
+
       <el-form-item label="开机启动">
         <el-switch v-model="form.auto_start" />
         <span class="form-hint">程序/服务启动时自动启动该隧道（配合 systemd 服务即开机自启）</span>
@@ -197,5 +236,15 @@ onMounted(async () => {
   margin-left: 12px;
   font-size: 12px;
   color: #8a8d95;
+}
+.reconnect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.row-label {
+  font-size: 13px;
+  color: #c0c3cb;
 }
 </style>

@@ -59,6 +59,8 @@ export interface ProxyListener {
   auth?: AuthConfig | null
   tls?: TLSConfig | null
   firewall?: FirewallConfig | null
+  // 是否记录代理访问日志（目标地址、耗时），默认关闭
+  access_log?: boolean
 }
 
 export interface TunnelConfig {
@@ -72,6 +74,45 @@ export interface TunnelConfig {
   // 程序/服务启动时自动启动该隧道（配合 systemd 服务实现开机自启）
   auto_start: boolean
   status: TunnelStatus
+  // SSH 心跳间隔（秒），0 表示关闭
+  keepalive_seconds?: number
+  // 最大重连次数，0 表示无限
+  max_reconnect_attempts?: number
+  // 重连最大退避间隔（秒），0 表示默认 60
+  reconnect_max_delay_seconds?: number
+}
+
+// ===== 运行统计（流量与连接）=====
+
+export interface ListenerStats {
+  id: string
+  protocol: string
+  listen_port: number
+  active_conns: number
+  total_conns: number
+  bytes_sent: number
+  bytes_recv: number
+}
+
+export interface ForwardStats {
+  id: string
+  local_port: number
+  remote_host: string
+  remote_port: number
+  active_conns: number
+  total_conns: number
+  bytes_sent: number
+  bytes_recv: number
+}
+
+export interface TunnelStats {
+  id: string
+  listeners?: ListenerStats[]
+  forwards?: ForwardStats[]
+  active_conns: number
+  total_conns: number
+  bytes_sent: number
+  bytes_recv: number
 }
 
 export interface LogEntry {

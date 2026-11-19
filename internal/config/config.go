@@ -135,6 +135,8 @@ type ProxyListener struct {
 	TLS           *TLSConfig    `json:"tls,omitempty"` // https 专用
 	// Firewall 简易防火墙（懒启用；nil 或 Enabled=false 表示不限制）
 	Firewall *FirewallConfig `json:"firewall,omitempty"`
+	// AccessLog 是否记录代理访问日志（目标地址、耗时等），默认关闭避免日志刷屏
+	AccessLog bool `json:"access_log,omitempty"`
 }
 
 // TunnelConfig 隧道完整配置
@@ -149,6 +151,12 @@ type TunnelConfig struct {
 	// AutoStart 程序/服务启动时自动启动该隧道（配合 systemd 服务可实现开机自启）
 	AutoStart bool         `json:"auto_start"`
 	Status    TunnelStatus `json:"status"` // 运行时状态
+	// KeepAliveSeconds SSH 心跳间隔（秒），0 表示关闭；建议 60
+	KeepAliveSeconds int `json:"keepalive_seconds,omitempty"`
+	// MaxReconnectAttempts 最大重连次数，0 表示无限重试
+	MaxReconnectAttempts int `json:"max_reconnect_attempts,omitempty"`
+	// ReconnectMaxDelaySeconds 重连最大退避间隔（秒），0 表示默认 60
+	ReconnectMaxDelaySeconds int `json:"reconnect_max_delay_seconds,omitempty"`
 }
 
 // userConfigDir 默认使用系统配置目录（可被测试覆盖）

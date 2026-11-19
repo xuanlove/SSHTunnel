@@ -3,6 +3,7 @@ import type {
   TunnelConfig,
   HopConfig,
   LogEntry,
+  TunnelStats,
 } from '@/types'
 
 // ===== 运行环境检测 =====
@@ -207,6 +208,12 @@ export async function checkPort(port: number): Promise<boolean> {
 export async function getRecentLogs(limit: number): Promise<LogEntry[]> {
   if (!isWeb) return Call.ByName('App.GetRecentLogs', limit) as Promise<LogEntry[]>
   return httpGet<LogEntry[]>(`/api/logs?limit=${limit}`)
+}
+
+// 获取所有运行中隧道的连接与流量统计（以隧道 ID 为键）
+export async function getTunnelStats(): Promise<Record<string, TunnelStats>> {
+  if (!isWeb) return Call.ByName('App.GetTunnelStats') as Promise<Record<string, TunnelStats>>
+  return httpGet<Record<string, TunnelStats>>('/api/tunnels/stats')
 }
 
 export async function generateSelfSignedCert(): Promise<{ certPEM: string; keyPEM: string }> {

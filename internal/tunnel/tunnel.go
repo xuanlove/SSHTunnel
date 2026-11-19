@@ -28,6 +28,7 @@ type tunnelClient interface {
 	Dial(network, address string) (net.Conn, error)
 	Wait() error
 	Close() error
+	StartKeepAlive(interval time.Duration) func()
 }
 
 // sshDialer 抽象 SSH 连接的建立，测试可注入返回 mock 客户端的实现。
@@ -47,16 +48,18 @@ var dialer sshDialer = defaultDialer{}
 
 // Tunnel 单条隧道的运行实例
 type Tunnel struct {
-	mu           sync.Mutex
-	cfg          *config.TunnelConfig
-	client       tunnelClient
-	proxyMgr     *proxy.Manager
-	fwdListeners []net.Listener
-	ctx          context.Context
-	cancel       context.CancelFunc
-	log          *logger.Logger
-	reconnecting bool
-	stopCh       chan struct{}
+	mu            sync.Mutex
+	cfg           *config.TunnelConfig
+	client        tunnelClient
+	proxyMgr      *proxy.Manager
+	fwdListeners  []net.Listener
+	fwdStats      map[string]*proxy.TrafficStats // 本地转发 ID -> 统计
+	ctx           context.Context
+	cancel        context.CancelFunc
+	log           *logger.Logger
+	reconnecting  bool
+	stopCh        chan struct{}
+	keepAliveStop func() // 停止 SSH 心跳（nil 表示未启用）
 }
 
 // Manager 隧道管理器
@@ -145,6 +148,88 @@ func (m *Manager) IsRunning(id string) bool {
 	return ok
 }
 
+// ForwardStats 本地端口转发的运行统计
+type ForwardStats struct {
+	ID          string `json:"id"`
+	LocalPort   int    `json:"local_port"`
+	RemoteHost  string `json:"remote_host"`
+	RemotePort  int    `json:"remote_port"`
+	ActiveConns int64  `json:"active_conns"`
+	TotalConns  int64  `json:"total_conns"`
+	BytesSent   int64  `json:"bytes_sent"` // 上行（客户端 -> 目标）
+	BytesRecv   int64  `json:"bytes_recv"` // 下行（目标 -> 客户端）
+}
+
+// TunnelStats 单条隧道的连接与流量统计
+type TunnelStats struct {
+	ID          string                `json:"id"`
+	Listeners   []proxy.ListenerStats `json:"listeners,omitempty"`
+	Forwards    []ForwardStats        `json:"forwards,omitempty"`
+	ActiveConns int64                 `json:"active_conns"`
+	TotalConns  int64                 `json:"total_conns"`
+	BytesSent   int64                 `json:"bytes_sent"`
+	BytesRecv   int64                 `json:"bytes_recv"`
+}
+
+// Stats 返回该隧道的连接与流量统计快照
+func (t *Tunnel) Stats() TunnelStats {
+	t.mu.Lock()
+	pm := t.proxyMgr
+	fwd := make(map[string]*proxy.TrafficStats, len(t.fwdStats))
+	for id, s := range t.fwdStats {
+		fwd[id] = s
+	}
+	t.mu.Unlock()
+
+	out := TunnelStats{ID: t.cfg.ID}
+	if pm != nil {
+		out.Listeners = pm.Stats()
+	}
+	for _, lf := range t.cfg.LocalForwards {
+		fs := ForwardStats{
+			ID:         lf.ID,
+			LocalPort:  lf.LocalPort,
+			RemoteHost: lf.RemoteHost,
+			RemotePort: lf.RemotePort,
+		}
+		if c, ok := fwd[lf.ID]; ok {
+			fs.ActiveConns, fs.TotalConns, fs.BytesSent, fs.BytesRecv = c.Snapshot()
+		}
+		out.Forwards = append(out.Forwards, fs)
+	}
+
+	// 聚合到隧道级别
+	for _, l := range out.Listeners {
+		out.ActiveConns += l.ActiveConns
+		out.TotalConns += l.TotalConns
+		out.BytesSent += l.BytesSent
+		out.BytesRecv += l.BytesRecv
+	}
+	for _, f := range out.Forwards {
+		out.ActiveConns += f.ActiveConns
+		out.TotalConns += f.TotalConns
+		out.BytesSent += f.BytesSent
+		out.BytesRecv += f.BytesRecv
+	}
+	return out
+}
+
+// Stats 返回所有运行中隧道的统计（以隧道 ID 为键）
+func (m *Manager) Stats() map[string]TunnelStats {
+	m.mu.RLock()
+	tunnels := make([]*Tunnel, 0, len(m.tunnels))
+	for _, t := range m.tunnels {
+		tunnels = append(tunnels, t)
+	}
+	m.mu.RUnlock()
+
+	out := make(map[string]TunnelStats, len(tunnels))
+	for _, t := range tunnels {
+		out[t.cfg.ID] = t.Stats()
+	}
+	return out
+}
+
 // emitStatus 触发状态变更回调（通知所有订阅者）
 func (m *Manager) emitStatus(tunnelID, status string) {
 	m.mu.RLock()
@@ -190,8 +275,14 @@ func (t *Tunnel) connectAndServe() error {
 		t.log.TunnelError(t.cfg.ID, "SSH 连接失败: "+err.Error())
 		return err
 	}
+	// 启动 SSH 心跳（可配置，0 表示关闭）
+	var keepAliveStop func()
+	if t.cfg.KeepAliveSeconds > 0 {
+		keepAliveStop = client.StartKeepAlive(time.Duration(t.cfg.KeepAliveSeconds) * time.Second)
+	}
 	t.mu.Lock()
 	t.client = client
+	t.keepAliveStop = keepAliveStop
 	t.mu.Unlock()
 
 	// 启动本地端口转发
@@ -258,6 +349,16 @@ func (t *Tunnel) watchAndReconnect() {
 		t.reconnecting = true
 		t.cleanupResources()
 
+		// 重连策略：最大退避与最大次数均可按隧道配置（0 表示使用默认/无限）
+		maxDelay := reconnectMaxDelay
+		if v := t.cfg.ReconnectMaxDelaySeconds; v > 0 {
+			maxDelay = time.Duration(v) * time.Second
+		}
+		maxAttempts := reconnectMaxAttempts
+		if v := t.cfg.MaxReconnectAttempts; v > 0 {
+			maxAttempts = v
+		}
+
 		delay := reconnectInitialDelay
 		attempts := 0
 		for {
@@ -272,10 +373,15 @@ func (t *Tunnel) watchAndReconnect() {
 			t.log.TunnelInfo(t.cfg.ID, fmt.Sprintf("第 %d 次重连尝试...", attempts))
 			if err := t.connectAndServe(); err != nil {
 				t.log.TunnelWarn(t.cfg.ID, fmt.Sprintf("第 %d 次重连失败: %s", attempts, err.Error()))
+				if maxAttempts > 0 && attempts >= maxAttempts {
+					t.reconnecting = false
+					t.log.TunnelError(t.cfg.ID, fmt.Sprintf("已达到最大重连次数 %d，停止自动重连", maxAttempts))
+					return
+				}
 				// 指数退避
 				delay = delay * 2
-				if delay > reconnectMaxDelay {
-					delay = reconnectMaxDelay
+				if delay > maxDelay {
+					delay = maxDelay
 				}
 				continue
 			}
@@ -296,8 +402,13 @@ func (t *Tunnel) cleanupResources() {
 	t.proxyMgr = nil
 	c := t.client
 	t.client = nil
+	stopKeepAlive := t.keepAliveStop
+	t.keepAliveStop = nil
 	t.mu.Unlock()
 
+	if stopKeepAlive != nil {
+		stopKeepAlive()
+	}
 	for _, ln := range listeners {
 		ln.Close()
 	}
@@ -326,8 +437,13 @@ func (t *Tunnel) startLocalForward(lf config.LocalForward) error {
 	if err != nil {
 		return err
 	}
+	stats := &proxy.TrafficStats{}
 	t.mu.Lock()
 	t.fwdListeners = append(t.fwdListeners, ln)
+	if t.fwdStats == nil {
+		t.fwdStats = make(map[string]*proxy.TrafficStats)
+	}
+	t.fwdStats[lf.ID] = stats
 	t.mu.Unlock()
 
 	target := fmt.Sprintf("%s:%d", lf.RemoteHost, lf.RemotePort)
@@ -343,14 +459,16 @@ func (t *Tunnel) startLocalForward(lf config.LocalForward) error {
 				t.log.TunnelError(t.cfg.ID, "接受本地转发连接失败: "+err.Error())
 				return
 			}
-			go t.handleForward(conn, target)
+			go t.handleForward(conn, target, stats)
 		}
 	}()
 	return nil
 }
 
-func (t *Tunnel) handleForward(conn net.Conn, target string) {
+func (t *Tunnel) handleForward(conn net.Conn, target string, stats *proxy.TrafficStats) {
 	defer conn.Close()
+	stats.BeginConn()
+	defer stats.EndConn()
 	c := t.clientSafe()
 	if c == nil {
 		conn.Close()
@@ -362,7 +480,7 @@ func (t *Tunnel) handleForward(conn net.Conn, target string) {
 		return
 	}
 	defer targetConn.Close()
-	proxy.Bridge(conn, targetConn)
+	proxy.BridgeStats(conn, targetConn, stats)
 }
 
 // stop 停止隧道

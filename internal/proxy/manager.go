@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"sshtunnel/internal/config"
@@ -11,10 +12,10 @@ import (
 
 // Manager 多端口多协议代理管理器，绑定到单条 SSH 隧道
 type Manager struct {
-	mu      sync.RWMutex
-	servers map[string]Server // listenerID -> server
-	dialer  Dialer
-	log     *logger.Logger
+	mu       sync.RWMutex
+	servers  map[string]Server // listenerID -> server
+	dialer   Dialer
+	log      *logger.Logger
 	tunnelID string
 }
 
@@ -106,5 +107,17 @@ func (m *Manager) Status() map[string]ListenerStatus {
 	for id, srv := range m.servers {
 		out[id] = srv.Status()
 	}
+	return out
+}
+
+// Stats 获取所有监听器的连接与流量统计（按监听端口排序）
+func (m *Manager) Stats() []ListenerStats {
+	m.mu.RLock()
+	out := make([]ListenerStats, 0, len(m.servers))
+	for _, srv := range m.servers {
+		out = append(out, srv.Stats())
+	}
+	m.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].ListenPort < out[j].ListenPort })
 	return out
 }

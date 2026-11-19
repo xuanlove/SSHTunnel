@@ -18,6 +18,10 @@ export function GetRecentLogs(arg1) {
   return window['go']['main']['App']['GetRecentLogs'](arg1);
 }
 
+export function GetTunnelStats() {
+  return window['go']['main']['App']['GetTunnelStats']();
+}
+
 export function InspectCertificate(arg1) {
   return window['go']['main']['App']['InspectCertificate'](arg1);
 }

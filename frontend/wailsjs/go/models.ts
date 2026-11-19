@@ -79,6 +79,7 @@ export namespace config {
 	    allow_external: boolean;
 	    auth?: AuthConfig;
 	    tls?: TLSConfig;
+	    access_log?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ProxyListener(source);
@@ -92,6 +93,7 @@ export namespace config {
 	        this.allow_external = source["allow_external"];
 	        this.auth = this.convertValues(source["auth"], AuthConfig);
 	        this.tls = this.convertValues(source["tls"], TLSConfig);
+	        this.access_log = source["access_log"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -121,7 +123,11 @@ export namespace config {
 	    local_forwards?: LocalForward[];
 	    proxy_listeners?: ProxyListener[];
 	    auto_reconnect: boolean;
+	    auto_start: boolean;
 	    status: string;
+	    keepalive_seconds?: number;
+	    max_reconnect_attempts?: number;
+	    reconnect_max_delay_seconds?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new TunnelConfig(source);
@@ -136,7 +142,11 @@ export namespace config {
 	        this.local_forwards = this.convertValues(source["local_forwards"], LocalForward);
 	        this.proxy_listeners = this.convertValues(source["proxy_listeners"], ProxyListener);
 	        this.auto_reconnect = source["auto_reconnect"];
+	        this.auto_start = source["auto_start"];
 	        this.status = source["status"];
+	        this.keepalive_seconds = source["keepalive_seconds"];
+	        this.max_reconnect_attempts = source["max_reconnect_attempts"];
+	        this.reconnect_max_delay_seconds = source["reconnect_max_delay_seconds"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -228,6 +238,103 @@ export namespace proxy {
 	        this.expired = source["expired"];
 	        this.days_left = source["days_left"];
 	    }
+	}
+	export class ListenerStats {
+	    id: string;
+	    protocol: string;
+	    listen_port: number;
+	    active_conns: number;
+	    total_conns: number;
+	    bytes_sent: number;
+	    bytes_recv: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ListenerStats(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.protocol = source["protocol"];
+	        this.listen_port = source["listen_port"];
+	        this.active_conns = source["active_conns"];
+	        this.total_conns = source["total_conns"];
+	        this.bytes_sent = source["bytes_sent"];
+	        this.bytes_recv = source["bytes_recv"];
+	    }
+	}
+
+}
+
+export namespace tunnel {
+	
+	export class ForwardStats {
+	    id: string;
+	    local_port: number;
+	    remote_host: string;
+	    remote_port: number;
+	    active_conns: number;
+	    total_conns: number;
+	    bytes_sent: number;
+	    bytes_recv: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ForwardStats(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.local_port = source["local_port"];
+	        this.remote_host = source["remote_host"];
+	        this.remote_port = source["remote_port"];
+	        this.active_conns = source["active_conns"];
+	        this.total_conns = source["total_conns"];
+	        this.bytes_sent = source["bytes_sent"];
+	        this.bytes_recv = source["bytes_recv"];
+	    }
+	}
+	export class TunnelStats {
+	    id: string;
+	    listeners?: proxy.ListenerStats[];
+	    forwards?: ForwardStats[];
+	    active_conns: number;
+	    total_conns: number;
+	    bytes_sent: number;
+	    bytes_recv: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TunnelStats(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.listeners = this.convertValues(source["listeners"], proxy.ListenerStats);
+	        this.forwards = this.convertValues(source["forwards"], ForwardStats);
+	        this.active_conns = source["active_conns"];
+	        this.total_conns = source["total_conns"];
+	        this.bytes_sent = source["bytes_sent"];
+	        this.bytes_recv = source["bytes_recv"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

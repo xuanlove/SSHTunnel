@@ -336,6 +336,15 @@ async function handleTestProxy(pl: ProxyListener) {
         <CertSummary :info="certInfos[pl.id] || null" :error="certErrors[pl.id]" />
       </div>
 
+      <div class="access-row">
+        <el-switch
+          :model-value="!!pl.access_log"
+          active-text="记录访问日志"
+          @update:model-value="(v: string | number | boolean) => updateListener(idx, { access_log: v as boolean })"
+        />
+        <span class="hint">记录每次代理访问的目标地址与耗时，可在「操作日志」页按隧道筛选</span>
+      </div>
+
       <div class="fw-row">
         <el-switch
           :model-value="!!pl.firewall"
@@ -487,6 +496,14 @@ async function handleTestProxy(pl: ProxyListener) {
   color: #ebb563;
 }
 .probe-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-top: 1px dashed #3a3f4b;
+  padding-top: 8px;
+}
+.access-row {
   display: flex;
   align-items: center;
   gap: 12px;

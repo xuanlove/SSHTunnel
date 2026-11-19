@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"time"
 
 	"sshtunnel/internal/config"
 )
@@ -66,12 +67,15 @@ func (s *socks5Server) Stop() error {
 
 func (s *socks5Server) handleConn(conn net.Conn) {
 	defer conn.Close()
+	s.stats.BeginConn()
+	defer s.stats.EndConn()
 
 	// 简易防火墙：来源校验
 	if !s.allowConn(conn) {
 		return
 	}
 
+	start := time.Now()
 	// 1. 握手协商认证方式
 	// 客户端: VER(1) NMETHODS(1) METHODS(n)
 	header := make([]byte, 2)
@@ -171,6 +175,7 @@ func (s *socks5Server) handleConn(conn net.Conn) {
 	targetConn, err := s.dialer.Dial("tcp", target)
 	if err != nil {
 		s.log("warn", "连接目标失败 "+target+": "+err.Error())
+		s.logAccess(target, start, "失败: 连接目标失败")
 		s.reply(conn, 0x05, nil, 0) // 连接失败
 		return
 	}
@@ -180,7 +185,8 @@ func (s *socks5Server) handleConn(conn net.Conn) {
 	s.reply(conn, 0x00, net.IPv4(0, 0, 0, 0), 0)
 
 	// 4. 双向桥接
-	Bridge(conn, targetConn)
+	BridgeStats(conn, targetConn, s.stats)
+	s.logAccess(target, start, "成功")
 }
 
 // doUserPassAuth RFC 1929 用户名密码子协商

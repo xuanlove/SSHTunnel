@@ -1,22 +1,10 @@
 package proxy
 
 import (
-	"io"
 	"net"
 )
 
-// Bridge 双向桥接两个连接
+// Bridge 双向桥接两个连接（不统计流量）
 func Bridge(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(a, b)
-		_ = a.Close()
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(b, a)
-		_ = b.Close()
-		done <- struct{}{}
-	}()
-	<-done
+	BridgeStats(a, b, nil)
 }

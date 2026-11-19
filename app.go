@@ -150,6 +150,14 @@ func (a *App) StopAll() error {
 	return nil
 }
 
+// GetTunnelStats 返回所有运行中隧道的连接与流量统计（桌面端）
+func (a *App) GetTunnelStats() map[string]tunnel.TunnelStats {
+	if a.tunnelMgr == nil {
+		return map[string]tunnel.TunnelStats{}
+	}
+	return a.tunnelMgr.Stats()
+}
+
 // ==================== 系统服务 ====================
 
 // CheckPort 检查端口是否可用

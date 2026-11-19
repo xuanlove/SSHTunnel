@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -152,4 +153,30 @@ func (c *Client) Close() error {
 		return nil
 	}
 	return c.client.Close()
+}
+
+// StartKeepAlive 启动 SSH 心跳（keepalive@openssh.com），返回停止函数。
+// 间隔 <= 0 时不做任何事。心跳失败会关闭连接，从而触发上层自动重连。
+func (c *Client) StartKeepAlive(interval time.Duration) func() {
+	if interval <= 0 || c.client == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if _, _, err := c.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+					_ = c.Close()
+					return
+				}
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }

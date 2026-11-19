@@ -6,7 +6,13 @@ const store = useTunnelStore()
 
 const levels = ref<string[]>([])
 const keyword = ref('')
+const tunnelFilter = ref('')
 const logContainer = ref<HTMLElement | null>(null)
+
+// 隧道下拉选项（配置列表由 App 初始化时加载）
+const tunnelOptions = computed(() =>
+  store.configs.map(c => ({ label: c.name || c.id, value: c.id })),
+)
 
 const levelOptions = [
   { label: 'DEBUG', value: 'DEBUG' },
@@ -17,6 +23,7 @@ const levelOptions = [
 
 const filteredLogs = computed(() => {
   return store.logs.filter(log => {
+    if (tunnelFilter.value && log.tunnel_id !== tunnelFilter.value) return false
     if (levels.value.length && !levels.value.includes(log.level)) return false
     if (keyword.value && !log.message.toLowerCase().includes(keyword.value.toLowerCase())) return false
     return true
@@ -80,6 +87,19 @@ onMounted(async () => {
     <div class="toolbar">
       <h2>操作日志</h2>
       <div class="actions">
+        <el-select
+          v-model="tunnelFilter"
+          clearable
+          placeholder="隧道过滤"
+          style="width: 180px"
+        >
+          <el-option
+            v-for="opt in tunnelOptions"
+            :key="opt.value"
+            :label="opt.label"
+            :value="opt.value"
+          />
+        </el-select>
         <el-select
           v-model="levels"
           multiple

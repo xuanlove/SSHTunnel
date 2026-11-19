@@ -128,6 +128,7 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/tunnels/stop-all", h.handleStopAll)
 	mux.HandleFunc("/tunnels/status", h.handleStatus)
 	mux.HandleFunc("/tunnels/status/stream", h.handleStatusStream) // WebSocket
+	mux.HandleFunc("/tunnels/stats", h.handleTunnelStats)
 	mux.HandleFunc("/logs", h.handleLogs)
 	mux.HandleFunc("/logs/stream", h.handleLogStream) // WebSocket
 	mux.HandleFunc("/port/check", h.handlePortCheck)
@@ -635,6 +636,19 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 0, "success", statuses)
+}
+
+// handleTunnelStats 获取运行中隧道的连接与流量统计
+func (h *Handler) handleTunnelStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	stats := map[string]tunnel.TunnelStats{}
+	if h.tunnelMgr != nil {
+		stats = h.tunnelMgr.Stats()
+	}
+	writeJSON(w, 0, "success", stats)
 }
 
 // handleLogs 获取最近日志

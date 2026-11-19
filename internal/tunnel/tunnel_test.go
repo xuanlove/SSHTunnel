@@ -40,6 +40,10 @@ func (m *mockClient) Close() error {
 	return nil
 }
 
+func (m *mockClient) StartKeepAlive(interval time.Duration) func() {
+	return func() {}
+}
+
 // dialResult 单次拨号结果：err 非空则失败，否则返回新 mockClient。
 type dialResult struct {
 	err error
@@ -258,9 +262,9 @@ func TestOnStatusChangeMultipleSubscribers(t *testing.T) {
 // TestReconnect 验证自动重连：连接断开后按指数退避重试，失败再成功。
 func TestReconnect(t *testing.T) {
 	d := &mockDialer{results: []dialResult{
-		{},                              // 首次启动成功
-		{err: errors.New("dial fail")},  // 重连第 1 次失败
-		{},                              // 重连第 2 次成功
+		{},                             // 首次启动成功
+		{err: errors.New("dial fail")}, // 重连第 1 次失败
+		{},                             // 重连第 2 次成功
 	}}
 	withMockDialer(t, d)
 	m := newTestManager(t)

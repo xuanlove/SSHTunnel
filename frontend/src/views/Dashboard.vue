@@ -1,12 +1,47 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTunnelStore } from '@/stores/tunnel'
 import { useRouter } from 'vue-router'
-import type { TunnelConfig } from '@/types'
+import * as api from '@/api'
+import type { TunnelConfig, TunnelStats } from '@/types'
 
 const store = useTunnelStore()
 const router = useRouter()
+
+// ===== 运行统计（每 3 秒轮询，仅包含运行中的隧道）=====
+const stats = ref<Record<string, TunnelStats>>({})
+let statsTimer = 0
+
+async function loadStats() {
+  try {
+    stats.value = await api.getTunnelStats()
+  } catch {
+    // 统计失败不影响主流程
+  }
+}
+
+onMounted(() => {
+  void loadStats()
+  statsTimer = window.setInterval(loadStats, 3000)
+})
+
+onUnmounted(() => {
+  if (statsTimer) window.clearInterval(statsTimer)
+})
+
+function formatBytes(n?: number): string {
+  const v = n || 0
+  if (v <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let val = v
+  let i = 0
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024
+    i++
+  }
+  return `${val >= 100 ? val.toFixed(0) : val.toFixed(1)} ${units[i]}`
+}
 
 const statusType = (s: string) => {
   return { running: 'success', stopped: 'info', error: 'danger', starting: 'warning' }[s] || 'info'
@@ -20,15 +55,32 @@ const hopSummary = (cfg: TunnelConfig) => {
 }
 
 const listenerSummary = (cfg: TunnelConfig) => {
-  const items: { text: string; auth: boolean }[] = []
+  const items: { key: string; text: string; auth: boolean; tip: string }[] = []
+  const st = stats.value[cfg.id]
   if (cfg.local_forwards) {
     cfg.local_forwards.forEach(lf => {
-      items.push({ text: `本地转发 :${lf.local_port}→${lf.remote_host}:${lf.remote_port}`, auth: false })
+      const fs = st?.forwards?.find(f => f.id === lf.id)
+      items.push({
+        key: lf.id,
+        text: `本地转发 :${lf.local_port}→${lf.remote_host}:${lf.remote_port}`,
+        auth: false,
+        tip: fs
+          ? `活跃 ${fs.active_conns} · 累计 ${fs.total_conns} · ↑${formatBytes(fs.bytes_sent)} ↓${formatBytes(fs.bytes_recv)}`
+          : '',
+      })
     })
   }
   if (cfg.proxy_listeners) {
     cfg.proxy_listeners.forEach(pl => {
-      items.push({ text: `${pl.protocol.toUpperCase()} :${pl.listen_port}`, auth: !!pl.auth })
+      const ls = st?.listeners?.find(l => l.id === pl.id)
+      items.push({
+        key: pl.id,
+        text: `${pl.protocol.toUpperCase()} :${pl.listen_port}`,
+        auth: !!pl.auth,
+        tip: ls
+          ? `活跃 ${ls.active_conns} · 累计 ${ls.total_conns} · ↑${formatBytes(ls.bytes_sent)} ↓${formatBytes(ls.bytes_recv)}`
+          : '',
+      })
     })
   }
   return items
@@ -108,15 +160,25 @@ async function handleStopAll() {
           </div>
           <div class="hop-chain">{{ hopSummary(cfg) || '未配置跳板' }}</div>
           <div class="listeners">
-            <el-tag
-              v-for="(item, idx) in listenerSummary(cfg)"
-              :key="idx"
-              size="small"
-              class="listener-tag"
+            <el-tooltip
+              v-for="item in listenerSummary(cfg)"
+              :key="item.key"
+              :content="item.tip"
+              :disabled="!item.tip"
+              placement="top"
             >
-              <el-icon v-if="item.auth" class="lock-icon"><Lock /></el-icon>
-              {{ item.text }}
-            </el-tag>
+              <el-tag size="small" class="listener-tag">
+                <el-icon v-if="item.auth" class="lock-icon"><Lock /></el-icon>
+                {{ item.text }}
+              </el-tag>
+            </el-tooltip>
+          </div>
+          <div v-if="stats[cfg.id]" class="traffic">
+            <span class="traffic-item">↑ {{ formatBytes(stats[cfg.id].bytes_sent) }}</span>
+            <span class="traffic-item">↓ {{ formatBytes(stats[cfg.id].bytes_recv) }}</span>
+            <span class="traffic-item">
+              连接 {{ stats[cfg.id].active_conns }} · 累计 {{ stats[cfg.id].total_conns }}
+            </span>
           </div>
           <div class="card-actions">
             <el-button
@@ -198,6 +260,17 @@ async function handleStopAll() {
   background-color: #323640;
   border-color: #4a4f5b;
   color: #e0e3e8;
+}
+.traffic {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #8a8d95;
+}
+.traffic-item {
+  font-variant-numeric: tabular-nums;
 }
 .lock-icon {
   margin-right: 2px;

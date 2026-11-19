@@ -10,6 +10,32 @@ import (
 	"sshtunnel/internal/logger"
 )
 
+// 测试隧道流量统计接口（无运行中隧道时返回空对象）
+func TestTunnelStatsEmpty(t *testing.T) {
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+	w := httptest.NewRecorder()
+	h.handleTunnelStats(w, httptest.NewRequest("GET", "/tunnels/stats", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d", w.Code)
+	}
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if len(resp.Data) != 0 {
+		t.Errorf("期望空统计，实际 %v", resp.Data)
+	}
+
+	// 非 GET 方法应拒绝
+	w2 := httptest.NewRecorder()
+	h.handleTunnelStats(w2, httptest.NewRequest("POST", "/tunnels/stats", strings.NewReader("")))
+	if w2.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST 期望 405，实际 %d", w2.Code)
+	}
+}
+
 // 测试鉴权状态接口（无密码模式）
 func TestAuthStatusDisabled(t *testing.T) {
 	srv := NewServer(Config{}, NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil))

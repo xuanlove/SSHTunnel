@@ -52,7 +52,12 @@ export const useTunnelStore = defineStore('tunnel', () => {
     logs.value = await api.getRecentLogs(limit)
   }
 
+  // 日志订阅只建立一次，避免多个页面同时调用导致重复推送
+  let logListenerBound = false
+
   function setupLogListener() {
+    if (logListenerBound) return
+    logListenerBound = true
     api.onLogNew((entry) => {
       logs.value.push(entry)
       if (logs.value.length > 1000) {

@@ -60,8 +60,11 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **本地端口转发**：经典的 SSH `-L` 本地转发，支持多个转发规则
 - **多协议代理**：单条隧道可同时监听 HTTP / HTTPS / SOCKS4 / SOCKS5 多端口
 - **认证方式**：密码认证 / 密钥认证（密钥以 PEM 文本形式存储，便于跨设备同步）
-- **自动重连**：SSH 断开后指数退避重连（初始 2s，上限 60s，可配置无限重试）
+- **自动重连**：SSH 断开后指数退避重连（初始 2s，上限 60s，可配置最大次数与最大退避间隔）
+- **SSH 心跳**：可配置 KeepAlive 间隔（默认关闭，建议 60 秒），及时发现僵死连接并触发重连
 - **开机启动**：每条隧道可独立勾选「开机启动」，程序/服务启动时自动拉起（配合 systemd 服务即开机自启）
+- **运行统计**：仪表盘实时展示每条隧道/监听器的活跃与累计连接数、上下行流量，监听器标签悬浮可查看单项明细
+- **代理访问日志**：监听器可开启访问日志，记录每次访问的目标地址、结果与耗时，支持「操作日志」页按隧道过滤与导出
 - **端口冲突检测**：监听启动前自动检测端口占用，避免冲突
 - **代理防火墙**：每个代理监听端口可独立配置简易防火墙，支持黑名单（默认）/白名单模式、自定义 IP 与 IP 段（IPv4 + IPv6 CIDR）、GeoIP 国家规则（**内置 GeoLite2-Country，开箱即用**）与城市级规则（按需下载 Merged-IP 城市库）
 - **代理连通性自检**：每个代理监听器可一键「测试代理端口」，经该监听端口访问 `https://api.ip.sb/ip` 并显示出口 IP，直观验证隧道是否走通
@@ -395,11 +398,15 @@ user1@host1:22, user2@host2:2222, user3@host3
         "tls": {                      // 仅 https 协议，证书以 PEM 文本保存
           "cert_pem": "-----BEGIN CERTIFICATE-----\n...",
           "key_pem": "-----BEGIN PRIVATE KEY-----\n..."
-        }
+        },
+        "access_log": true            // 是否记录代理访问日志（目标地址、耗时）
       }
     ],
     "auto_reconnect": true,          // 是否自动重连
     "auto_start": true,              // 程序/服务启动时自动启动（配合 systemd 即开机自启）
+    "keepalive_seconds": 60,         // SSH 心跳间隔（秒），0 表示关闭
+    "max_reconnect_attempts": 0,     // 最大重连次数，0 表示无限
+    "reconnect_max_delay_seconds": 60, // 重连最大退避间隔（秒），0 表示默认 60
     "status": "stopped"              // 运行时状态，加载时强制重置为 stopped，不持久化
   }
 ]
@@ -417,6 +424,9 @@ user1@host1:22, user2@host2:2222, user3@host3
 | `proxy_listeners` | array | 代理监听器（仅 `proxy` 类型） |
 | `auto_reconnect` | bool | 是否启用自动重连 |
 | `auto_start` | bool | 程序/服务启动时自动启动该隧道（配合 systemd 服务实现开机自启） |
+| `keepalive_seconds` | int | SSH 心跳间隔（秒），`0` 表示关闭；建议 `60`，可及时发现僵死连接 |
+| `max_reconnect_attempts` | int | 最大重连次数，`0` 表示无限重试 |
+| `reconnect_max_delay_seconds` | int | 重连指数退避的最大间隔（秒），`0` 表示默认 60 |
 | `status` | string | 运行时状态，不持久化（`stopped` / `starting` / `running` / `error`） |
 
 ### 代理监听器
@@ -428,6 +438,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 - 是否允许外部访问（`0.0.0.0` 或 `127.0.0.1`）
 - 认证配置（HTTP Basic / SOCKS5 用户名密码 / SOCKS4 UserID）
 - TLS 证书（仅 HTTPS，采用 PEM 文本方式，可在监听器编辑页直接粘贴或一键生成自签证书）
+- 访问日志（`access_log`，记录每次代理访问的目标地址与耗时，默认关闭）
 - **简易防火墙**（可选，默认不启用）：黑名单/白名单模式、自定义 IP 与 IP 段、GeoIP 国家规则与城市级规则
 
 防火墙配置示例（`proxy_listeners[].firewall`）：
@@ -510,6 +521,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 | POST | `/api/tunnels/start-all` | 批量启动 |
 | POST | `/api/tunnels/stop-all` | 批量停止 |
 | GET | `/api/tunnels/status` | 查询所有隧道状态 |
+| GET | `/api/tunnels/stats` | 查询运行中隧道的连接与流量统计（按监听器/本地转发细分，含活跃与累计连接数、上下行字节） |
 | GET | `/api/logs?limit=N` | 获取最近 N 条日志 |
 | POST | `/api/port/check` | 检测端口可用性 |
 | POST | `/api/cert/generate` | 生成 HTTPS 自签证书（返回 `cert_pem` / `key_pem` 文本） |
@@ -954,6 +966,20 @@ npm run preview    # 预览构建产物
 ---
 
 ## 版本更新说明
+
+### v1.4.0
+
+- **运行统计（流量与连接数）**：新增 `GET /api/tunnels/stats`，按隧道与监听器/本地转发统计活跃连接、累计连接与上下行字节
+  - 仪表盘每 3 秒轮询展示 `↑ 上行 / ↓ 下行 / 连接数`，监听器标签悬浮显示该监听器明细
+  - 流量采用写入时实时累计，长连接也可持续看到增长
+- **代理访问日志**：代理监听器新增「记录访问日志」开关（`access_log`）
+  - 记录每次访问的目标地址、结果（成功/失败原因）与耗时，例如 `访问 example.com:443 · 成功 · 耗时 120ms`
+  - 「操作日志」页新增隧道下拉过滤，可配合关键字与级别筛选后导出
+  - 修复日志 WebSocket 在多个页面重复订阅导致日志重复的问题
+- **SSH 心跳与可配置重连策略**
+  - 新增 `keepalive_seconds`：定期发送 `keepalive@openssh.com`，心跳失败自动断开并触发重连（0 表示关闭）
+  - 新增 `max_reconnect_attempts`（0 表示无限）与 `reconnect_max_delay_seconds`（0 表示默认 60）
+  - 编辑页提供对应输入项，达到最大重连次数后停止并记录错误日志
 
 ### v1.3.10
 

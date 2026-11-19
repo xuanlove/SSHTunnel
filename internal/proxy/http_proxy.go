@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"sshtunnel/internal/config"
 )
@@ -98,12 +99,15 @@ func (s *httpServer) Stop() error {
 
 func (s *httpServer) handleConn(conn net.Conn) {
 	defer conn.Close()
+	s.stats.BeginConn()
+	defer s.stats.EndConn()
 
 	// 简易防火墙：来源校验
 	if !s.allowConn(conn) {
 		return
 	}
 
+	start := time.Now()
 	br := bufio.NewReader(conn)
 	req, err := http.ReadRequest(br)
 	if err != nil {
@@ -122,12 +126,12 @@ func (s *httpServer) handleConn(conn net.Conn) {
 
 	// CONNECT 方法（HTTPS 隧道）
 	if req.Method == http.MethodConnect {
-		s.handleConnect(conn, req)
+		s.handleConnect(conn, req, start)
 		return
 	}
 
 	// 普通 HTTP 请求转发
-	s.handleHTTP(conn, req)
+	s.handleHTTP(conn, req, start)
 }
 
 // checkAuth HTTP Basic Auth 校验
@@ -155,11 +159,13 @@ func (s *httpServer) checkAuth(req *http.Request) bool {
 }
 
 // handleConnect 处理 CONNECT 方法（HTTPS 隧道）
-func (s *httpServer) handleConnect(conn net.Conn, req *http.Request) {
-	targetConn, err := s.dialer.Dial("tcp", req.URL.Host)
+func (s *httpServer) handleConnect(conn net.Conn, req *http.Request, start time.Time) {
+	target := req.URL.Host
+	targetConn, err := s.dialer.Dial("tcp", target)
 	if err != nil {
 		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
-		s.log("warn", "CONNECT 连接失败 "+req.URL.Host+": "+err.Error())
+		s.log("warn", "CONNECT 连接失败 "+target+": "+err.Error())
+		s.logAccess(target, start, "失败: 连接目标失败")
 		return
 	}
 	defer targetConn.Close()
@@ -168,16 +174,19 @@ func (s *httpServer) handleConnect(conn net.Conn, req *http.Request) {
 	conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
 	// 双向桥接
-	Bridge(conn, targetConn)
+	BridgeStats(conn, targetConn, s.stats)
+	s.logAccess(target, start, "成功")
 }
 
 // handleHTTP 处理普通 HTTP 请求转发
-func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request) {
+func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request, start time.Time) {
+	target := req.URL.Host
 	// 通过 SSH 隧道连接目标
-	targetConn, err := s.dialer.Dial("tcp", req.URL.Host)
+	targetConn, err := s.dialer.Dial("tcp", target)
 	if err != nil {
 		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
-		s.log("warn", "HTTP 连接失败 "+req.URL.Host+": "+err.Error())
+		s.log("warn", "HTTP 连接失败 "+target+": "+err.Error())
+		s.logAccess(target, start, "失败: 连接目标失败")
 		return
 	}
 	defer targetConn.Close()
@@ -187,7 +196,8 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request) {
 	req.Header.Set("Via", "1.1 sshtunnel")
 
 	// 转发请求
-	if err := req.Write(targetConn); err != nil {
+	if err := req.Write(&countWriter{w: targetConn, stats: s.stats, sent: true}); err != nil {
+		s.logAccess(target, start, "失败: 发送请求失败")
 		return
 	}
 
@@ -195,17 +205,20 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request) {
 	tr := bufio.NewReader(targetConn)
 	resp, err := http.ReadResponse(tr, req)
 	if err != nil {
+		s.logAccess(target, start, "失败: 读取响应失败")
 		return
 	}
 	defer resp.Body.Close()
 
 	resp.Header.Set("Via", "1.1 sshtunnel")
-	if err := resp.Write(conn); err != nil {
+	if err := resp.Write(&countWriter{w: conn, stats: s.stats}); err != nil {
+		s.logAccess(target, start, "失败: 回写响应失败")
 		return
 	}
 
 	// 刷新剩余数据
-	_, _ = io.Copy(conn, tr)
+	_, _ = io.Copy(&countWriter{w: conn, stats: s.stats}, tr)
+	s.logAccess(target, start, "成功")
 }
 
 // 确保 httpServer 实现 Server 接口

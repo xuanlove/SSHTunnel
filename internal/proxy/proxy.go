@@ -39,6 +39,8 @@ type Server interface {
 	ListenAddr() string
 	// ID 监听器 ID
 	ID() string
+	// Stats 当前连接与流量统计
+	Stats() ListenerStats
 }
 
 // BaseServer 公共基础结构
@@ -47,11 +49,14 @@ type BaseServer struct {
 	id         string
 	protocol   config.ProxyProtocol
 	listenAddr string
+	listenPort int
 	status     ListenerStatus
 	listener   net.Listener
 	dialer     Dialer
 	log        func(level string, msg string)
 	fw         *Firewall // 简易防火墙（nil 表示不限制）
+	accessLog  bool      // 是否记录代理访问日志
+	stats      *TrafficStats
 
 	// 防火墙拦截日志去重：同一来源 IP 在窗口期内只记录一次
 	blockLogMu sync.Mutex
@@ -112,6 +117,29 @@ func (b *BaseServer) Protocol() config.ProxyProtocol { return b.protocol }
 func (b *BaseServer) ListenAddr() string             { return b.listenAddr }
 func (b *BaseServer) ID() string                     { return b.id }
 
+// Stats 返回监听器当前的连接与流量统计
+func (b *BaseServer) Stats() ListenerStats {
+	active, total, sent, recv := b.stats.Snapshot()
+	return ListenerStats{
+		ID:          b.id,
+		Protocol:    string(b.protocol),
+		ListenPort:  b.listenPort,
+		ActiveConns: active,
+		TotalConns:  total,
+		BytesSent:   sent,
+		BytesRecv:   recv,
+	}
+}
+
+// logAccess 记录一条代理访问日志（仅当监听器开启访问日志时）。
+// target 为目标地址，start 为请求开始时间，result 为结果描述（成功/失败原因）。
+func (b *BaseServer) logAccess(target string, start time.Time, result string) {
+	if !b.accessLog || b.log == nil {
+		return
+	}
+	b.log("info", fmt.Sprintf("访问 %s · %s · 耗时 %dms", target, result, time.Since(start).Milliseconds()))
+}
+
 func (b *BaseServer) setStatus(s ListenerStatus) {
 	b.mu.Lock()
 	b.status = s
@@ -151,9 +179,12 @@ func BuildServer(lc config.ProxyListener, dialer Dialer, log LogFunc) (Server, e
 		id:         lc.ID,
 		protocol:   lc.Protocol,
 		listenAddr: addr,
+		listenPort: lc.ListenPort,
 		dialer:     dialer,
 		log:        log,
 		fw:         fw,
+		accessLog:  lc.AccessLog,
+		stats:      &TrafficStats{},
 	}
 
 	switch lc.Protocol {
