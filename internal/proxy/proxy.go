@@ -207,7 +207,7 @@ func (b *BaseServer) logAccess(conn net.Conn, target string, start time.Time, re
 
 // logAccessDenied 记录一条被拒绝的访问（防火墙/认证失败等）。
 // target 为空表示目标未知（如防火墙在握手前拦截），此时只记录来源；
-// 同一来源与原因 10 分钟内仅记录一次。
+// 同一来源、原因与目标 10 分钟内仅记录一次（不同目标分别保留）。
 func (b *BaseServer) logAccessDenied(conn net.Conn, target, reason string) {
 	if !b.accessLog {
 		return
@@ -216,7 +216,11 @@ func (b *BaseServer) logAccessDenied(conn net.Conn, target, reason string) {
 	if ip := remoteIP(conn); ip != nil {
 		src = ip.String()
 	}
-	if !b.shouldLogBlock("deny:" + src + ":" + reason) {
+	key := "deny:" + src + ":" + reason
+	if target != "" {
+		key += ":" + target
+	}
+	if !b.shouldLogBlock(key) {
 		return
 	}
 	b.addAccessRecord(conn, target, time.Now(), "拒绝: "+reason, true)

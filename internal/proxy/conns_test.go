@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -121,18 +123,22 @@ func TestAccessRecordDeniedAndDisabled(t *testing.T) {
 	on := &BaseServer{id: "on", protocol: config.ProxySOCKS5, listenPort: 1080, accessLog: true, history: h}
 	on.logAccess(nil, "example.com:80", time.Now(), "成功")
 	on.logAccessDenied(nil, "example.org:443", "认证失败")
-	on.logAccessDenied(nil, "example.org:443", "认证失败") // 10 分钟内同一来源+原因去重
+	on.logAccessDenied(nil, "example.org:443", "认证失败") // 同一目标 10 分钟内去重
+	on.logAccessDenied(nil, "example.net:443", "认证失败") // 不同目标应分别记录
 
 	recs := h.Recent(10)
-	if len(recs) != 2 {
-		t.Fatalf("历史条数 = %d, want 2: %+v", len(recs), recs)
+	if len(recs) != 3 {
+		t.Fatalf("历史条数 = %d, want 3: %+v", len(recs), recs)
 	}
-	// 倒序：最新的是拒绝记录
-	if !recs[0].Denied || !strings.Contains(recs[0].Result, "拒绝: 认证失败") || recs[0].Target != "example.org:443" {
-		t.Errorf("拒绝记录内容不符: %+v", recs[0])
+	// 倒序：最新的两条是拒绝记录，分别对应不同目标
+	if !recs[0].Denied || recs[0].Target != "example.net:443" {
+		t.Errorf("不同目标的拒绝记录应按目标区分: %+v", recs[0])
 	}
-	if recs[1].Denied || recs[1].Result != "成功" || recs[1].Target != "example.com:80" {
-		t.Errorf("成功记录内容不符: %+v", recs[1])
+	if !recs[1].Denied || !strings.Contains(recs[1].Result, "拒绝: 认证失败") || recs[1].Target != "example.org:443" {
+		t.Errorf("拒绝记录内容不符: %+v", recs[1])
+	}
+	if recs[2].Denied || recs[2].Result != "成功" || recs[2].Target != "example.com:80" {
+		t.Errorf("成功记录内容不符: %+v", recs[2])
 	}
 }
 
@@ -261,4 +267,122 @@ func socks5Connect(t *testing.T, proxyPort int, echoAddr string) net.Conn {
 		t.Fatalf("CONNECT 失败: %v %v", reply, err)
 	}
 	return conn
+}
+
+// TestHTTPConnectTracking HTTP CONNECT 会话的活动连接与访问历史采集
+func TestHTTPConnectTracking(t *testing.T) {
+	echoAddr, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("分配端口失败: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	reg := NewConnRegistry()
+	hist := NewAccessHistory(100)
+	lc := config.ProxyListener{
+		ID:         "track-http",
+		Protocol:   config.ProxyHTTP,
+		ListenPort: port,
+		AccessLog:  true,
+	}
+	srv, err := buildServerWithStats(lc, &mockDialer{target: echoAddr}, nil, &TrafficStats{}, &Tracker{
+		TunnelID:   "tun-http",
+		TunnelName: "HTTP 隧道",
+		Conns:      reg,
+		History:    hist,
+	})
+	if err != nil {
+		t.Fatalf("构建 HTTP 代理失败: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	defer srv.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	conn, br := httpConnect(t, port, echoAddr)
+
+	// CONNECT 建立后应登记为活动连接
+	var snap ConnSnapshot
+	if !waitForCond(t, 2*time.Second, func() bool {
+		st := reg.Snapshot()
+		if len(st) == 1 {
+			snap = st[0]
+			return true
+		}
+		return false
+	}) {
+		t.Fatalf("未登记活动连接: %+v", reg.Snapshot())
+	}
+	if snap.Target != echoAddr || snap.Protocol != "http" || snap.ListenerID != "track-http" ||
+		snap.TunnelID != "tun-http" || snap.TunnelName != "HTTP 隧道" {
+		t.Errorf("活动连接元信息不符: %+v", snap)
+	}
+
+	// 读取 echo 前缀并完成一次往返，单连接字节应实时累计
+	prefix := make([]byte, 5)
+	if _, err := io.ReadFull(br, prefix); err != nil {
+		t.Fatalf("读取下行数据失败: %v", err)
+	}
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("发送数据失败: %v", err)
+	}
+	echoed := make([]byte, 4)
+	if _, err := io.ReadFull(br, echoed); err != nil {
+		t.Fatalf("读取回显失败: %v", err)
+	}
+	if !waitForCond(t, 2*time.Second, func() bool {
+		st := reg.Snapshot()
+		return len(st) == 1 && st[0].BytesSent >= 4 && st[0].BytesRecv >= 9
+	}) {
+		t.Errorf("单连接字节统计不符: %+v", reg.Snapshot())
+	}
+
+	_ = conn.Close()
+	if !waitForCond(t, 2*time.Second, func() bool { return len(reg.Snapshot()) == 0 }) {
+		t.Errorf("会话结束后活动连接未清理: %+v", reg.Snapshot())
+	}
+	if !waitForCond(t, 2*time.Second, func() bool { return len(hist.Recent(10)) >= 1 }) {
+		t.Fatalf("未写入访问历史")
+	}
+	rec := hist.Recent(10)[0]
+	if rec.Target != echoAddr || rec.Result != "成功" || rec.Denied || rec.Protocol != "http" {
+		t.Errorf("访问历史内容不符: %+v", rec)
+	}
+}
+
+// httpConnect 通过 HTTP 代理建立 CONNECT 隧道，返回连接与已缓冲的读取器
+func httpConnect(t *testing.T, proxyPort int, target string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort)))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("发送 CONNECT 失败: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("读取 CONNECT 响应失败: %v", err)
+	}
+	if !strings.Contains(line, " 200 ") {
+		t.Fatalf("CONNECT 应答不符: %s", line)
+	}
+	// 读取剩余响应头直到空行
+	for {
+		l, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("读取响应头失败: %v", err)
+		}
+		if l == "\r\n" || l == "\n" {
+			break
+		}
+	}
+	return conn, br
 }

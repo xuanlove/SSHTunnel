@@ -215,7 +215,9 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
         <el-table-column label="监听" width="125">
           <template #default="{ row }">{{ protocolText(row.protocol) }} :{{ row.listen_port }}</template>
         </el-table-column>
-        <el-table-column prop="source" label="来源" width="130" show-overflow-tooltip />
+        <el-table-column label="来源" width="130" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.source || '-' }}</template>
+        </el-table-column>
         <el-table-column label="目标" min-width="170" show-overflow-tooltip>
           <template #default="{ row }">{{ row.target || '-' }}</template>
         </el-table-column>

@@ -139,16 +139,16 @@ func TestAssetForPlatform(t *testing.T) {
 func TestLatestRelease(t *testing.T) {
 	// 模拟 GitHub 返回的发布 JSON
 	payload := map[string]interface{}{
-		"tag_name":  "v1.2.3",
-		"name":      "Release v1.2.3",
-		"html_url":  "https://github.com/xuanlove/SSHTunnel/releases/tag/v1.2.3",
-		"body":      "修复若干问题",
+		"tag_name": "v1.2.3",
+		"name":     "Release v1.2.3",
+		"html_url": "https://github.com/xuanlove/SSHTunnel/releases/tag/v1.2.3",
+		"body":     "修复若干问题",
 		"assets": []map[string]interface{}{
 			{
-				"name":                  "sshtunnel-linux-amd64",
-				"browser_download_url":  "https://github.com/xuanlove/SSHTunnel/releases/download/v1.2.3/sshtunnel-linux-amd64",
-				"size":                  int64(13000000),
-				"content_type":          "application/octet-stream",
+				"name":                 "sshtunnel-linux-amd64",
+				"browser_download_url": "https://github.com/xuanlove/SSHTunnel/releases/download/v1.2.3/sshtunnel-linux-amd64",
+				"size":                 int64(13000000),
+				"content_type":         "application/octet-stream",
 			},
 		},
 	}

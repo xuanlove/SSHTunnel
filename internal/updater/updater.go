@@ -31,10 +31,10 @@ type Release struct {
 
 // Asset 表示发布中的单个二进制资产。
 type Asset struct {
-	Name                string `json:"name"`
-	BrowserDownloadURL  string `json:"browser_download_url"`
-	Size                int64  `json:"size"`
-	ContentType         string `json:"content_type"`
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	Size               int64  `json:"size"`
+	ContentType        string `json:"content_type"`
 }
 
 // httpClient 可被测试替换。

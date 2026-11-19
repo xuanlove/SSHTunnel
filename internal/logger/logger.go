@@ -123,18 +123,26 @@ func (l *Logger) log(lvl Level, tunnelID, msg string) {
 	}
 }
 
-func (l *Logger) Debug(msg string)                       { l.log(LevelDebug, "", msg) }
-func (l *Logger) Info(msg string)                        { l.log(LevelInfo, "", msg) }
-func (l *Logger) Warn(msg string)                        { l.log(LevelWarn, "", msg) }
-func (l *Logger) Error(msg string)                       { l.log(LevelError, "", msg) }
-func (l *Logger) Debugf(format string, args ...any)      { l.log(LevelDebug, "", fmt.Sprintf(format, args...)) }
-func (l *Logger) Infof(format string, args ...any)       { l.log(LevelInfo, "", fmt.Sprintf(format, args...)) }
-func (l *Logger) Warnf(format string, args ...any)       { l.log(LevelWarn, "", fmt.Sprintf(format, args...)) }
-func (l *Logger) Errorf(format string, args ...any)      { l.log(LevelError, "", fmt.Sprintf(format, args...)) }
-func (l *Logger) TunnelDebug(id, msg string)             { l.log(LevelDebug, id, msg) }
-func (l *Logger) TunnelInfo(id, msg string)              { l.log(LevelInfo, id, msg) }
-func (l *Logger) TunnelWarn(id, msg string)              { l.log(LevelWarn, id, msg) }
-func (l *Logger) TunnelError(id, msg string)            { l.log(LevelError, id, msg) }
+func (l *Logger) Debug(msg string) { l.log(LevelDebug, "", msg) }
+func (l *Logger) Info(msg string)  { l.log(LevelInfo, "", msg) }
+func (l *Logger) Warn(msg string)  { l.log(LevelWarn, "", msg) }
+func (l *Logger) Error(msg string) { l.log(LevelError, "", msg) }
+func (l *Logger) Debugf(format string, args ...any) {
+	l.log(LevelDebug, "", fmt.Sprintf(format, args...))
+}
+func (l *Logger) Infof(format string, args ...any) {
+	l.log(LevelInfo, "", fmt.Sprintf(format, args...))
+}
+func (l *Logger) Warnf(format string, args ...any) {
+	l.log(LevelWarn, "", fmt.Sprintf(format, args...))
+}
+func (l *Logger) Errorf(format string, args ...any) {
+	l.log(LevelError, "", fmt.Sprintf(format, args...))
+}
+func (l *Logger) TunnelDebug(id, msg string) { l.log(LevelDebug, id, msg) }
+func (l *Logger) TunnelInfo(id, msg string)  { l.log(LevelInfo, id, msg) }
+func (l *Logger) TunnelWarn(id, msg string)  { l.log(LevelWarn, id, msg) }
+func (l *Logger) TunnelError(id, msg string) { l.log(LevelError, id, msg) }
 
 // Recent 返回最近 limit 条日志（按时间顺序）
 func (l *Logger) Recent(limit int) []Entry {
