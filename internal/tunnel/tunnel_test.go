@@ -2,6 +2,8 @@ package tunnel
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -18,8 +20,10 @@ import (
 
 // mockClient 模拟 SSH 客户端：Wait 阻塞直到 Close 被调用（模拟连接断开）。
 type mockClient struct {
-	closeOnce sync.Once
-	closed    chan struct{}
+	closeOnce     sync.Once
+	closed        chan struct{}
+	dialFn        func(network, address string) (net.Conn, error)
+	keepAliveFail time.Duration // >0 时模拟心跳失败：到点自动关闭连接
 }
 
 func newMockClient() *mockClient {
@@ -27,6 +31,9 @@ func newMockClient() *mockClient {
 }
 
 func (m *mockClient) Dial(network, address string) (net.Conn, error) {
+	if m.dialFn != nil {
+		return m.dialFn(network, address)
+	}
 	return nil, errors.New("mock: dial not configured")
 }
 
@@ -41,6 +48,12 @@ func (m *mockClient) Close() error {
 }
 
 func (m *mockClient) StartKeepAlive(interval time.Duration) func() {
+	if m.keepAliveFail > 0 {
+		go func() {
+			time.Sleep(m.keepAliveFail)
+			_ = m.Close() // 模拟心跳失败后连接断开
+		}()
+	}
 	return func() {}
 }
 
@@ -51,10 +64,12 @@ type dialResult struct {
 
 // mockDialer 按预设序列返回结果，记录调用次数与最后一次返回的客户端。
 type mockDialer struct {
-	mu      sync.Mutex
-	results []dialResult
-	calls   int
-	last    *mockClient
+	mu            sync.Mutex
+	results       []dialResult
+	calls         int
+	last          *mockClient
+	dialFn        func(network, address string) (net.Conn, error)
+	keepAliveFail time.Duration
 }
 
 func (d *mockDialer) Dial(hops []sshclient.Hop) (tunnelClient, error) {
@@ -72,6 +87,8 @@ func (d *mockDialer) Dial(hops []sshclient.Hop) (tunnelClient, error) {
 	}
 	c := newMockClient()
 	d.mu.Lock()
+	c.dialFn = d.dialFn
+	c.keepAliveFail = d.keepAliveFail
 	d.last = c
 	d.mu.Unlock()
 	return c, nil
@@ -335,6 +352,165 @@ func TestReconnectMaxAttemptsMarksError(t *testing.T) {
 	}
 	if _, ok := m.Stats()["max-attempts"]; ok {
 		t.Errorf("重连耗尽后不应再出现在运行统计中")
+	}
+}
+
+// TestLocalForwardStatsAcrossReconnect 本地转发统计应记录连接/流量，且重连后累计不清零。
+func TestLocalForwardStatsAcrossReconnect(t *testing.T) {
+	// 回显服务器
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("启动回显服务器失败: %v", err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, err := echoLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 1024)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					if _, err := c.Write(buf[:n]); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+
+	// 选一个空闲本地端口
+	fl, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("分配本地端口失败: %v", err)
+	}
+	localPort := fl.Addr().(*net.TCPAddr).Port
+	_ = fl.Close()
+
+	d := &mockDialer{results: []dialResult{{}, {}}} // 初次连接 + 重连
+	d.dialFn = func(network, address string) (net.Conn, error) {
+		return net.Dial("tcp", echoLn.Addr().String())
+	}
+	withMockDialer(t, d)
+
+	m := newTestManager(t)
+	cfg := &config.TunnelConfig{
+		ID:            "lf-stats",
+		Name:          "本地转发统计",
+		HopChain:      []config.HopConfig{{User: "u", Host: "h", Port: 22, AuthType: "password", Password: "p"}},
+		TunnelType:    config.TunnelLocalForward,
+		AutoReconnect: true,
+		LocalForwards: []config.LocalForward{
+			{ID: "lf-1", LocalPort: localPort, RemoteHost: "127.0.0.1", RemotePort: 80},
+		},
+	}
+	if err := m.Start(cfg); err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+	defer m.Stop("lf-stats")
+
+	addr := fmt.Sprintf("127.0.0.1:%d", localPort)
+	doSession := func() error {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn.Write([]byte("ping")); err != nil {
+			return err
+		}
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			return err
+		}
+		if string(buf) != "ping" {
+			return fmt.Errorf("回显不符: %q", buf)
+		}
+		return nil
+	}
+
+	if err := doSession(); err != nil {
+		t.Fatalf("首次转发失败: %v", err)
+	}
+
+	// 首次会话统计：1 次连接、上下行各 4 字节
+	deadline := time.Now().Add(2 * time.Second)
+	var st TunnelStats
+	for {
+		st = m.Stats()["lf-stats"]
+		if (len(st.Forwards) == 1 && st.Forwards[0].TotalConns == 1 &&
+			st.Forwards[0].BytesSent == 4 && st.Forwards[0].BytesRecv == 4) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(st.Forwards) != 1 {
+		t.Fatalf("应返回 1 条转发统计，实际 %d", len(st.Forwards))
+	}
+	fw := st.Forwards[0]
+	if fw.ID != "lf-1" || fw.LocalPort != localPort {
+		t.Errorf("转发标识不符: %+v", fw)
+	}
+	if fw.TotalConns != 1 || fw.BytesSent != 4 || fw.BytesRecv != 4 {
+		t.Errorf("首次会话统计不符: %+v", fw)
+	}
+
+	// 模拟 SSH 断线并重连
+	d.lastClient().Close()
+	if !waitFor(2*time.Second, func() bool { return d.callCount() >= 2 }) {
+		t.Fatalf("应触发重连，拨号次数=%d", d.callCount())
+	}
+	if !waitFor(2*time.Second, func() bool { return doSession() == nil }) {
+		t.Fatalf("重连后本地转发不可用")
+	}
+
+	// 累计统计应保留：2 次连接、上下行各 8 字节
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		st = m.Stats()["lf-stats"]
+		if (len(st.Forwards) == 1 && st.Forwards[0].TotalConns == 2 &&
+			st.Forwards[0].BytesSent == 8 && st.Forwards[0].BytesRecv == 8) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(st.Forwards) != 1 {
+		t.Fatalf("重连后应返回 1 条转发统计，实际 %d", len(st.Forwards))
+	}
+	fw = st.Forwards[0]
+	if fw.TotalConns != 2 || fw.BytesSent != 8 || fw.BytesRecv != 8 {
+		t.Errorf("重连后累计统计应保留并增长: %+v", fw)
+	}
+}
+
+// TestHeartbeatFailureTriggersReconnect 心跳失败关闭连接后应触发自动重连。
+func TestHeartbeatFailureTriggersReconnect(t *testing.T) {
+	d := &mockDialer{
+		results:       []dialResult{{}, {}}, // 首次 + 重连成功
+		keepAliveFail: 20 * time.Millisecond,
+	}
+	withMockDialer(t, d)
+	m := newTestManager(t)
+
+	cfg := testConfig("hb", true)
+	cfg.KeepAliveSeconds = 1
+	if err := m.Start(cfg); err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+	defer m.Stop("hb")
+
+	if !waitFor(2*time.Second, func() bool { return d.callCount() >= 2 }) {
+		t.Fatalf("心跳失败后应触发重连，拨号次数=%d", d.callCount())
+	}
+	if !m.IsRunning("hb") {
+		t.Errorf("重连后隧道应仍在运行")
 	}
 }
 
