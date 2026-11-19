@@ -367,8 +367,11 @@ func (m *Manager) NodeHistory(tunnelID string, limit int) []proxy.AccessRecord {
 	if tunnelID == "" {
 		return []proxy.AccessRecord{}
 	}
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 {
 		limit = 500
+	}
+	if limit > 1000 {
+		limit = 1000
 	}
 	return m.history.RecentByTunnel(tunnelID, limit)
 }

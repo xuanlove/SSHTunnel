@@ -188,7 +188,17 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
         </div>
       </template>
       <div class="node-grid" v-if="nodes.length">
-        <div class="node-card" v-for="node in nodes" :key="node.id" @click="openNode(node)">
+        <div
+          class="node-card"
+          v-for="node in nodes"
+          :key="node.id"
+          role="button"
+          tabindex="0"
+          :aria-label="`查看节点 ${node.name} 详情`"
+          @click="openNode(node)"
+          @keydown.enter="openNode(node)"
+          @keydown.space.prevent="openNode(node)"
+        >
           <div class="node-head">
             <span class="node-name">{{ node.name }}</span>
             <el-tag size="small" :type="node.running ? 'success' : 'info'">
@@ -287,7 +297,6 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
       :title="activeNode ? `节点：${activeNode.name}` : '节点详情'"
       size="62%"
       class="node-drawer"
-      @closed="closeNode"
     >
       <div v-if="activeNode" class="drawer-body">
         <div class="drawer-stats">
