@@ -12,12 +12,17 @@ const router = useRouter()
 // ===== 运行统计（每 3 秒轮询，仅包含运行中的隧道）=====
 const stats = ref<Record<string, TunnelStats>>({})
 let statsTimer = 0
+let statsLoading = false
 
 async function loadStats() {
+  if (statsLoading) return // 上一轮未返回时跳过，避免请求叠加
+  statsLoading = true
   try {
     stats.value = await api.getTunnelStats()
   } catch {
     // 统计失败不影响主流程
+  } finally {
+    statsLoading = false
   }
 }
 
@@ -40,7 +45,9 @@ function formatBytes(n?: number): string {
     val /= 1024
     i++
   }
-  return `${val >= 100 ? val.toFixed(0) : val.toFixed(1)} ${units[i]}`
+  // 字节单位不显示小数，其余单位按数值大小保留 0/1 位小数
+  const digits = i === 0 ? 0 : (val >= 100 ? 0 : 1)
+  return `${val.toFixed(digits)} ${units[i]}`
 }
 
 const statusType = (s: string) => {

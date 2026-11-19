@@ -56,6 +56,25 @@ type ListenerStats struct {
 	BytesRecv   int64  `json:"bytes_recv"` // 下行（目标 -> 客户端）
 }
 
+// countReadCloser 读取时累计字节数（sent=true 计上行，否则计下行）
+type countReadCloser struct {
+	r     io.ReadCloser
+	stats *TrafficStats
+	sent  bool
+}
+
+func (c *countReadCloser) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if c.sent {
+		c.stats.AddSent(int64(n))
+	} else {
+		c.stats.AddRecv(int64(n))
+	}
+	return n, err
+}
+
+func (c *countReadCloser) Close() error { return c.r.Close() }
+
 // countWriter 写入时累计字节数（sent=true 计上行，否则计下行）
 type countWriter struct {
 	w     io.Writer

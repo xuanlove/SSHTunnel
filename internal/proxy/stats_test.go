@@ -1,9 +1,13 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -260,6 +264,123 @@ func TestManagerStatsPersistAfterRestart(t *testing.T) {
 		t.Errorf("重连后累计流量应保留，实际 sent=%d recv=%d", st[0].BytesSent, st[0].BytesRecv)
 	}
 	m.StopAll()
+}
+
+// TestHTTPProxyPayloadStats HTTP 代理仅统计请求/响应体字节（不含协议头）
+func TestHTTPProxyPayloadStats(t *testing.T) {
+	const reqBody = "PING"
+	const respBody = "hello-body" // 10 字节
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, respBody)
+	}))
+	defer target.Close()
+	targetAddr := strings.TrimPrefix(target.URL, "http://")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("分配端口失败: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	lc := config.ProxyListener{
+		ID:         "http-stats",
+		Protocol:   config.ProxyHTTP,
+		ListenPort: port,
+	}
+	srv, err := BuildServer(lc, &mockDialer{target: targetAddr}, nil)
+	if err != nil {
+		t.Fatalf("构建 HTTP 代理失败: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	defer srv.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	req := fmt.Sprintf("POST http://%s/ HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		targetAddr, targetAddr, len(reqBody), reqBody)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("发送请求失败: %v", err)
+	}
+
+	// 读取响应并核对内容
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("读取响应失败: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("读取响应体失败: %v", err)
+	}
+	if string(body) != respBody {
+		t.Errorf("响应体 = %q, want %q", body, respBody)
+	}
+	_ = conn.Close()
+
+	// 统计应只包含 body 字节（4 上行 / 10 下行）
+	deadline := time.Now().Add(2 * time.Second)
+	var st ListenerStats
+	for {
+		st = srv.Stats()
+		if (st.ActiveConns == 0 && st.BytesSent == int64(len(reqBody)) && st.BytesRecv == int64(len(respBody))) ||
+			time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if st.BytesSent != int64(len(reqBody)) {
+		t.Errorf("上行字节 = %d, want %d（仅请求体）", st.BytesSent, len(reqBody))
+	}
+	if st.BytesRecv != int64(len(respBody)) {
+		t.Errorf("下行字节 = %d, want %d（仅响应体）", st.BytesRecv, len(respBody))
+	}
+}
+
+// TestAccessLogDenied 防火墙/认证拒绝的访问日志（按来源与原因去重）
+func TestAccessLogDenied(t *testing.T) {
+	var logs []string
+	b := &BaseServer{
+		stats:     &TrafficStats{},
+		accessLog: true,
+		log:       func(level, msg string) { logs = append(logs, level+" "+msg) },
+	}
+	a, c := net.Pipe()
+	defer a.Close()
+	defer c.Close()
+
+	b.logAccessDenied(a, "认证失败")
+	b.logAccessDenied(a, "认证失败") // 10 分钟内重复拒绝不应重复记录
+
+	if len(logs) != 1 {
+		t.Fatalf("应只记录一条拒绝日志，实际 %v", logs)
+	}
+	if !strings.Contains(logs[0], "拒绝: 认证失败") {
+		t.Errorf("日志内容不符: %s", logs[0])
+	}
+
+	// 未开启访问日志时不记录
+	off := &BaseServer{stats: &TrafficStats{}, log: func(level, msg string) { logs = append(logs, msg) }}
+	off.logAccessDenied(a, "防火墙规则")
+	if len(logs) != 1 {
+		t.Errorf("未开启访问日志时不应记录，实际 %v", logs)
+	}
+}
+
+// TestBaseServerStatsNilSafe 未初始化统计对象时 Stats 不应 panic
+func TestBaseServerStatsNilSafe(t *testing.T) {
+	b := &BaseServer{id: "nil-stats", protocol: config.ProxySOCKS5, listenPort: 1080}
+	st := b.Stats()
+	if st.ID != "nil-stats" || st.TotalConns != 0 || st.BytesSent != 0 {
+		t.Errorf("统计结果不符: %+v", st)
+	}
 }
 
 // TestBaseServerAccessLog 访问日志开关

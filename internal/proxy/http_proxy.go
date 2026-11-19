@@ -17,13 +17,13 @@ import (
 // httpServer HTTP/HTTPS 代理服务器
 // 当 tlsCfg 为 nil 时为 HTTP 代理，否则为 HTTPS 代理（监听器包装 TLS）
 type httpServer struct {
-	BaseServer
+	*BaseServer
 	auth   *config.AuthConfig
 	helper authHelper
 	tlsCfg *config.TLSConfig
 }
 
-func newHTTPServer(base BaseServer, auth *config.AuthConfig, tlsCfg *config.TLSConfig) *httpServer {
+func newHTTPServer(base *BaseServer, auth *config.AuthConfig, tlsCfg *config.TLSConfig) *httpServer {
 	return &httpServer{
 		BaseServer: base,
 		auth:       auth,
@@ -121,6 +121,7 @@ func (s *httpServer) handleConn(conn net.Conn) {
 		resp += "Content-Length: 0\r\n\r\n"
 		conn.Write([]byte(resp))
 		s.log("warn", "HTTP 认证失败")
+		s.logAccessDenied(conn, "认证失败")
 		return
 	}
 
@@ -195,8 +196,12 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request, start time.Tim
 	req.Header.Del("Proxy-Authorization")
 	req.Header.Set("Via", "1.1 sshtunnel")
 
+	// 仅统计请求/响应体字节（与 SOCKS、本地转发的负载口径一致）
+	if req.Body != nil {
+		req.Body = &countReadCloser{r: req.Body, stats: s.stats, sent: true}
+	}
 	// 转发请求
-	if err := req.Write(&countWriter{w: targetConn, stats: s.stats, sent: true}); err != nil {
+	if err := req.Write(targetConn); err != nil {
 		s.logAccess(target, start, "失败: 发送请求失败")
 		return
 	}
@@ -211,13 +216,14 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request, start time.Tim
 	defer resp.Body.Close()
 
 	resp.Header.Set("Via", "1.1 sshtunnel")
-	if err := resp.Write(&countWriter{w: conn, stats: s.stats}); err != nil {
+	resp.Body = &countReadCloser{r: resp.Body, stats: s.stats}
+	if err := resp.Write(conn); err != nil {
 		s.logAccess(target, start, "失败: 回写响应失败")
 		return
 	}
 
-	// 刷新剩余数据
-	_, _ = io.Copy(&countWriter{w: conn, stats: s.stats}, tr)
+	// 刷新剩余数据（非响应体，不计入流量统计）
+	_, _ = io.Copy(conn, tr)
 	s.logAccess(target, start, "成功")
 }
 
