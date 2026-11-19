@@ -92,7 +92,6 @@ const overviewCards = computed(() => {
 })
 
 const connections = computed<ConnSnapshot[]>(() => status.value?.connections || [])
-const accessHistory = computed<AccessRecord[]>(() => status.value?.access_history || [])
 const nodes = computed<TunnelTraffic[]>(() => status.value?.tunnels || [])
 
 // ===== 节点详情（抽屉） =====
@@ -215,81 +214,6 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
         </div>
       </div>
       <el-empty v-else description="暂无隧道" :image-size="60" />
-    </el-card>
-
-    <el-card class="panel" shadow="never">
-      <template #header>
-        <div class="panel-header">
-          <span class="panel-title">当前连接</span>
-          <span class="panel-note">{{ connections.length }} 条</span>
-        </div>
-      </template>
-      <el-table
-        :data="connections"
-        size="small"
-        class="dark-table"
-        empty-text="暂无活动连接"
-      >
-        <el-table-column label="协议" width="90">
-          <template #default="{ row }">
-            <el-tag size="small" type="info">{{ protocolText(row.protocol) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="tunnel_name" label="隧道" min-width="140" show-overflow-tooltip />
-        <el-table-column label="监听" width="130">
-          <template #default="{ row }">{{ protocolText(row.protocol) }} :{{ row.listen_port }}</template>
-        </el-table-column>
-        <el-table-column prop="source" label="来源" width="140" show-overflow-tooltip />
-        <el-table-column prop="target" label="目标" min-width="180" show-overflow-tooltip />
-        <el-table-column label="已持续" width="90">
-          <template #default="{ row }">{{ formatElapsed(row.started_at, now) }}</template>
-        </el-table-column>
-        <el-table-column label="上传" width="105">
-          <template #default="{ row }">{{ formatBytes(row.bytes_sent) }}</template>
-        </el-table-column>
-        <el-table-column label="下载" width="105">
-          <template #default="{ row }">{{ formatBytes(row.bytes_recv) }}</template>
-        </el-table-column>
-      </el-table>
-    </el-card>
-
-    <el-card class="panel" shadow="never">
-      <template #header>
-        <div class="panel-header">
-          <span class="panel-title">访问历史</span>
-          <span class="panel-note">
-            仅在监听器开启「记录访问日志」时采集，最多保留最近 2000 条
-          </span>
-        </div>
-      </template>
-      <el-table
-        :data="accessHistory"
-        size="small"
-        class="dark-table"
-        empty-text="暂无访问记录（请为代理监听器开启「记录访问日志」）"
-      >
-        <el-table-column label="时间" width="165">
-          <template #default="{ row }">{{ formatTime(row.time) }}</template>
-        </el-table-column>
-        <el-table-column prop="tunnel_name" label="隧道" min-width="130" show-overflow-tooltip />
-        <el-table-column label="监听" width="125">
-          <template #default="{ row }">{{ protocolText(row.protocol) }} :{{ row.listen_port }}</template>
-        </el-table-column>
-        <el-table-column label="来源" width="130" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.source || '-' }}</template>
-        </el-table-column>
-        <el-table-column label="目标" min-width="170" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.target || '-' }}</template>
-        </el-table-column>
-        <el-table-column label="结果" min-width="160">
-          <template #default="{ row }">
-            <el-tag size="small" :type="resultType(row)">{{ row.result }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="耗时" width="90">
-          <template #default="{ row }">{{ row.denied ? '-' : `${row.duration_ms} ms` }}</template>
-        </el-table-column>
-      </el-table>
     </el-card>
 
     <el-drawer
