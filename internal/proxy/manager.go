@@ -15,6 +15,7 @@ type Manager struct {
 	mu       sync.RWMutex
 	servers  map[string]Server // listenerID -> server
 	stats    map[string]*TrafficStats
+	meta     map[string]ListenerStats // listenerID -> 监听器元信息（断线期间仍可输出累计统计）
 	dialer   Dialer
 	log      *logger.Logger
 	tunnelID string
@@ -25,6 +26,7 @@ func NewManager(dialer Dialer, log *logger.Logger, tunnelID string) *Manager {
 	return &Manager{
 		servers:  make(map[string]Server),
 		stats:    make(map[string]*TrafficStats),
+		meta:     make(map[string]ListenerStats),
 		dialer:   dialer,
 		log:      log,
 		tunnelID: tunnelID,
@@ -63,6 +65,11 @@ func (m *Manager) StartOne(ctx context.Context, lc config.ProxyListener) error {
 	if !ok {
 		st = &TrafficStats{}
 		m.stats[lc.ID] = st
+	}
+	m.meta[lc.ID] = ListenerStats{
+		ID:         lc.ID,
+		Protocol:   string(lc.Protocol),
+		ListenPort: lc.ListenPort,
 	}
 	srv, err := buildServerWithStats(lc, m.dialer, func(level, msg string) {
 		switch level {
@@ -125,12 +132,17 @@ func (m *Manager) Status() map[string]ListenerStatus {
 	return out
 }
 
-// Stats 获取所有监听器的连接与流量统计（按监听端口排序）
+// Stats 获取所有已配置监听器的连接与流量统计（按监听端口排序）。
+// 即使监听器因隧道重连暂时停止，也返回其累计统计，避免界面在重连窗口归零。
 func (m *Manager) Stats() []ListenerStats {
 	m.mu.RLock()
-	out := make([]ListenerStats, 0, len(m.servers))
-	for _, srv := range m.servers {
-		out = append(out, srv.Stats())
+	out := make([]ListenerStats, 0, len(m.meta))
+	for id, meta := range m.meta {
+		st := meta
+		if c, ok := m.stats[id]; ok {
+			st.ActiveConns, st.TotalConns, st.BytesSent, st.BytesRecv = c.Snapshot()
+		}
+		out = append(out, st)
 	}
 	m.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].ListenPort < out[j].ListenPort })

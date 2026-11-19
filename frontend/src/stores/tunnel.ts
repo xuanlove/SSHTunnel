@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { TunnelConfig, LogEntry } from '@/types'
+import type { TunnelConfig, TunnelStatus, LogEntry } from '@/types'
 import * as api from '@/api'
 
 export const useTunnelStore = defineStore('tunnel', () => {
@@ -52,6 +52,27 @@ export const useTunnelStore = defineStore('tunnel', () => {
     logs.value = await api.getRecentLogs(limit)
   }
 
+  // 应用隧道状态变更（由后端 WebSocket/事件实时推送）
+  function applyStatus(id: string, status: string) {
+    const idx = configs.value.findIndex(c => c.id === id)
+    if (idx >= 0) {
+      configs.value[idx] = { ...configs.value[idx], status: status as TunnelStatus }
+    }
+  }
+
+  // 状态订阅只建立一次
+  let statusListenerBound = false
+
+  function setupStatusListener() {
+    if (statusListenerBound) return
+    statusListenerBound = true
+    api.onTunnelStatus((data: any) => {
+      if (data?.tunnel_id && data?.status) {
+        applyStatus(data.tunnel_id, data.status)
+      }
+    })
+  }
+
   // 日志订阅只建立一次，避免多个页面同时调用导致重复推送
   let logListenerBound = false
 
@@ -79,5 +100,7 @@ export const useTunnelStore = defineStore('tunnel', () => {
     stopAll,
     loadLogs,
     setupLogListener,
+    setupStatusListener,
+    applyStatus,
   }
 })

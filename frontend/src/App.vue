@@ -21,8 +21,9 @@ watch(
     try {
       await store.loadConfigs()
       loaded = true
-      // 仅在加载成功后订阅日志，避免未授权时建立无效 WebSocket
+      // 仅在加载成功后订阅日志与隧道状态，避免未授权时建立无效 WebSocket
       store.setupLogListener()
+      store.setupStatusListener()
     } catch {
       // 未授权等失败场景保持 loaded=false，待登录成功进入主界面后重试
     }

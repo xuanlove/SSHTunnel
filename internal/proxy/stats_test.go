@@ -248,6 +248,16 @@ func TestManagerStatsPersistAfterRestart(t *testing.T) {
 
 	// 模拟隧道重连：停止并重新启动监听器
 	m.StopAll()
+
+	// 停止期间（重连窗口）仍应输出累计统计，避免界面归零
+	stStopped := m.Stats()
+	if len(stStopped) != 1 {
+		t.Fatalf("重连窗口应保留监听器统计，实际 %d", len(stStopped))
+	}
+	if stStopped[0].TotalConns != 1 || stStopped[0].BytesSent != 4 || stStopped[0].BytesRecv != 9 {
+		t.Errorf("重连窗口累计统计应保留: %+v", stStopped[0])
+	}
+
 	if err := m.StartAll(ctx, listeners); err != nil {
 		t.Fatalf("重新启动失败: %v", err)
 	}

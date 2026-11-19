@@ -104,6 +104,10 @@ func (m *Manager) Start(cfg *config.TunnelConfig) error {
 	// 致命错误（如重连次数耗尽）：移除运行实例并通知状态变更，
 	// 避免隧道实际已断开却仍显示「运行中」。
 	t.onFatal = func() {
+		// 主动停止与重连耗尽可能同时发生：已停止时不再上报致命错误
+		if t.isStopped() {
+			return
+		}
 		m.mu.Lock()
 		if cur, ok := m.tunnels[cfg.ID]; ok && cur == t {
 			delete(m.tunnels, cfg.ID)
@@ -394,6 +398,9 @@ func (t *Tunnel) watchAndReconnect() {
 				t.log.TunnelWarn(t.cfg.ID, fmt.Sprintf("第 %d 次重连失败: %s", attempts, err.Error()))
 				if maxAttempts > 0 && attempts >= maxAttempts {
 					t.reconnecting = false
+					if t.isStopped() {
+						return
+					}
 					t.log.TunnelError(t.cfg.ID, fmt.Sprintf("已达到最大重连次数 %d，停止自动重连", maxAttempts))
 					if t.onFatal != nil {
 						t.onFatal()
