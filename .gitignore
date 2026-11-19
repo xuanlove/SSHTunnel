@@ -26,3 +26,6 @@ go.work.sum
 
 # 本地构建产物（发布二进制位于 releases/）
 build/bin/
+
+# 前端依赖（不纳入版本控制）
+frontend/node_modules/

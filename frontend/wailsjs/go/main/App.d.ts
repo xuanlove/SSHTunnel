@@ -32,3 +32,17 @@ export function StopAll():Promise<void>;
 export function StopTunnel(arg1:string):Promise<void>;
 
 export function TestTunnelConfig(arg1:config.TunnelConfig):Promise<void>;
+
+export function CityCatalog(arg1:string):Promise<any>;
+
+export function DownloadGeoIPDatabase(arg1:string):Promise<any>;
+
+export function GeoIPAvailable():Promise<boolean>;
+
+export function GeoIPStatus():Promise<any>;
+
+export function GetNodeStatus(arg1:number):Promise<any>;
+
+export function SetGeoIPEnabled(arg1:boolean):Promise<any>;
+
+export function TestProxyListener(arg1:string,arg2:number,arg3:string,arg4:string):Promise<any>;

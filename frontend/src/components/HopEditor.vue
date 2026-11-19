@@ -25,9 +25,16 @@ async function parseSimple() {
     const merged = parsed.map((p, idx) => {
       const existing = hops.value[idx]
       if (existing && existing.user === p.user && existing.host === p.host && existing.port === p.port) {
-        return { ...p, auth_type: existing.auth_type, password: existing.password, key_content: existing.key_content, passphrase: existing.passphrase }
+        return {
+          ...p,
+          auth_type: existing.auth_type || p.auth_type || 'password',
+          password: existing.password,
+          key_content: existing.key_content,
+          passphrase: existing.passphrase,
+        }
       }
-      return p
+      // 简写解析结果不含 auth_type，默认按密码认证，避免界面误显示密钥输入
+      return { ...p, auth_type: p.auth_type || 'password' }
     })
     hops.value = merged
     ElMessage.success(`已解析 ${merged.length} 跳`)

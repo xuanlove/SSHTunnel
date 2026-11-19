@@ -100,10 +100,14 @@ async function handleStop(id: string) {
 async function handleDelete(id: string, name: string) {
   try {
     await ElMessageBox.confirm(`确定删除隧道 "${name}" 吗？`, '提示', { type: 'warning' })
+  } catch {
+    return // 用户取消
+  }
+  try {
     await store.remove(id)
     ElMessage.success('已删除')
-  } catch (e) {
-    // 用户取消
+  } catch (e: any) {
+    ElMessage.error(e?.message || '删除失败')
   }
 }
 

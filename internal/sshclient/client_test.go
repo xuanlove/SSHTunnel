@@ -79,8 +79,13 @@ func TestParseHopChain(t *testing.T) {
 			want:  nil,
 		},
 		{
-			name:  "IPv6 地址（暂不支持，仅验证不崩溃）",
-			input: "user@::1:22",
+			name:  "IPv6 方括号与端口",
+			input: "user@[::1]:2222",
+			want:  []Hop{{User: "user", Host: "::1", Port: 2222}},
+		},
+		{
+			name:  "IPv6 无端口",
+			input: "user@::1",
 			want:  []Hop{{User: "user", Host: "::1", Port: 22}},
 		},
 	}

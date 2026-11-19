@@ -61,3 +61,31 @@ export function StopTunnel(arg1) {
 export function TestTunnelConfig(arg1) {
   return window['go']['main']['App']['TestTunnelConfig'](arg1);
 }
+
+export function CityCatalog(arg1) {
+  return window['go']['main']['App']['CityCatalog'](arg1);
+}
+
+export function DownloadGeoIPDatabase(arg1) {
+  return window['go']['main']['App']['DownloadGeoIPDatabase'](arg1);
+}
+
+export function GeoIPAvailable() {
+  return window['go']['main']['App']['GeoIPAvailable']();
+}
+
+export function GeoIPStatus() {
+  return window['go']['main']['App']['GeoIPStatus']();
+}
+
+export function GetNodeStatus(arg1) {
+  return window['go']['main']['App']['GetNodeStatus'](arg1);
+}
+
+export function SetGeoIPEnabled(arg1) {
+  return window['go']['main']['App']['SetGeoIPEnabled'](arg1);
+}
+
+export function TestProxyListener(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['TestProxyListener'](arg1, arg2, arg3, arg4);
+}

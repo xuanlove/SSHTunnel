@@ -8,12 +8,17 @@ export const useTunnelStore = defineStore('tunnel', () => {
   const logs = ref<LogEntry[]>([])
   const loading = ref(false)
 
+  // 请求序号：并发加载时仅应用最新一次响应，避免迟到响应覆盖新状态
+  let loadSeq = 0
+
   async function loadConfigs() {
     loading.value = true
+    const seq = ++loadSeq
     try {
-      configs.value = await api.listConfigs()
+      const list = await api.listConfigs()
+      if (seq === loadSeq) configs.value = list
     } finally {
-      loading.value = false
+      if (seq === loadSeq) loading.value = false
     }
   }
 

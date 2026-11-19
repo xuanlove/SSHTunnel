@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -54,6 +55,7 @@ func (s *socks4Server) Start(ctx context.Context) error {
 				return nil
 			}
 			s.log("error", "接受连接失败: "+err.Error())
+			time.Sleep(100 * time.Millisecond) // 持续错误（如 EMFILE）时退避，避免忙等
 			continue
 		}
 		go s.handleConn(conn)
@@ -151,6 +153,9 @@ func (s *socks4Server) reply(conn net.Conn, code byte) {
 	conn.Write(resp)
 }
 
+// maxSocksFieldLen SOCKS4 USERID/域名字段最大长度（防止未认证的超长输入耗尽内存）
+const maxSocksFieldLen = 1024
+
 // readNullString 读取以 null 结尾的字符串
 func readNullString(r io.Reader) (string, error) {
 	var buf []byte
@@ -161,6 +166,9 @@ func readNullString(r io.Reader) (string, error) {
 		}
 		if one[0] == 0 {
 			break
+		}
+		if len(buf) >= maxSocksFieldLen {
+			return "", fmt.Errorf("字段长度超过 %d 字节", maxSocksFieldLen)
 		}
 		buf = append(buf, one[0])
 	}

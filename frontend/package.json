@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
-    "@wailsio/runtime": "^3.0.0-alpha.95",
     "element-plus": "^2.14.2",
     "pinia": "^2.3.1",
     "vue": "^3.5.0",

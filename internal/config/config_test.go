@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -229,5 +230,51 @@ func TestTLSFileMigration(t *testing.T) {
 				t.Errorf("新配置不应包含 cert_file 字段: %v", tlsObj)
 			}
 		}
+	}
+}
+
+// TestConfigFilePermission 配置文件应以 0600 原子写入
+func TestConfigFilePermission(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 权限模型不同")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "configs.json")
+	m, err := newManagerWithPath(path)
+	if err != nil {
+		t.Fatalf("创建 Manager 失败: %v", err)
+	}
+	cfg := &TunnelConfig{Name: "permission"}
+	if err := m.Save(cfg); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("读取文件信息失败: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("配置文件权限 = %o, want 600", perm)
+	}
+}
+
+// TestConfigGetReturnsCopy Get 应返回副本，外部修改不影响内部状态
+func TestConfigGetReturnsCopy(t *testing.T) {
+	dir := t.TempDir()
+	m, err := newManagerWithPath(filepath.Join(dir, "configs.json"))
+	if err != nil {
+		t.Fatalf("创建 Manager 失败: %v", err)
+	}
+	cfg := &TunnelConfig{Name: "copy"}
+	if err := m.Save(cfg); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	got, ok := m.Get(cfg.ID)
+	if !ok {
+		t.Fatalf("未找到配置")
+	}
+	got.Name = "changed"
+	again, _ := m.Get(cfg.ID)
+	if again.Name != "copy" {
+		t.Errorf("Get 应返回副本，内部名称被修改为 %q", again.Name)
 	}
 }

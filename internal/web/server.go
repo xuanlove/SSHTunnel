@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
@@ -106,20 +107,29 @@ func (s *Server) Start() error {
 	}
 }
 
-// listen 按当前 TLS 设置创建监听器
+// listen 按当前 TLS 设置创建监听器。
+// 证书加载失败时：已启用访问密码则退回 HTTP 保证面板可修正配置；无密码则拒绝明文启动。
 func (s *Server) listen(addr string) (net.Listener, bool, error) {
+	certFile, keyFile, tlsEnabled := s.handler.tls.Effective()
+	var cert tls.Certificate
+	if tlsEnabled {
+		c, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			if !s.handler.AuthEnabled() {
+				return nil, false, fmt.Errorf("WEB 面板 HTTPS 证书加载失败且未启用访问密码，拒绝以明文启动: %w", err)
+			}
+			log.Printf("⚠️  WEB 面板 HTTPS 证书加载失败，已退回 HTTP（已启用访问密码）: %v", err)
+			tlsEnabled = false
+		} else {
+			cert = c
+		}
+	}
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, false, err
 	}
-	certFile, keyFile, ok := s.handler.tls.Effective()
-	if !ok {
-		return ln, false, nil
-	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		// 证书不可用时退回 HTTP，保证面板仍可访问以修正配置
-		log.Printf("⚠️  WEB 面板 HTTPS 证书加载失败，已退回 HTTP: %v", err)
+	if !tlsEnabled {
 		return ln, false, nil
 	}
 	log.Printf("已启用 HTTPS: 证书 %s", certFile)
@@ -150,7 +160,7 @@ func (s *Server) buildRoutes() *http.ServeMux {
 	mux.HandleFunc("/api/login", s.handler.handleLogin)
 
 	// 受保护 API（未启用密码时直接放行，启用后需 Token；支持运行时切换）
-	protected := http.StripPrefix("/api", s.handler.apiRouter())
+	protected := limitRequestBody(http.StripPrefix("/api", s.handler.apiRouter()))
 	authed := authMiddleware(s.handler.AuthEnabled, s.cfg.JWTSecret)(protected)
 	mux.Handle("/api/", authed)
 
@@ -159,7 +169,7 @@ func (s *Server) buildRoutes() *http.ServeMux {
 	mux.Handle("/api/cert/inspect", authed)
 
 	// certd 等外部工具使用的证书部署 API：使用独立 Token 鉴权（不受 WEB 登录开关影响）
-	certd := http.StripPrefix("/api", certdTokenMiddleware(s.handler.tls.DeployToken)(s.handler.certRouter()))
+	certd := limitRequestBody(http.StripPrefix("/api", certdTokenMiddleware(s.handler.tls.DeployToken)(s.handler.certRouter())))
 	mux.Handle("/api/cert/", certd)
 
 	// 静态文件（前端 SPA）
@@ -215,6 +225,19 @@ func fileExists(fsys fs.FS, path string) bool {
 	return err == nil
 }
 
+// maxRequestBody 单个 API 请求体上限（证书/私钥/配置均远小于此值）
+const maxRequestBody = 4 << 20
+
+// limitRequestBody 限制请求体大小，避免超大请求耗尽内存
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // writeJSON 统一 JSON 响应
 func writeJSON(w http.ResponseWriter, code int, message string, data interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -237,10 +260,10 @@ func writeError(w http.ResponseWriter, code int, message string) {
 		switch {
 		case code >= 50000:
 			httpStatus = 500
-		case code >= 40000:
-			httpStatus = 400
 		case code >= 40100:
 			httpStatus = 401
+		case code >= 40000:
+			httpStatus = 400
 		default:
 			httpStatus = 400
 		}

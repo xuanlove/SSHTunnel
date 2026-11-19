@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"sshtunnel/internal/config"
 	"sshtunnel/internal/logger"
@@ -14,6 +15,8 @@ import (
 // App Wails 应用绑定层
 type App struct {
 	ctx       context.Context
+	initOnce  sync.Once
+	initErr   error
 	logger    *logger.Logger
 	cfgMgr    *config.Manager
 	tunnelMgr *tunnel.Manager
@@ -30,8 +33,13 @@ func (a *App) SetVersion(v string) {
 	a.version = v
 }
 
-// Init 初始化各模块
+// Init 初始化各模块（幂等：both 模式下 WEB 启动与 Wails startup 均会调用）
 func (a *App) Init() error {
+	a.initOnce.Do(func() { a.initErr = a.init() })
+	return a.initErr
+}
+
+func (a *App) init() error {
 	log, err := logger.New()
 	if err != nil {
 		return fmt.Errorf("初始化日志失败: %w", err)

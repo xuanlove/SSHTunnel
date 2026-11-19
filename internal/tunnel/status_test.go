@@ -105,10 +105,11 @@ func TestStatsArchivedAcrossStop(t *testing.T) {
 	}
 	echoSession(t, addr)
 
-	// 等待首次会话统计落账
+	// 等待首次会话统计落账（上下行都完成累计后再停止）
 	if !waitFor(2*time.Second, func() bool {
 		st := m.Stats()["archived"]
-		return len(st.Forwards) == 1 && st.Forwards[0].TotalConns == 1 && st.Forwards[0].BytesSent == 4
+		return len(st.Forwards) == 1 && st.Forwards[0].TotalConns == 1 &&
+			st.Forwards[0].BytesSent == 4 && st.Forwards[0].BytesRecv == 4
 	}) {
 		t.Fatalf("首次统计未落账: %+v", m.Stats()["archived"])
 	}

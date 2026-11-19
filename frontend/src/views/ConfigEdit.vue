@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, computed, onMounted } from 'vue'
+import { reactive, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useTunnelStore } from '@/stores/tunnel'
@@ -12,20 +12,24 @@ const route = useRoute()
 const router = useRouter()
 const store = useTunnelStore()
 
-const form = reactive<TunnelConfig>({
-  id: '',
-  name: '',
-  hop_chain: [],
-  tunnel_type: 'proxy',
-  local_forwards: [],
-  proxy_listeners: [],
-  auto_reconnect: false,
-  auto_start: false,
-  status: 'stopped',
-  keepalive_seconds: 60,
-  max_reconnect_attempts: 0,
-  reconnect_max_delay_seconds: 60,
-})
+const form = reactive<TunnelConfig>(emptyForm())
+
+function emptyForm(): TunnelConfig {
+  return {
+    id: '',
+    name: '',
+    hop_chain: [],
+    tunnel_type: 'proxy',
+    local_forwards: [],
+    proxy_listeners: [],
+    auto_reconnect: false,
+    auto_start: false,
+    status: 'stopped',
+    keepalive_seconds: 60,
+    max_reconnect_attempts: 0,
+    reconnect_max_delay_seconds: 60,
+  }
+}
 
 // 包装 computed 解决 reactive 中可选数组 undefined 的类型问题
 const proxyListeners = computed<ProxyListener[]>({
@@ -33,7 +37,7 @@ const proxyListeners = computed<ProxyListener[]>({
   set: (v) => { form.proxy_listeners = v },
 })
 
-const isEdit = !!route.params.id
+const isEdit = computed(() => !!route.params.id)
 
 function addLocalForward() {
   form.local_forwards = [...(form.local_forwards || []), {
@@ -84,23 +88,27 @@ async function handleSave() {
   }
 }
 
-onMounted(async () => {
-  if (isEdit) {
-    if (!store.configs.length) await store.loadConfigs()
-    const cfg = store.configs.find(c => c.id === route.params.id)
-    if (cfg) {
-      const parsed = JSON.parse(JSON.stringify(cfg))
-      Object.assign(form, parsed)
-      // 旧配置没有心跳字段时保持关闭，避免仅编辑保存就静默开启心跳
-      if (parsed.keepalive_seconds === undefined) form.keepalive_seconds = 0
-      if (parsed.max_reconnect_attempts === undefined) form.max_reconnect_attempts = 0
-      if (parsed.reconnect_max_delay_seconds === undefined) form.reconnect_max_delay_seconds = 60
-    } else {
-      ElMessage.error('配置不存在')
-      router.push('/')
-    }
+async function initForm() {
+  // 路由复用（编辑 -> 新建）时重置表单，避免覆盖原隧道
+  Object.assign(form, emptyForm())
+  if (!route.params.id) return
+  if (!store.configs.length) await store.loadConfigs()
+  const cfg = store.configs.find(c => c.id === route.params.id)
+  if (!cfg) {
+    ElMessage.error('配置不存在')
+    router.push('/')
+    return
   }
-})
+  const parsed = JSON.parse(JSON.stringify(cfg))
+  Object.assign(form, parsed)
+  // 旧配置没有心跳字段时保持关闭，避免仅编辑保存就静默开启心跳
+  if (parsed.keepalive_seconds === undefined) form.keepalive_seconds = 0
+  if (parsed.max_reconnect_attempts === undefined) form.max_reconnect_attempts = 0
+  if (parsed.reconnect_max_delay_seconds === undefined) form.reconnect_max_delay_seconds = 60
+}
+
+// 监听路由参数：同一组件在「编辑」与「新建」之间切换时重新初始化
+watch(() => route.params.id, initForm, { immediate: true })
 </script>
 
 <template>

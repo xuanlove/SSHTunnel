@@ -1,4 +1,5 @@
-import { Call, Events } from '@wailsio/runtime'
+import * as App from '../../wailsjs/go/main/App'
+import { EventsOn } from '../../wailsjs/runtime/runtime'
 import type {
   TunnelConfig,
   HopConfig,
@@ -10,6 +11,19 @@ import type {
 // ===== 运行环境检测 =====
 // 桌面端（Wails WebView）会注入 window.go；浏览器环境无此对象
 const isWeb = typeof window !== 'undefined' && !(window as any).go
+
+// ===== 请求超时 =====
+// 避免网络异常/服务无响应时请求永久挂起，导致页面 loading 无法结束
+const REQUEST_TIMEOUT_MS = 15000
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
 
 // ===== Token 管理（仅 WEB 模式使用）=====
 const TOKEN_KEY = 'sshtunnel_token'
@@ -68,13 +82,13 @@ export interface AuthStatus {
 
 export async function checkAuthStatus(): Promise<AuthStatus> {
   if (!isWeb) return { auth_enabled: false, tls_enabled: false }
-  const res = await fetch('/api/auth/status')
+  const res = await fetchWithTimeout('/api/auth/status')
   const json = await res.json()
   return json.data
 }
 
 export async function login(username: string, password: string): Promise<string> {
-  const res = await fetch('/api/login', {
+  const res = await fetchWithTimeout('/api/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
@@ -87,7 +101,7 @@ export async function login(username: string, password: string): Promise<string>
 // ===== 通用 HTTP 请求封装 =====
 async function httpGet<T>(path: string): Promise<T> {
   const sent = authToken
-  const res = await fetch(path, { headers: authHeaders() })
+  const res = await fetchWithTimeout(path, { headers: authHeaders() })
   if (res.status === 401) {
     handleUnauthorized(sent)
     throw new Error('未授权')
@@ -99,7 +113,7 @@ async function httpGet<T>(path: string): Promise<T> {
 
 async function httpPost<T>(path: string, body?: any): Promise<T> {
   const sent = authToken
-  const res = await fetch(path, {
+  const res = await fetchWithTimeout(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body ? JSON.stringify(body) : undefined,
@@ -115,7 +129,7 @@ async function httpPost<T>(path: string, body?: any): Promise<T> {
 
 async function httpPut<T>(path: string, body: any): Promise<T> {
   const sent = authToken
-  const res = await fetch(path, {
+  const res = await fetchWithTimeout(path, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
@@ -131,7 +145,7 @@ async function httpPut<T>(path: string, body: any): Promise<T> {
 
 async function httpDelete<T>(path: string): Promise<T> {
   const sent = authToken
-  const res = await fetch(path, {
+  const res = await fetchWithTimeout(path, {
     method: 'DELETE',
     headers: authHeaders(),
   })
@@ -146,12 +160,12 @@ async function httpDelete<T>(path: string): Promise<T> {
 
 // ===== 配置相关 =====
 export async function listConfigs(): Promise<TunnelConfig[]> {
-  if (!isWeb) return Call.ByName('App.ListConfigs') as Promise<TunnelConfig[]>
+  if (!isWeb) return App.ListConfigs() as unknown as Promise<TunnelConfig[]>
   return httpGet<TunnelConfig[]>('/api/configs')
 }
 
 export async function saveConfig(cfg: TunnelConfig): Promise<TunnelConfig> {
-  if (!isWeb) return Call.ByName('App.SaveConfig', cfg) as Promise<TunnelConfig>
+  if (!isWeb) return App.SaveConfig(cfg as any) as unknown as Promise<TunnelConfig>
   if (cfg.id) {
     return httpPut<TunnelConfig>(`/api/configs/${cfg.id}`, cfg)
   }
@@ -160,7 +174,7 @@ export async function saveConfig(cfg: TunnelConfig): Promise<TunnelConfig> {
 
 export async function deleteConfig(id: string): Promise<void> {
   if (!isWeb) {
-    await Call.ByName('App.DeleteConfig', id)
+    await App.DeleteConfig(id)
     return
   }
   await httpDelete(`/api/configs/${id}`)
@@ -169,7 +183,7 @@ export async function deleteConfig(id: string): Promise<void> {
 // ===== 隧道控制 =====
 export async function startTunnel(id: string): Promise<void> {
   if (!isWeb) {
-    await Call.ByName('App.StartTunnel', id)
+    await App.StartTunnel(id)
     return
   }
   await httpPost(`/api/configs/${id}/start`)
@@ -177,7 +191,7 @@ export async function startTunnel(id: string): Promise<void> {
 
 export async function stopTunnel(id: string): Promise<void> {
   if (!isWeb) {
-    await Call.ByName('App.StopTunnel', id)
+    await App.StopTunnel(id)
     return
   }
   await httpPost(`/api/configs/${id}/stop`)
@@ -185,7 +199,7 @@ export async function stopTunnel(id: string): Promise<void> {
 
 export async function startAll(): Promise<void> {
   if (!isWeb) {
-    await Call.ByName('App.StartAll')
+    await App.StartAll()
     return
   }
   await httpPost('/api/tunnels/start-all')
@@ -193,7 +207,7 @@ export async function startAll(): Promise<void> {
 
 export async function stopAll(): Promise<void> {
   if (!isWeb) {
-    await Call.ByName('App.StopAll')
+    await App.StopAll()
     return
   }
   await httpPost('/api/tunnels/stop-all')
@@ -201,33 +215,33 @@ export async function stopAll(): Promise<void> {
 
 // ===== 系统服务 =====
 export async function checkPort(port: number): Promise<boolean> {
-  if (!isWeb) return Call.ByName('App.CheckPort', port) as Promise<boolean>
+  if (!isWeb) return App.CheckPort(port)
   const result = await httpPost<{ available: boolean }>('/api/port/check', { port })
   return result.available
 }
 
 export async function getRecentLogs(limit: number): Promise<LogEntry[]> {
-  if (!isWeb) return Call.ByName('App.GetRecentLogs', limit) as Promise<LogEntry[]>
+  if (!isWeb) return App.GetRecentLogs(limit) as unknown as Promise<LogEntry[]>
   return httpGet<LogEntry[]>(`/api/logs?limit=${limit}`)
 }
 
 // 获取所有运行中隧道的连接与流量统计（以隧道 ID 为键）
 export async function getTunnelStats(): Promise<Record<string, TunnelStats>> {
-  if (!isWeb) return Call.ByName('App.GetTunnelStats') as Promise<Record<string, TunnelStats>>
+  if (!isWeb) return App.GetTunnelStats() as unknown as Promise<Record<string, TunnelStats>>
   return httpGet<Record<string, TunnelStats>>('/api/tunnels/stats')
 }
 
 // 获取节点级运行状态：概览、活动连接、流量与访问历史
 export async function getNodeStatus(historyLimit = 200): Promise<NodeStatus> {
   if (!isWeb) {
-    return Call.ByName('App.GetNodeStatus', historyLimit) as Promise<NodeStatus>
+    return App.GetNodeStatus(historyLimit) as Promise<NodeStatus>
   }
   return httpGet<NodeStatus>(`/api/node/status?history_limit=${historyLimit}`)
 }
 
 export async function generateSelfSignedCert(): Promise<{ certPEM: string; keyPEM: string }> {
   if (!isWeb) {
-    const result = await Call.ByName('App.GenerateSelfSignedCert')
+    const result = await App.GenerateSelfSignedCert()
     const r = result as any
     if (Array.isArray(r)) return { certPEM: r[0] || '', keyPEM: r[1] || '' }
     if (r && typeof r === 'object') {
@@ -252,18 +266,18 @@ export interface CertInfo {
 
 // 解析证书 PEM，返回 CN 与有效期（用于界面展示）
 export async function inspectCertificate(certPEM: string): Promise<CertInfo> {
-  if (!isWeb) return Call.ByName('App.InspectCertificate', certPEM) as Promise<CertInfo>
+  if (!isWeb) return App.InspectCertificate(certPEM) as unknown as Promise<CertInfo>
   return httpPost<CertInfo>('/api/cert/inspect', { cert_pem: certPEM })
 }
 
 export async function parseHopChainString(s: string): Promise<HopConfig[]> {
-  if (!isWeb) return Call.ByName('App.ParseHopChainString', s) as Promise<HopConfig[]>
+  if (!isWeb) return App.ParseHopChainString(s) as unknown as Promise<HopConfig[]>
   return httpPost<HopConfig[]>('/api/hopchain/parse', { chain: s })
 }
 
 export async function testTunnelConfig(cfg: TunnelConfig): Promise<void> {
   if (!isWeb) {
-    await Call.ByName('App.TestTunnelConfig', cfg)
+    await App.TestTunnelConfig(cfg as any)
     return
   }
   await httpPost('/api/tunnel/test', cfg)
@@ -285,13 +299,12 @@ export async function testProxyListener(payload: {
   password?: string
 }): Promise<ProxyProbeResult> {
   if (!isWeb) {
-    return Call.ByName(
-      'App.TestProxyListener',
+    return App.TestProxyListener(
       payload.protocol,
       payload.port,
       payload.username || '',
       payload.password || '',
-    ) as Promise<ProxyProbeResult>
+    ) as unknown as Promise<ProxyProbeResult>
   }
   return httpPost<ProxyProbeResult>('/api/proxy/test', payload)
 }
@@ -299,7 +312,7 @@ export async function testProxyListener(payload: {
 // GeoIP 数据库是否可用（用于代理防火墙的国家规则提示）
 export async function geoIPAvailable(): Promise<boolean> {
   if (!isWeb) {
-    return Call.ByName('App.GeoIPAvailable') as Promise<boolean>
+    return App.GeoIPAvailable()
   }
   try {
     const info = await httpGet<{ geoip_available?: boolean }>('/api/version')
@@ -324,7 +337,7 @@ export interface GeoIPStatus {
 
 export async function getGeoIPStatus(): Promise<GeoIPStatus> {
   if (!isWeb) {
-    return Call.ByName('App.GeoIPStatus') as Promise<GeoIPStatus>
+    return App.GeoIPStatus() as unknown as Promise<GeoIPStatus>
   }
   return httpGet<GeoIPStatus>('/api/geoip/status')
 }
@@ -332,7 +345,7 @@ export async function getGeoIPStatus(): Promise<GeoIPStatus> {
 // 下载 / 更新城市级数据库（Merged-IP，约 93MB，服务端发起下载）；url 可选，用于指定自定义下载地址
 export async function downloadGeoIPDatabase(url = ''): Promise<GeoIPStatus> {
   if (!isWeb) {
-    return Call.ByName('App.DownloadGeoIPDatabase', url) as Promise<GeoIPStatus>
+    return App.DownloadGeoIPDatabase(url) as unknown as Promise<GeoIPStatus>
   }
   return httpPost<GeoIPStatus>('/api/geoip/download', { url })
 }
@@ -340,7 +353,7 @@ export async function downloadGeoIPDatabase(url = ''): Promise<GeoIPStatus> {
 // 启用 / 关闭城市级数据库（立即热加载，无需重启）
 export async function setGeoIPEnabled(enabled: boolean): Promise<GeoIPStatus> {
   if (!isWeb) {
-    return Call.ByName('App.SetGeoIPEnabled', enabled) as Promise<GeoIPStatus>
+    return App.SetGeoIPEnabled(enabled) as unknown as Promise<GeoIPStatus>
   }
   return httpPut<GeoIPStatus>('/api/geoip/settings', { enabled })
 }
@@ -362,7 +375,7 @@ export interface CityCatalog {
 // 查询指定国家的省/城市列表；首次调用会在服务端后台扫描城市库
 export async function getCityCatalog(country: string): Promise<CityCatalog> {
   if (!isWeb) {
-    return Call.ByName('App.CityCatalog', country) as Promise<CityCatalog>
+    return App.CityCatalog(country) as unknown as Promise<CityCatalog>
   }
   return httpGet<CityCatalog>(`/api/geoip/cities?country=${encodeURIComponent(country)}`)
 }
@@ -427,46 +440,67 @@ export async function updateWebAuthSettings(payload: {
 }
 
 // ===== 事件订阅 =====
-export function onLogNew(callback: (entry: LogEntry) => void): () => void {
-  if (!isWeb) {
-    return Events.On('log:new', (ev: any) => {
-      callback(ev.data as LogEntry)
-    })
-  }
-  // WEB 模式：WebSocket
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const tokenParam = authToken ? `?token=${authToken}` : ''
-  const ws = new WebSocket(`${proto}//${location.host}/api/logs/stream${tokenParam}`)
-  ws.onmessage = (ev) => {
-    try {
-      const msg = JSON.parse(ev.data)
-      if (msg.type === 'log') callback(msg.data as LogEntry)
-    } catch (e) {
-      // 忽略解析错误
+// 建立带自动重连的 WebSocket：服务重启或网络抖动后自动恢复，无需刷新页面
+function connectWS(path: string, onMessage: (msg: any) => void): () => void {
+  let ws: WebSocket | null = null
+  let closed = false
+  let retry = 0
+  let timer = 0
+
+  const connect = () => {
+    if (closed) return
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const tokenParam = authToken ? `?token=${encodeURIComponent(authToken)}` : ''
+    ws = new WebSocket(`${proto}//${location.host}${path}${tokenParam}`)
+    ws.onopen = () => { retry = 0 }
+    ws.onmessage = (ev) => {
+      try {
+        onMessage(JSON.parse(ev.data))
+      } catch {
+        // 忽略解析错误
+      }
+    }
+    ws.onclose = () => {
+      ws = null
+      if (closed) return
+      // 指数退避重连：1s、2s、4s… 最长 30s
+      const delay = Math.min(30000, 1000 * 2 ** retry)
+      retry++
+      timer = window.setTimeout(connect, delay)
+    }
+    ws.onerror = () => {
+      ws?.close()
     }
   }
-  return () => ws.close()
+
+  connect()
+  return () => {
+    closed = true
+    if (timer) window.clearTimeout(timer)
+    ws?.close()
+  }
+}
+
+export function onLogNew(callback: (entry: LogEntry) => void): () => void {
+  if (!isWeb) {
+    return EventsOn('log:new', (data: any) => {
+      callback(data as LogEntry)
+    })
+  }
+  return connectWS('/api/logs/stream', (msg) => {
+    if (msg.type === 'log') callback(msg.data as LogEntry)
+  })
 }
 
 export function onTunnelStatus(callback: (data: any) => void): () => void {
   if (!isWeb) {
-    return Events.On('tunnel:status', (ev: any) => {
-      callback(ev.data)
+    return EventsOn('tunnel:status', (data: any) => {
+      callback(data)
     })
   }
-  // WEB 模式：复用日志流 WebSocket（status 消息也在同一通道）
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const tokenParam = authToken ? `?token=${authToken}` : ''
-  const ws = new WebSocket(`${proto}//${location.host}/api/tunnels/status/stream${tokenParam}`)
-  ws.onmessage = (ev) => {
-    try {
-      const msg = JSON.parse(ev.data)
-      if (msg.type === 'status') callback(msg.data)
-    } catch (e) {
-      // 忽略解析错误
-    }
-  }
-  return () => ws.close()
+  return connectWS('/api/tunnels/status/stream', (msg) => {
+    if (msg.type === 'status') callback(msg.data)
+  })
 }
 
 // 导出运行环境标识供路由守卫使用

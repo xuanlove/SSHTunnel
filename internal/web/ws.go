@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +76,15 @@ func (h *Hub) removeClient(c *websocket.Conn) {
 // 任意退出路径（读错误、Ping 失败、请求上下文取消）均触发同一清理逻辑：
 // 取消派生 context（使心跳 goroutine 立即退出）并从 hub 移除连接。
 func (h *Handler) handleLogStream(w http.ResponseWriter, r *http.Request) {
+	// 防止跨站 WebSocket 劫持：浏览器携带 Origin 时必须与请求 Host 同源
+	// （非浏览器客户端通常不带 Origin，放行）
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(u.Host, r.Host) {
+			http.Error(w, "origin not allowed", http.StatusForbidden)
+			return
+		}
+	}
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: []string{"*"},
 	})

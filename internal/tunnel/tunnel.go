@@ -100,15 +100,11 @@ func (m *Manager) OnStatusChange(cb func(tunnelID string, status string)) {
 	m.mu.Unlock()
 }
 
+// errTunnelStopped 隧道已被主动停止（用于中断进行中的建连/重连）
+var errTunnelStopped = errors.New("隧道已停止")
+
 // Start 启动指定隧道
 func (m *Manager) Start(cfg *config.TunnelConfig) error {
-	m.mu.Lock()
-	if _, exists := m.tunnels[cfg.ID]; exists {
-		m.mu.Unlock()
-		return fmt.Errorf("隧道已在运行: %s", cfg.ID)
-	}
-	m.mu.Unlock()
-
 	t := &Tunnel{
 		cfg:     cfg,
 		log:     m.log,
@@ -138,15 +134,40 @@ func (m *Manager) Start(cfg *config.TunnelConfig) error {
 		}
 		m.emitStatus(cfg.ID, string(config.StatusError))
 	}
-	t.ctx, t.cancel = context.WithCancel(context.Background())
 
+	// 先占位再拨号：并发/重复 Start 不会重复建连，拨号期间 Stop 也能找到实例
+	m.mu.Lock()
+	if _, exists := m.tunnels[cfg.ID]; exists {
+		m.mu.Unlock()
+		return fmt.Errorf("隧道已在运行: %s", cfg.ID)
+	}
+	m.tunnels[cfg.ID] = t
+	m.mu.Unlock()
+
+	t.ctx, t.cancel = context.WithCancel(context.Background())
 	if err := t.run(); err != nil {
+		m.mu.Lock()
+		if cur, ok := m.tunnels[cfg.ID]; ok && cur == t {
+			delete(m.tunnels, cfg.ID)
+		}
+		m.mu.Unlock()
+		if t.cancel != nil {
+			t.cancel()
+		}
+		t.cleanupResources()
+		t.conns.RemoveTunnel(cfg.ID)
 		return err
 	}
 
-	m.mu.Lock()
-	m.tunnels[cfg.ID] = t
-	m.mu.Unlock()
+	// run 期间可能被 Stop 或 onFatal 移除
+	m.mu.RLock()
+	_, registered := m.tunnels[cfg.ID]
+	m.mu.RUnlock()
+	if !registered {
+		t.cleanupResources()
+		return fmt.Errorf("隧道启动中断: %s", cfg.ID)
+	}
+
 	m.emitStatus(cfg.ID, string(config.StatusRunning))
 	m.log.TunnelInfo(cfg.ID, "隧道已启动: "+cfg.Name)
 	return nil
@@ -349,7 +370,7 @@ func (m *Manager) NodeStatus(cfgs []config.TunnelConfig, historyLimit int) NodeS
 		StartedAt:     m.startedAt,
 		UptimeSeconds: int64(time.Since(m.startedAt).Seconds()),
 		TunnelTotal:   len(cfgs),
-		Connections:   m.conns.Snapshot(),
+		Connections:   make([]proxy.ConnSnapshot, 0),
 		Tunnels:       make([]TunnelTraffic, 0, len(cfgs)),
 	}
 	known := make(map[string]bool, len(cfgs))
@@ -375,6 +396,12 @@ func (m *Manager) NodeStatus(cfgs []config.TunnelConfig, historyLimit int) NodeS
 			BytesSent:   st.BytesSent,
 			BytesRecv:   st.BytesRecv,
 		})
+	}
+	// 仅展示仍存在的配置对应的活动连接（清理已删除配置的残留）
+	for _, c := range m.conns.Snapshot() {
+		if known[c.TunnelID] {
+			out.Connections = append(out.Connections, c)
+		}
 	}
 	// 访问历史可能包含已删除的隧道，按当前配置过滤
 	for _, rec := range m.history.Recent(historyLimit) {
@@ -416,6 +443,9 @@ func (t *Tunnel) run() error {
 
 // connectAndServe 建立 SSH 连接并启动所有监听服务
 func (t *Tunnel) connectAndServe() error {
+	if t.isStopped() {
+		return errTunnelStopped
+	}
 	hops := make([]sshclient.Hop, len(t.cfg.HopChain))
 	for i, h := range t.cfg.HopChain {
 		hops[i] = sshclient.Hop{
@@ -447,6 +477,7 @@ func (t *Tunnel) connectAndServe() error {
 	for _, lf := range t.cfg.LocalForwards {
 		if err := t.startLocalForward(lf); err != nil {
 			t.log.TunnelError(t.cfg.ID, fmt.Sprintf("本地转发启动失败 :%d: %s", lf.LocalPort, err.Error()))
+			return fmt.Errorf("本地转发 :%d 启动失败: %w", lf.LocalPort, err)
 		}
 	}
 
@@ -463,6 +494,7 @@ func (t *Tunnel) connectAndServe() error {
 		pm.SetDialer(client) // 重连后指向新的 SSH 连接
 		if err := pm.StartAll(t.ctx, t.cfg.ProxyListeners); err != nil {
 			t.log.TunnelError(t.cfg.ID, "代理监听启动失败: "+err.Error())
+			return fmt.Errorf("代理监听启动失败: %w", err)
 		}
 	}
 	return nil
@@ -482,8 +514,18 @@ func (t *Tunnel) watchOnly() {
 		return
 	}
 	err := c.Wait()
-	if err != nil && !t.isStopped() {
+	if t.isStopped() {
+		return
+	}
+	if err != nil {
 		t.log.TunnelWarn(t.cfg.ID, "SSH 连接断开: "+err.Error())
+	} else {
+		t.log.TunnelWarn(t.cfg.ID, "SSH 连接已关闭")
+	}
+	t.log.TunnelError(t.cfg.ID, "未启用自动重连，隧道已停止")
+	// 连接已不可用：移除运行实例并上报错误，避免界面长期显示「运行中」
+	if t.onFatal != nil {
+		t.onFatal()
 	}
 }
 
@@ -535,6 +577,13 @@ func (t *Tunnel) watchAndReconnect() {
 			attempts++
 			t.log.TunnelInfo(t.cfg.ID, fmt.Sprintf("第 %d 次重连尝试...", attempts))
 			if err := t.connectAndServe(); err != nil {
+				// 停止过程中产生的错误不再计为失败
+				if t.isStopped() {
+					t.reconnecting = false
+					return
+				}
+				// 清理本次可能已部分启动的监听器，避免下次重连端口冲突
+				t.cleanupResources()
 				t.log.TunnelWarn(t.cfg.ID, fmt.Sprintf("第 %d 次重连失败: %s", attempts, err.Error()))
 				if maxAttempts > 0 && attempts >= maxAttempts {
 					t.reconnecting = false
@@ -553,6 +602,12 @@ func (t *Tunnel) watchAndReconnect() {
 					delay = maxDelay
 				}
 				continue
+			}
+			// 停止与重连建连并发：已停止时清理本次新建的资源
+			if t.isStopped() {
+				t.reconnecting = false
+				t.cleanupResources()
+				return
 			}
 			t.reconnecting = false
 			t.log.TunnelInfo(t.cfg.ID, fmt.Sprintf("第 %d 次重连成功", attempts))
@@ -682,6 +737,3 @@ func (t *Tunnel) stop() {
 		t.conns.RemoveTunnel(t.cfg.ID)
 	}
 }
-
-// 确保编译期接口实现
-var _ = errors.New

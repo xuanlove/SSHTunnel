@@ -34,7 +34,12 @@ SERVICE_USER="${APP_NAME}"
 DEFAULT_HOST="0.0.0.0"
 DEFAULT_PORT="8090"
 DEFAULT_USER="admin"
-DEFAULT_PASS="admin123"
+
+# 生成随机强密码（避免使用固定默认口令）
+generate_password() {
+    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24
+}
+DEFAULT_PASS="$(generate_password)"
 
 # 运行时变量（由交互输入或环境变量填充）
 LISTEN_HOST="${LISTEN_HOST:-$DEFAULT_HOST}"
@@ -176,7 +181,7 @@ collect_params_interactively() {
     # ---------- 3. 密码 ----------
     echo ""
     while true; do
-        prompt "请输入登录密码 [默认 ${DEFAULT_PASS}] (输入后将隐藏显示): "
+        prompt "请输入登录密码 [直接回车使用随机生成的强密码] (输入后将隐藏显示): "
         read -r -s input_pass
         echo ""
         input_pass="${input_pass:-$DEFAULT_PASS}"
@@ -186,8 +191,13 @@ collect_params_interactively() {
             continue
         fi
         # 校验长度
-        if (( ${#input_pass} < 6 )); then
-            warn "密码长度至少 6 位，请重新输入"
+        if (( ${#input_pass} < 12 )); then
+            warn "密码长度至少 12 位，请重新输入"
+            continue
+        fi
+        # 禁止空白与冒号（空白会破坏 unit 参数，冒号与 --auth=user:pass 冲突）
+        if [[ "$input_pass" =~ [[:space:]:] ]]; then
+            warn "密码不能包含空白字符或冒号"
             continue
         fi
         # 二次确认
@@ -319,7 +329,14 @@ install_service() {
         warn "继续安装（服务可能启动失败）"
     fi
 
-    # 5. 写入 systemd 服务单元
+    # 5. 写入凭据环境文件（0600），避免密码出现在 systemd unit 中
+    local env_file="${CONFIG_DIR}/sshtunnel.env"
+    mkdir -p "$CONFIG_DIR"
+    chmod 0700 "$CONFIG_DIR"
+    ( umask 077; printf 'SSHTUNNEL_AUTH=%s:%s\n' "$AUTH_USER" "$AUTH_PASS" > "$env_file" )
+    chmod 0600 "$env_file"
+
+    # 6. 写入 systemd 服务单元
     info "写入 systemd 服务文件: ${SERVICE_FILE}"
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -332,13 +349,14 @@ Wants=network-online.target
 Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
+EnvironmentFile=${env_file}
 
 # 运行参数：WEB 模式 + 密码保护 + 监听 ${LISTEN_HOST}
 ExecStart=${INSTALL_DIR}/${APP_NAME} \\
     --mode=web \\
     --web-host=${LISTEN_HOST} \\
     --web-port=${LISTEN_PORT} \\
-    --auth=${AUTH_USER}:${AUTH_PASS}
+    --auth=\${SSHTUNNEL_AUTH}
 
 # 工作目录与配置
 WorkingDirectory=${DATA_DIR}
@@ -368,6 +386,7 @@ SyslogIdentifier=${APP_NAME}
 [Install]
 WantedBy=multi-user.target
 EOF
+    chmod 0600 "$SERVICE_FILE"
 
     # 6. 重新加载 systemd 配置
     info "重新加载 systemd 配置..."
@@ -393,7 +412,8 @@ EOF
         info ""
         info "  访问地址:  http://<服务器IP>:${LISTEN_PORT}"
         info "  登录账户:  ${AUTH_USER}"
-        info "  登录密码:  ${AUTH_PASS}"
+        info "  登录密码:  已写入 ${CONFIG_DIR}/sshtunnel.env（权限 0600，不再回显）"
+        info "  查看密码:  sudo cat ${CONFIG_DIR}/sshtunnel.env"
         info ""
         info "  配置文件:  ${CONFIG_DIR}/configs.json"
         info "  日志目录:  ${LOG_DIR}/"
@@ -436,6 +456,9 @@ uninstall_service() {
         info "删除服务文件: ${SERVICE_FILE}"
         rm -f "$SERVICE_FILE"
     fi
+
+    # 删除凭据环境文件（无论是否保留配置目录，凭据都应移除）
+    rm -f "${CONFIG_DIR}/sshtunnel.env"
 
     # 4. 重新加载 systemd 配置
     info "重新加载 systemd 配置..."

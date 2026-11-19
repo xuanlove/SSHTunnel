@@ -206,7 +206,10 @@ normalize_version() {
 download_binary() {
     local version="$1"
     local download_url="https://github.com/${REPO}/releases/download/${version}/${ASSET_NAME}"
-    local tmp_file="/tmp/${ASSET_NAME}.download.$$"
+    # 使用私有临时目录，避免可预测路径被本地用户预建符号链接利用
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    local tmp_file="${tmp_dir}/${ASSET_NAME}"
 
     step "下载 ${ASSET_NAME} (版本 ${version})"
     info "URL: ${download_url}"
@@ -214,7 +217,7 @@ download_binary() {
     if ! curl -fSL --progress-bar -o "$tmp_file" "$download_url"; then
         error "下载失败。可能该版本未提供 ${PLATFORM} 二进制。"
         error "请确认标签存在（如 v1.1.0），或访问 https://github.com/${REPO}/releases 查看可用资产"
-        rm -f "$tmp_file"
+        rm -rf "$tmp_dir"
         exit 1
     fi
 
@@ -224,7 +227,7 @@ download_binary() {
     if echo "$file_type" | grep -qi "HTML"; then
         error "下载内容是 HTML 而非二进制，可能版本号或资产名错误"
         head -c 200 "$tmp_file" >&2
-        rm -f "$tmp_file"
+        rm -rf "$tmp_dir"
         exit 1
     fi
 
@@ -245,6 +248,7 @@ install_binary() {
     step "安装到 ${target}"
     install -m 0755 "$tmp_file" "$target"
     rm -f "$tmp_file"
+    rmdir "$(dirname "$tmp_file")" 2>/dev/null || true
 
     if [[ -n "$old_version" ]]; then
         info "已升级: ${old_version} -> ${INSTALLED_VERSION}"
@@ -270,13 +274,19 @@ verify_install() {
 # ==================== systemd 服务安装 ====================
 # 以 WEB 模式安装为 systemd 服务。
 # 交互终端下询问监听地址/端口/密码；非交互（管道安装）时使用默认值或环境变量：
-#   WEB_HOST（默认 0.0.0.0）、WEB_PORT（默认 8080）、WEB_AUTH（user:password，默认无密码）
+#   WEB_HOST（默认 127.0.0.1）、WEB_PORT（默认 8080）、WEB_AUTH（user:password，留空则生成随机密码）
 install_service() {
     local target="${INSTALL_DIR}/${BINARY_NAME}"
     local svc_path="/etc/systemd/system/${BINARY_NAME}.service"
-    local web_host="${WEB_HOST:-0.0.0.0}"
+    local web_host="${WEB_HOST:-127.0.0.1}"
     local web_port="${WEB_PORT:-8080}"
     local auth="${WEB_AUTH:-}"
+    local generated_pass=""
+    if [[ -z "$auth" ]]; then
+        # 未提供凭据时生成随机强密码，避免面板无密码暴露
+        generated_pass="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)"
+        auth="admin:${generated_pass}"
+    fi
     local start_now="Y"
 
     # 仅交互终端下询问；管道场景避免 read 吞掉脚本内容
@@ -296,15 +306,29 @@ install_service() {
         exit 1
     fi
 
-    # 安全提示：默认监听所有网卡且无密码时，任何能访问该端口的设备都可控制隧道
-    if [[ "$web_host" == "0.0.0.0" || "$web_host" == "::" ]] && [[ -z "$auth" ]]; then
-        warn "服务将监听所有网卡且未设置密码，请确保防火墙限制来源 IP，或改用 WEB_AUTH=user:password 启用访问密码"
+    # 安全提示：监听所有网卡时说明已自动生成密码
+    if [[ "$web_host" == "0.0.0.0" || "$web_host" == "::" ]] && [[ -n "$generated_pass" ]]; then
+        warn "服务将监听所有网卡，已自动生成随机访问密码（安装完成后可按提示查看）"
+    fi
+
+    # 凭据写入独立环境文件（0600），避免出现在 systemd unit 中
+    local env_dir="/etc/sshtunnel"
+    local env_file="${env_dir}/sshtunnel.env"
+    mkdir -p "$env_dir"
+    chmod 0700 "$env_dir"
+    ( umask 077; printf 'SSHTUNNEL_AUTH=%s\n' "$auth" > "$env_file" )
+    chmod 0600 "$env_file"
+
+    # 专用系统用户（无法登录）
+    local run_as="sshtunnel"
+    if ! id -u "$run_as" >/dev/null 2>&1; then
+        if ! useradd --system --home-dir "/var/lib/${BINARY_NAME}" --shell /usr/sbin/nologin "$run_as" 2>/dev/null; then
+            warn "无法创建 ${run_as} 用户，服务将以 root 运行"
+            run_as=""
+        fi
     fi
 
     local exec_args="--mode=web --web-host=${web_host} --web-port=${web_port}"
-    if [[ -n "$auth" ]]; then
-        exec_args="${exec_args} --auth=${auth}"
-    fi
 
     step "安装 systemd 服务"
     cat > "$svc_path" <<EOF
@@ -315,6 +339,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+${run_as:+User=${run_as}}
+${run_as:+Group=${run_as}}
+EnvironmentFile=${env_file}
 # systemd 服务不继承 HOME，而程序依赖 os.UserConfigDir/UserCacheDir 定位配置与日志，
 # 因此显式设置 HOME 与 XDG 目录；StateDirectory 负责创建 /var/lib/sshtunnel
 StateDirectory=sshtunnel
@@ -322,13 +349,14 @@ Environment=HOME=/var/lib/sshtunnel
 Environment=XDG_CONFIG_HOME=/var/lib/sshtunnel/config
 Environment=XDG_CACHE_HOME=/var/lib/sshtunnel/cache
 Environment=XDG_DATA_HOME=/var/lib/sshtunnel/data
-ExecStart=${target} ${exec_args}
+ExecStart=${target} ${exec_args} --auth=\${SSHTUNNEL_AUTH}
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    chmod 0600 "$svc_path"
 
     systemctl daemon-reload
     systemctl enable "${BINARY_NAME}.service" >/dev/null 2>&1
@@ -342,6 +370,10 @@ EOF
             local addr="${web_host}"
             [[ "$addr" == "0.0.0.0" || "$addr" == "::" ]] && addr="<本机IP>"
             info "服务已启动，WEB 面板: http://${addr}:${web_port}"
+            if [[ -n "$generated_pass" ]]; then
+                info "已生成随机访问密码并写入 ${env_file}（0600）"
+                info "查看密码: sudo cat ${env_file}"
+            fi
         else
             warn "服务启动失败，请查看日志: journalctl -u ${BINARY_NAME} -e"
         fi

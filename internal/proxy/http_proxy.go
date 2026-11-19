@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -86,6 +85,7 @@ func (s *httpServer) Start(ctx context.Context) error {
 				return nil
 			}
 			s.log("error", "接受连接失败: "+err.Error())
+			time.Sleep(100 * time.Millisecond) // 持续错误（如 EMFILE）时退避，避免忙等
 			continue
 		}
 		go s.handleConn(conn)
@@ -132,7 +132,8 @@ func (s *httpServer) handleConn(conn net.Conn) {
 
 	// CONNECT 方法（HTTPS 隧道）
 	if req.Method == http.MethodConnect {
-		s.handleConnect(conn, req, start, entry)
+		// 回灌 bufio 预读的数据，避免客户端提前发送的 TLS 首包被丢弃
+		s.handleConnect(&bufferedConn{r: br, Conn: conn}, req, start, entry)
 		return
 	}
 
@@ -197,8 +198,14 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request, start time.Tim
 	}
 	defer targetConn.Close()
 
-	// 移除逐跳头部，添加 Via 头
+	// 移除逐跳头部，添加 Via 头（本代理仅处理单次请求，响应后关闭连接）
 	req.Header.Del("Proxy-Authorization")
+	req.Header.Del("Proxy-Connection")
+	req.Header.Del("Connection")
+	req.Header.Del("Keep-Alive")
+	req.Header.Del("TE")
+	req.Header.Del("Trailer")
+	req.Header.Del("Upgrade")
 	req.Header.Set("Via", "1.1 sshtunnel")
 
 	// 仅统计请求/响应体字节（与 SOCKS、本地转发的负载口径一致）
@@ -220,15 +227,20 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request, start time.Tim
 	}
 	defer resp.Body.Close()
 
+	resp.Header.Del("Connection")
+	resp.Header.Del("Keep-Alive")
+	resp.Header.Del("Proxy-Connection")
+	resp.Header.Del("TE")
+	resp.Header.Del("Trailer")
+	resp.Header.Del("Upgrade")
 	resp.Header.Set("Via", "1.1 sshtunnel")
+	resp.Close = true
 	resp.Body = &countReadCloser{r: resp.Body, stats: s.stats, conn: entry}
 	if err := resp.Write(conn); err != nil {
 		s.logAccess(conn, target, start, "失败: 回写响应失败")
 		return
 	}
 
-	// 刷新剩余数据（非响应体，不计入流量统计）
-	_, _ = io.Copy(conn, tr)
 	s.logAccess(conn, target, start, "成功")
 }
 

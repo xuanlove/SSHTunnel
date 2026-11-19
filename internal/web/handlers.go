@@ -30,6 +30,7 @@ type Handler struct {
 	tls       *TLSStore  // WEB 面板 HTTPS 设置（可在系统设置中动态开启/关闭）
 	reloadTLS func()     // 由 WEB Server 注入，用于热重启监听
 	hub       *Hub
+	login     *loginLimiter
 	version   string // 当前版本号（构建时注入）
 	commit    string // git commit
 	variant   string // 构建变体：web 或 desktop
@@ -48,6 +49,7 @@ func NewHandler(cfgMgr *config.Manager, tunnelMgr *tunnel.Manager, log *logger.L
 		auth:      NewAuthStore(""),
 		tls:       NewTLSStore(""),
 		hub:       hub,
+		login:     newLoginLimiter(),
 	}
 	if authUser != "" {
 		h.auth.initFromCLI(authUser, authPass)
@@ -287,6 +289,11 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 40003, "访问密码未开启，无需登录")
 		return
 	}
+	src := loginSource(r)
+	if !h.login.allow(src) {
+		writeError(w, 429, "登录尝试过于频繁，请稍后再试")
+		return
+	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -296,10 +303,12 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.auth.Verify(req.Username, req.Password) {
+		h.login.fail(src)
 		h.log.Infof("登录失败: 用户名或密码错误 (user=%s)", req.Username)
 		writeError(w, 40001, "用户名或密码错误")
 		return
 	}
+	h.login.reset(src)
 	h.log.Infof("用户登录成功: %s", req.Username)
 	token, expiresAt, err := generateJWT(req.Username, h.jwtSecret)
 	if err != nil {
@@ -406,7 +415,8 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		changed := old.Enabled != next.Enabled || old.CertFile != next.CertFile || old.KeyFile != next.KeyFile
+		changed := old.Enabled != next.Enabled || old.CertFile != next.CertFile || old.KeyFile != next.KeyFile ||
+			strings.TrimSpace(req.CertPEM) != "" || strings.TrimSpace(req.KeyPEM) != ""
 		resp := map[string]interface{}{
 			"active":     h.tls.Active(),
 			"restarting": changed,
@@ -552,9 +562,17 @@ func (h *Handler) handleConfigByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 0, "success", cfg)
 
 	case action == "" && r.Method == http.MethodDelete:
+		if h.tunnelMgr != nil && h.tunnelMgr.IsRunning(id) {
+			writeError(w, 40002, "隧道运行中，请先停止")
+			return
+		}
 		if err := h.cfgMgr.Delete(id); err != nil {
 			writeError(w, 500, err.Error())
 			return
+		}
+		// 清理该隧道的历史累计与残留连接
+		if h.tunnelMgr != nil {
+			h.tunnelMgr.Forget(id)
 		}
 		h.log.Infof("配置已删除: ID: %s", id)
 		writeJSON(w, 0, "success", nil)

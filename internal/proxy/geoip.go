@@ -459,11 +459,12 @@ func CurrentGeoIPStatus() GeoIPStatus {
 	return st
 }
 
-// Lookup 使用全局数据库解析地理位置
+// Lookup 使用全局数据库解析地理位置。
+// 持读锁完成查询，避免热切换关闭数据库时读取已释放的内存。
 func lookupGeo(ip net.IP) (*GeoInfo, error) {
 	geoipMu.RLock()
+	defer geoipMu.RUnlock()
 	db := geoipDB
-	geoipMu.RUnlock()
 	if db == nil {
 		return nil, errors.New("未加载 GeoIP 数据库")
 	}

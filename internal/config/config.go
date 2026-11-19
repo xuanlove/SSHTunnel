@@ -176,7 +176,8 @@ func NewManager() (*Manager, error) {
 		return nil, err
 	}
 	cfgDir := filepath.Join(dir, "sshtunnel")
-	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+	// 配置包含 SSH 密码与私钥，目录仅允许当前用户访问
+	if err := os.MkdirAll(cfgDir, 0700); err != nil {
 		return nil, err
 	}
 	return newManagerWithPath(filepath.Join(cfgDir, "configs.json"))
@@ -228,12 +229,16 @@ func (m *Manager) List() []TunnelConfig {
 	return out
 }
 
-// Get 获取单个配置
+// Get 获取单个配置副本（避免调用方持有内部指针导致并发读写）
 func (m *Manager) Get(id string) (*TunnelConfig, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	c, ok := m.configs[id]
-	return c, ok
+	if !ok {
+		return nil, false
+	}
+	copied := *c
+	return &copied, true
 }
 
 // Save 保存配置（新建或更新），ID 会回填到传入的 cfg
@@ -248,6 +253,10 @@ func (m *Manager) Save(cfg *TunnelConfig) error {
 	}
 	// 存储副本，避免外部修改影响内部状态
 	copied := *cfg
+	// 运行状态由 SetStatus 管理：保存配置不应把运行中的隧道覆盖为停止
+	if prev, ok := m.configs[cfg.ID]; ok && prev.Status != StatusStopped {
+		copied.Status = prev.Status
+	}
 	m.configs[cfg.ID] = &copied
 	return m.saveLocked()
 }
@@ -275,10 +284,35 @@ func (m *Manager) saveLocked() error {
 	}
 	// 确保目录存在（防御性：目录可能在外部被删除）
 	dir := filepath.Dir(m.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("创建配置目录失败: %w (dir=%s)", err, dir)
 	}
-	return os.WriteFile(m.path, data, 0644)
+	// 原子写入：配置含明文凭据，使用 0600 临时文件 + rename，避免中断产生残缺文件
+	tmp, err := os.CreateTemp(dir, ".configs-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建临时配置文件失败: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("设置配置权限失败: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("同步配置失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关闭临时配置文件失败: %w", err)
+	}
+	if err := os.Rename(tmpName, m.path); err != nil {
+		return fmt.Errorf("替换配置文件失败: %w", err)
+	}
+	return nil
 }
 
 // SetStatus 更新运行时状态（不持久化）

@@ -2,7 +2,6 @@ package logger
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -64,7 +63,7 @@ func New() (*Logger, error) {
 		return nil, err
 	}
 	logFile := filepath.Join(logDir, fmt.Sprintf("sshtunnel-%s.log", time.Now().Format("2006-01-02")))
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -172,16 +171,10 @@ func (l *Logger) Recent(limit int) []Entry {
 
 // Close 关闭日志文件
 func (l *Logger) Close() {
-	if l.file != nil {
-		_ = l.file.Close()
-	}
-}
-
-// SetOutput 设置额外输出（调试用）
-func (l *Logger) SetOutput(w io.Writer) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.file != nil {
+		_ = l.file.Close()
 		l.file = nil
 	}
 }

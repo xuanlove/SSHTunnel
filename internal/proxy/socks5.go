@@ -54,6 +54,7 @@ func (s *socks5Server) Start(ctx context.Context) error {
 				return nil
 			}
 			s.log("error", "接受连接失败: "+err.Error())
+			time.Sleep(100 * time.Millisecond) // 持续错误（如 EMFILE）时退避，避免忙等
 			continue
 		}
 		go s.handleConn(conn)
@@ -86,6 +87,11 @@ func (s *socks5Server) handleConn(conn net.Conn) {
 		return
 	}
 	nmethods := int(header[1])
+	if nmethods <= 0 {
+		conn.Write([]byte{0x05, 0xFF}) // 拒绝：未提供任何认证方法
+		s.logAccessDenied(conn, "", "非法的认证方法数量")
+		return
+	}
 	methods := make([]byte, nmethods)
 	if _, err := io.ReadFull(conn, methods); err != nil {
 		return
@@ -144,6 +150,11 @@ func (s *socks5Server) handleConn(conn net.Conn) {
 		}
 		domain := make([]byte, int(lenBuf[0]))
 		if _, err := io.ReadFull(conn, domain); err != nil {
+			return
+		}
+		if len(domain) == 0 {
+			s.reply(conn, 0x08, nil, 0) // 地址类型不支持（空域名）
+			s.logAccessDenied(conn, "", "目标域名为空")
 			return
 		}
 		host = string(domain)
