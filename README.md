@@ -1014,6 +1014,14 @@ npm run preview    # 预览构建产物
 
 ## 版本更新说明
 
+### v1.8.1
+
+- **边界修复**：`rangeToFromISO` 使用自有属性校验，`constructor`/`toString`/`__proto__` 等原型链键按未知范围返回空串，不再抛 `RangeError`
+- **测试增强**：用例 45 → 61，新增关键 API 封装（`checkAuthStatus` 双模式、`httpPost` 401、`saveConfig` POST/PUT、`updateWebAuthSettings` token 落库与清除、`geoIPAvailable` 降级、桌面端事件订阅）、CSV 导出下载、趋势标签加载、历史筛选切换、键盘打开抽屉
+- **覆盖率门槛接入 CI**：`utils` 100%，`api` 与 `TrendChart` 设渐进阈值，未达标构建失败；覆盖率报告作为 CI 产物保留 7 天
+- **工程修正**：覆盖率统计范围收敛到 `src/**`（排除生成代码）；`vitest.config.ts` 复用 `vite.config.ts` 并纳入类型检查；忽略 `frontend/coverage/`
+- 本版本不改变产品运行时行为
+
 ### v1.8.0
 
 - **前端测试基建**：引入 vitest + @vue/test-utils + happy-dom，建立与后端对齐的前端自动化测试防线（45 个用例）
