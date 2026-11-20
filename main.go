@@ -185,7 +185,8 @@ func startWebServer(app *App, authUser, authPass string) {
 		generateJWTSecret(), "", "", hub).
 		WithVersion(version, commit, buildVariant, *flagRepo).
 		WithMetrics(app.metrics).
-		WithAlert(app.alerts)
+		WithAlert(app.alerts).
+		WithHistoryDir(app.historyDir)
 
 	// 告警事件实时广播到 WEB 客户端
 	if app.alerts != nil {

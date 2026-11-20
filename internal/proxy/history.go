@@ -21,12 +21,13 @@ type AccessRecord struct {
 }
 
 // AccessHistory 固定容量的访问历史环形缓冲（并发安全）。
-// 由隧道管理器共享，使历史跨重连与隧道停止保留（进程重启后清空）。
+// 由隧道管理器共享，使历史跨重连与隧道停止保留（重启后从持久化分片恢复）。
 type AccessHistory struct {
 	mu   sync.Mutex
 	buf  []AccessRecord
 	next int
 	full bool
+	sink func(AccessRecord) // 持久化钩子（nil 表示不落盘）
 }
 
 // NewAccessHistory 创建访问历史，capacity 为最大保留条数
@@ -37,18 +38,49 @@ func NewAccessHistory(capacity int) *AccessHistory {
 	return &AccessHistory{buf: make([]AccessRecord, capacity)}
 }
 
-// Add 追加一条访问记录（超出容量时覆盖最旧记录）
+// Add 追加一条访问记录（超出容量时覆盖最旧记录；触发持久化钩子）
 func (h *AccessHistory) Add(rec AccessRecord) {
 	if h == nil {
 		return
 	}
 	h.mu.Lock()
+	h.pushLocked(rec)
+	sink := h.sink
+	h.mu.Unlock()
+	if sink != nil {
+		sink(rec)
+	}
+}
+
+// SetSink 设置持久化钩子（每条新记录触发一次；应在服务启动前设置）
+func (h *AccessHistory) SetSink(fn func(AccessRecord)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.sink = fn
+	h.mu.Unlock()
+}
+
+// Restore 恢复历史记录（升序传入；不触发持久化钩子）
+func (h *AccessHistory) Restore(recs []AccessRecord) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	for _, rec := range recs {
+		h.pushLocked(rec)
+	}
+	h.mu.Unlock()
+}
+
+// pushLocked 环形写入（调用方需持有锁）
+func (h *AccessHistory) pushLocked(rec AccessRecord) {
 	h.buf[h.next] = rec
 	h.next = (h.next + 1) % len(h.buf)
 	if h.next == 0 {
 		h.full = true
 	}
-	h.mu.Unlock()
 }
 
 // Recent 返回最近的访问记录（时间倒序，最多 limit 条）

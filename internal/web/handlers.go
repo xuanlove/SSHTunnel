@@ -15,6 +15,7 @@ import (
 	"sshtunnel/internal/config"
 	"sshtunnel/internal/logger"
 	"sshtunnel/internal/metrics"
+	"sshtunnel/internal/persist"
 	"sshtunnel/internal/port"
 	"sshtunnel/internal/proxy"
 	"sshtunnel/internal/sshclient"
@@ -24,21 +25,22 @@ import (
 
 // Handler API 处理器，持有共享业务层引用
 type Handler struct {
-	cfgMgr    *config.Manager
-	tunnelMgr *tunnel.Manager
-	log       *logger.Logger
-	jwtSecret []byte
-	auth      *AuthStore // 运行时鉴权状态（可在系统设置中动态开启/关闭）
-	tls       *TLSStore  // WEB 面板 HTTPS 设置（可在系统设置中动态开启/关闭）
-	reloadTLS func()     // 由 WEB Server 注入，用于热重启监听
-	hub       *Hub
-	login     *loginLimiter
-	version   string // 当前版本号（构建时注入）
-	commit    string // git commit
-	variant   string // 构建变体：web 或 desktop
-	repo      string // GitHub 仓库，用于版本检查
-	metrics   *metrics.Store
-	alerts    *alert.Engine
+	cfgMgr     *config.Manager
+	tunnelMgr  *tunnel.Manager
+	log        *logger.Logger
+	jwtSecret  []byte
+	auth       *AuthStore // 运行时鉴权状态（可在系统设置中动态开启/关闭）
+	tls        *TLSStore  // WEB 面板 HTTPS 设置（可在系统设置中动态开启/关闭）
+	reloadTLS  func()     // 由 WEB Server 注入，用于热重启监听
+	hub        *Hub
+	login      *loginLimiter
+	version    string // 当前版本号（构建时注入）
+	commit     string // git commit
+	variant    string // 构建变体：web 或 desktop
+	repo       string // GitHub 仓库，用于版本检查
+	metrics    *metrics.Store
+	alerts     *alert.Engine
+	historyDir string // 访问历史分片目录（检索/导出）
 }
 
 // NewHandler 创建 API 处理器。
@@ -121,6 +123,12 @@ func (h *Handler) WithAlert(engine *alert.Engine) *Handler {
 	return h
 }
 
+// WithHistoryDir 注入访问历史分片目录（检索/导出）
+func (h *Handler) WithHistoryDir(dir string) *Handler {
+	h.historyDir = dir
+	return h
+}
+
 // JWTSecret 返回 JWT 密钥（供 main.go 传递给 Server）
 func (h *Handler) JWTSecret() []byte {
 	return h.jwtSecret
@@ -150,6 +158,8 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/node/status", h.handleNodeStatus)
 	mux.HandleFunc("/node/history", h.handleNodeHistory)
 	mux.HandleFunc("/metrics", h.handleMetrics)
+	mux.HandleFunc("/history/search", h.handleHistorySearch)
+	mux.HandleFunc("/history/export", h.handleHistoryExport)
 	mux.HandleFunc("/alerts/rules", h.handleAlertRules)
 	mux.HandleFunc("/alerts/history", h.handleAlertHistory)
 	mux.HandleFunc("/alerts/webhook", h.handleAlertWebhook)
@@ -870,6 +880,84 @@ func (h *Handler) handleAlertTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 0, "success", true)
+}
+
+// parseHistoryFilter 解析访问历史检索参数
+func parseHistoryFilter(r *http.Request, defaultLimit, maxLimit int) (persist.AccessFilter, error) {
+	q := r.URL.Query()
+	f := persist.AccessFilter{
+		TunnelID: q.Get("tunnel_id"),
+		Result:   q.Get("result"),
+		Limit:    defaultLimit,
+	}
+	var err error
+	if v := q.Get("from"); v != "" {
+		if f.From, err = time.Parse(time.RFC3339, v); err != nil {
+			return f, fmt.Errorf("from 时间格式错误")
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if f.To, err = time.Parse(time.RFC3339, v); err != nil {
+			return f, fmt.Errorf("to 时间格式错误")
+		}
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n > 0 && n <= maxLimit {
+			f.Limit = n
+		}
+	}
+	if v := q.Get("offset"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n > 0 {
+			f.Offset = n
+		}
+	}
+	return f, nil
+}
+
+// handleHistorySearch 检索持久化的访问历史
+func (h *Handler) handleHistorySearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	if h.historyDir == "" {
+		writeJSON(w, 0, "success", []proxy.AccessRecord{})
+		return
+	}
+	f, err := parseHistoryFilter(r, 500, 1000)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	recs, err := persist.SearchAccess(h.historyDir, f)
+	if err != nil {
+		writeError(w, 50002, err.Error())
+		return
+	}
+	writeJSON(w, 0, "success", recs)
+}
+
+// handleHistoryExport 导出访问历史 CSV（JSON 信封返回 CSV 文本，前端触发下载）
+func (h *Handler) handleHistoryExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	if h.historyDir == "" {
+		writeJSON(w, 0, "success", "")
+		return
+	}
+	f, err := parseHistoryFilter(r, 50000, 50000)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	recs, err := persist.SearchAccess(h.historyDir, f)
+	if err != nil {
+		writeError(w, 50002, err.Error())
+		return
+	}
+	writeJSON(w, 0, "success", persist.AccessCSV(recs))
 }
 
 // handleLogs 获取最近日志

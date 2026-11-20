@@ -59,6 +59,10 @@ export function SaveAlertWebhook(arg1:any):Promise<any>;
 
 export function TestAlertWebhook():Promise<any>;
 
+export function SearchAccessHistory(arg1:any):Promise<any>;
+
+export function ExportAccessHistoryCSV(arg1:any):Promise<any>;
+
 export function GetNodeHistory(arg1:string,arg2:number):Promise<any>;
 
 export function GetNodeStatus(arg1:number):Promise<any>;

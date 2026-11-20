@@ -114,6 +114,14 @@ export function TestAlertWebhook() {
   return window['go']['main']['App']['TestAlertWebhook']();
 }
 
+export function SearchAccessHistory(arg1) {
+  return window['go']['main']['App']['SearchAccessHistory'](arg1);
+}
+
+export function ExportAccessHistoryCSV(arg1) {
+  return window['go']['main']['App']['ExportAccessHistoryCSV'](arg1);
+}
+
 export function GetNodeHistory(arg1, arg2) {
   return window['go']['main']['App']['GetNodeHistory'](arg1, arg2);
 }

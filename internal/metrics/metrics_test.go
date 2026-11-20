@@ -84,6 +84,63 @@ func TestQuerySinceBoundary(t *testing.T) {
 	}
 }
 
+// TestSnapshotRestoreRoundtrip 快照导出→恢复后查询结果一致，且旧样本被裁剪
+func TestSnapshotRestoreRoundtrip(t *testing.T) {
+	s := NewStore(time.Hour, 10*time.Second)
+	base := time.Now().Add(-time.Minute)
+	s.Add("t1", base, Raw{TotalConns: 10, BytesSent: 100})
+	s.Add("t1", base.Add(10*time.Second), Raw{TotalConns: 12, BytesSent: 400})
+	s.Add("t1", base.Add(20*time.Second), Raw{TotalConns: 13, BytesSent: 900})
+
+	snap := s.Snapshot()
+	if len(snap["t1"]) != 3 {
+		t.Fatalf("快照样本数 = %d, want 3", len(snap["t1"]))
+	}
+
+	// 恢复到新 store
+	s2 := NewStore(time.Hour, 10*time.Second)
+	s2.RestoreAll(snap)
+	pts := s2.Query("t1", base, 120)
+	if len(pts) != 2 {
+		t.Fatalf("恢复后点数 = %d, want 2", len(pts))
+	}
+	if pts[0].ConnDelta != 2 || pts[0].SentDelta != 300 || pts[1].SentDelta != 500 {
+		t.Errorf("恢复后增量不符: %+v", pts)
+	}
+
+	// 过期序列不导出：清空后写入旧样本
+	old := NewStore(time.Hour, 10*time.Second)
+	old.Add("old", time.Now().Add(-2*time.Hour), Raw{TotalConns: 1})
+	if got := old.Snapshot(); len(got) != 0 {
+		t.Errorf("过期序列不应导出: %d", len(got))
+	}
+}
+
+// TestQueryGapNoSpike 采样间隔过大（重启恢复边界）不产生虚假增量
+func TestQueryGapNoSpike(t *testing.T) {
+	s := NewStore(time.Hour, 10*time.Second)
+	base := time.Now().Add(-time.Hour)
+	s.Add("t1", base, Raw{TotalConns: 100, BytesSent: 1000})
+	s.Add("t1", base.Add(10*time.Second), Raw{TotalConns: 110, BytesSent: 1500})
+	// 重启恢复边界：间隔 1 小时，累计值继续增长
+	s.Add("t1", base.Add(10*time.Second).Add(time.Hour), Raw{TotalConns: 200, BytesSent: 9000})
+	s.Add("t1", base.Add(20*time.Second).Add(time.Hour), Raw{TotalConns: 205, BytesSent: 9500})
+
+	pts := s.Query("t1", base, 120)
+	if len(pts) != 3 {
+		t.Fatalf("点数 = %d, want 3", len(pts))
+	}
+	if pts[0].ConnDelta != 10 || pts[0].SentDelta != 500 {
+		t.Errorf("正常区间增量不符: %+v", pts[0])
+	}
+	if pts[1].ConnDelta != 0 || pts[1].SentDelta != 0 {
+		t.Errorf("间隙点增量应为 0: %+v", pts[1])
+	}
+	if pts[2].ConnDelta != 5 || pts[2].SentDelta != 500 {
+		t.Errorf("恢复后增量不符: %+v", pts[2])
+	}
+}
+
 func TestParseRange(t *testing.T) {
 	cases := map[string]time.Duration{
 		"1h":  time.Hour,

@@ -172,6 +172,30 @@ func TestApplyZeroCooldownNotifyOnce(t *testing.T) {
 	}
 }
 
+// TestHistorySinkRestore 告警历史持久化钩子与恢复
+func TestHistorySinkRestore(t *testing.T) {
+	e := newTestEngine(t)
+	var sunk []History
+	e.SetHistorySink(func(h History) { sunk = append(sunk, h) })
+
+	rule := Rule{ID: "r9", Name: "测试", Type: TypeConnThreshold, Threshold: 1}
+	now := time.Now()
+	e.mu.Lock()
+	e.states[rule.ID] = &ruleState{}
+	e.mu.Unlock()
+	e.apply(rule, true, 5, now)
+	if len(sunk) != 1 || sunk[0].Status != StatusFiring {
+		t.Fatalf("触发应调用持久化钩子: %+v", sunk)
+	}
+
+	// 恢复（升序）
+	e.RestoreHistory([]History{{RuleID: "old", Status: StatusFiring}})
+	hist := e.History(10)
+	if len(hist) != 2 || hist[0].RuleID != "old" {
+		t.Errorf("恢复后历史不符: %+v", hist)
+	}
+}
+
 func TestPersistReload(t *testing.T) {
 	dir := t.TempDir()
 	e, err := New(nil, dir, nil, nil, nil)

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -10,24 +13,46 @@ import (
 	"sshtunnel/internal/config"
 	"sshtunnel/internal/logger"
 	"sshtunnel/internal/metrics"
+	"sshtunnel/internal/persist"
 	"sshtunnel/internal/port"
 	"sshtunnel/internal/proxy"
 	"sshtunnel/internal/tunnel"
 )
 
+// 持久化参数
+const (
+	historyRetention = 30 * 24 * time.Hour // 访问/告警历史分片保留时长
+	metricsSnapEvery = 5 * time.Minute     // 指标快照周期
+	exportMaxRecords = 50000               // 单次导出上限
+)
+
 // App Wails 应用绑定层
 type App struct {
-	ctx       context.Context
-	initOnce  sync.Once
-	initErr   error
-	logger    *logger.Logger
-	cfgMgr    *config.Manager
-	tunnelMgr *tunnel.Manager
-	metrics   *metrics.Store
-	alerts    *alert.Engine
-	version   string
-	runCtx    context.Context    // 后台采样上下文
-	runStop   context.CancelFunc // 停止后台采样
+	ctx         context.Context
+	initOnce    sync.Once
+	initErr     error
+	logger      *logger.Logger
+	cfgMgr      *config.Manager
+	tunnelMgr   *tunnel.Manager
+	metrics     *metrics.Store
+	alerts      *alert.Engine
+	version     string
+	runCtx      context.Context    // 后台采样上下文
+	runStop     context.CancelFunc // 停止后台采样
+	historyDir  string             // 访问/告警历史分片目录
+	metricsPath string             // 指标快照文件
+	accessW     *persist.Writer
+	alertW      *persist.Writer
+}
+
+// AccessHistoryQuery 访问历史检索参数（桌面端绑定）
+type AccessHistoryQuery struct {
+	TunnelID string `json:"tunnel_id"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Result   string `json:"result"`
+	Limit    int    `json:"limit"`
+	Offset   int    `json:"offset"`
 }
 
 // NewApp 创建应用实例
@@ -86,6 +111,13 @@ func (a *App) init() error {
 		return fmt.Errorf("初始化告警引擎失败: %w", err)
 	}
 
+	// 持久化：访问/告警历史 JSONL 分片（30 天保留）与指标快照
+	a.historyDir = filepath.Join(alertDir, "history")
+	a.accessW = persist.NewWriter(a.historyDir, "access-", historyRetention)
+	a.alertW = persist.NewWriter(a.historyDir, "alerthist-", historyRetention)
+	a.metricsPath = filepath.Join(alertDir, "metrics-snapshot.json")
+	a.restorePersistence()
+
 	// 启动已勾选「开机启动」的隧道（异步执行，避免阻塞界面/服务启动）
 	go a.startAutoStartTunnels()
 
@@ -93,13 +125,87 @@ func (a *App) init() error {
 	return nil
 }
 
-// Close 停止后台采样与告警循环（进程退出前调用）
+// reverseToAsc 将降序切片反转为升序
+func reverseToAsc[T any](desc []T) []T {
+	asc := make([]T, len(desc))
+	for i, v := range desc {
+		asc[len(desc)-1-i] = v
+	}
+	return asc
+}
+
+// restorePersistence 从分片与快照恢复访问历史、告警历史与趋势数据
+func (a *App) restorePersistence() {
+	// 访问历史：恢复最近 2000 条（内存环形容量）
+	if recs, err := persist.ReadJSONLDesc[proxy.AccessRecord](a.historyDir, "access-", 2000); err != nil {
+		a.logger.Warnf("访问历史恢复失败: %v", err)
+	} else if len(recs) > 0 {
+		a.tunnelMgr.RestoreHistory(reverseToAsc(recs))
+		a.logger.Infof("已恢复访问历史 %d 条", len(recs))
+	}
+	a.tunnelMgr.SetHistorySink(func(r proxy.AccessRecord) { a.accessW.Enqueue(r) })
+
+	// 告警历史：恢复最近 200 条
+	if recs, err := persist.ReadJSONLDesc[alert.History](a.historyDir, "alerthist-", 200); err != nil {
+		a.logger.Warnf("告警历史恢复失败: %v", err)
+	} else if len(recs) > 0 {
+		a.alerts.RestoreHistory(reverseToAsc(recs))
+		a.logger.Infof("已恢复告警历史 %d 条", len(recs))
+	}
+	a.alerts.SetHistorySink(func(h alert.History) { a.alertW.Enqueue(h) })
+
+	// 指标快照：恢复 24h 趋势
+	if b, err := os.ReadFile(a.metricsPath); err == nil {
+		var snap struct {
+			Series map[string][]metrics.Sample `json:"series"`
+		}
+		if err := json.Unmarshal(b, &snap); err == nil && len(snap.Series) > 0 {
+			a.metrics.RestoreAll(snap.Series)
+			a.logger.Infof("已恢复指标快照（%d 个序列）", len(snap.Series))
+		}
+	}
+	go a.metricsSnapshotLoop()
+}
+
+// metricsSnapshotLoop 周期将指标采样写入快照文件（原子写，0600）
+func (a *App) metricsSnapshotLoop() {
+	ticker := time.NewTicker(metricsSnapEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.runCtx.Done():
+			return
+		case <-ticker.C:
+			if a.metrics == nil {
+				return
+			}
+			b, err := json.Marshal(map[string]any{
+				"saved_at": time.Now().UTC().Format(time.RFC3339),
+				"series":   a.metrics.Snapshot(),
+			})
+			if err != nil {
+				continue
+			}
+			if err := persist.WriteFileAtomic(a.metricsPath, b); err != nil && a.logger != nil {
+				a.logger.Warnf("指标快照写入失败: %v", err)
+			}
+		}
+	}
+}
+
+// Close 停止后台采样、告警循环与持久化写入器（进程退出前调用）
 func (a *App) Close() {
 	if a.runStop != nil {
 		a.runStop()
 	}
 	if a.alerts != nil {
 		a.alerts.Close()
+	}
+	if a.accessW != nil {
+		a.accessW.Close()
+	}
+	if a.alertW != nil {
+		a.alertW.Close()
 	}
 }
 
@@ -202,6 +308,57 @@ func (a *App) TestAlertWebhook() error {
 		return fmt.Errorf("告警引擎未初始化")
 	}
 	return a.alerts.TestWebhook()
+}
+
+// parseQuery 将检索参数转换为过滤器
+func parseQuery(q AccessHistoryQuery) (persist.AccessFilter, error) {
+	f := persist.AccessFilter{
+		TunnelID: q.TunnelID,
+		Result:   q.Result,
+		Limit:    q.Limit,
+		Offset:   q.Offset,
+	}
+	var err error
+	if q.From != "" {
+		if f.From, err = time.Parse(time.RFC3339, q.From); err != nil {
+			return f, fmt.Errorf("from 时间格式错误")
+		}
+	}
+	if q.To != "" {
+		if f.To, err = time.Parse(time.RFC3339, q.To); err != nil {
+			return f, fmt.Errorf("to 时间格式错误")
+		}
+	}
+	return f, nil
+}
+
+// SearchAccessHistory 检索持久化的访问历史（时间倒序）
+func (a *App) SearchAccessHistory(q AccessHistoryQuery) ([]proxy.AccessRecord, error) {
+	if q.Limit <= 0 {
+		q.Limit = 500
+	}
+	if q.Limit > 1000 {
+		q.Limit = 1000
+	}
+	f, err := parseQuery(q)
+	if err != nil {
+		return nil, err
+	}
+	return persist.SearchAccess(a.historyDir, f)
+}
+
+// ExportAccessHistoryCSV 导出访问历史 CSV 文本（新→旧，上限 50000 条）
+func (a *App) ExportAccessHistoryCSV(q AccessHistoryQuery) (string, error) {
+	q.Limit = exportMaxRecords
+	f, err := parseQuery(q)
+	if err != nil {
+		return "", err
+	}
+	recs, err := persist.SearchAccess(a.historyDir, f)
+	if err != nil {
+		return "", err
+	}
+	return persist.AccessCSV(recs), nil
 }
 
 // startAutoStartTunnels 启动所有标记为开机启动的隧道

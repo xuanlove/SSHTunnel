@@ -347,6 +347,45 @@ export async function getNodeHistory(tunnelID: string, limit = 500): Promise<Acc
   return httpGet<AccessRecord[]>(`/api/node/history?tunnel_id=${encodeURIComponent(tunnelID)}&limit=${limit}`)
 }
 
+// ===== 访问历史持久化检索与导出 =====
+export interface AccessHistoryQuery {
+  tunnel_id?: string
+  from?: string // RFC3339，空表示不限
+  to?: string
+  result?: '' | 'success' | 'failed' | 'denied'
+  limit?: number
+  offset?: number
+}
+
+// 检索持久化的访问历史（时间倒序，覆盖重启前的分片数据）
+export async function searchAccessHistory(q: AccessHistoryQuery): Promise<AccessRecord[]> {
+  if (!isWeb) {
+    return App.SearchAccessHistory(q) as unknown as Promise<AccessRecord[]>
+  }
+  const p = new URLSearchParams()
+  if (q.tunnel_id) p.set('tunnel_id', q.tunnel_id)
+  if (q.from) p.set('from', q.from)
+  if (q.to) p.set('to', q.to)
+  if (q.result) p.set('result', q.result)
+  p.set('limit', String(q.limit ?? 500))
+  if (q.offset) p.set('offset', String(q.offset))
+  return httpGet<AccessRecord[]>(`/api/history/search?${p.toString()}`)
+}
+
+// 导出访问历史 CSV 文本（上限 50000 条）
+export async function exportAccessHistoryCSV(q: AccessHistoryQuery): Promise<string> {
+  if (!isWeb) {
+    return App.ExportAccessHistoryCSV(q) as unknown as Promise<string>
+  }
+  const p = new URLSearchParams()
+  if (q.tunnel_id) p.set('tunnel_id', q.tunnel_id)
+  if (q.from) p.set('from', q.from)
+  if (q.to) p.set('to', q.to)
+  if (q.result) p.set('result', q.result)
+  p.set('limit', '50000')
+  return httpGet<string>(`/api/history/export?${p.toString()}`)
+}
+
 // ===== 趋势指标与告警 =====
 export interface MetricPoint {
   time: string

@@ -158,11 +158,18 @@ func (s *Store) Query(key string, since time.Time, maxPoints int) []Point {
 	pts := make([]deltaPoint, 0, len(samples))
 	for i := start + 1; i < len(samples); i++ {
 		prev, cur := samples[i-1], samples[i]
+		var conn, sent, recv int64
+		// 间隔过大（重启恢复/采样空洞）不计增量，避免出现虚假流量尖峰
+		if cur.Time.Sub(prev.Time) <= 3*s.interval {
+			conn = clampDelta(cur.TotalConns - prev.TotalConns)
+			sent = clampDelta(cur.BytesSent - prev.BytesSent)
+			recv = clampDelta(cur.BytesRecv - prev.BytesRecv)
+		}
 		pts = append(pts, deltaPoint{
 			sample: cur,
-			conn:   clampDelta(cur.TotalConns - prev.TotalConns),
-			sent:   clampDelta(cur.BytesSent - prev.BytesSent),
-			recv:   clampDelta(cur.BytesRecv - prev.BytesRecv),
+			conn:   conn,
+			sent:   sent,
+			recv:   recv,
 		})
 	}
 	if len(pts) == 0 {
@@ -214,6 +221,56 @@ func clampDelta(v int64) int64 {
 		return 0
 	}
 	return v
+}
+
+// retentionHorizon 返回保留期时长
+func (s *Store) retentionHorizon() time.Duration {
+	return s.interval * time.Duration(s.capacity)
+}
+
+// Snapshot 导出各序列的累计值样本（时间升序）。
+// 已过期（最新样本超出保留期）的序列不导出，避免快照累积已删除隧道的残留数据。
+func (s *Store) Snapshot() map[string][]Sample {
+	cutoff := time.Now().Add(-s.retentionHorizon())
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string][]Sample, len(s.series))
+	for key, r := range s.series {
+		if len(r.buf) == 0 {
+			continue
+		}
+		samples := make([]Sample, len(r.buf))
+		copy(samples, r.buf)
+		sort.Slice(samples, func(i, j int) bool { return samples[i].Time.Before(samples[j].Time) })
+		if samples[len(samples)-1].Time.Before(cutoff) {
+			continue
+		}
+		out[key] = samples
+	}
+	return out
+}
+
+// RestoreAll 恢复持久化的样本（保留期内）；与后续实时采样自然衔接
+func (s *Store) RestoreAll(series map[string][]Sample) {
+	if len(series) == 0 {
+		return
+	}
+	cutoff := time.Now().Add(-s.retentionHorizon())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, samples := range series {
+		r := s.series[key]
+		if r == nil {
+			r = &ring{buf: make([]Sample, 0, s.capacity)}
+			s.series[key] = r
+		}
+		for _, sm := range samples {
+			if sm.Time.Before(cutoff) {
+				continue
+			}
+			r.push(sm)
+		}
+	}
 }
 
 // ParseRange 将范围键（1h/6h/24h）解析为时长

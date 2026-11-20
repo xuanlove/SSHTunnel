@@ -363,6 +363,20 @@ type NodeStatus struct {
 	AccessHistory []proxy.AccessRecord `json:"access_history"`
 }
 
+// SetHistorySink 设置访问历史持久化钩子（每条新记录触发一次）
+func (m *Manager) SetHistorySink(fn func(proxy.AccessRecord)) {
+	if m.history != nil {
+		m.history.SetSink(fn)
+	}
+}
+
+// RestoreHistory 恢复访问历史（升序传入，不触发持久化钩子）
+func (m *Manager) RestoreHistory(recs []proxy.AccessRecord) {
+	if m.history != nil {
+		m.history.Restore(recs)
+	}
+}
+
 // NodeHistory 返回指定隧道最近的访问历史（时间倒序）
 func (m *Manager) NodeHistory(tunnelID string, limit int) []proxy.AccessRecord {
 	if tunnelID == "" {

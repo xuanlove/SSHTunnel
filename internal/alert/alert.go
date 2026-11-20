@@ -72,22 +72,23 @@ type ruleState struct {
 
 // Engine 告警引擎
 type Engine struct {
-	mu         sync.Mutex
-	ctx        context.Context
-	cancel     context.CancelFunc
-	mgr        *tunnel.Manager
-	store      *fileStore
-	log        *logger.Logger
-	metrics    *metrics.Store
-	nameOf     func(string) string
-	http       *http.Client
-	rules      []Rule
-	webhook    Webhook
-	hist       []History
-	states     map[string]*ruleState
-	errorSince map[string]time.Time
-	listeners  []func(History)
-	notifyCh   chan Notification
+	mu          sync.Mutex
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mgr         *tunnel.Manager
+	store       *fileStore
+	log         *logger.Logger
+	metrics     *metrics.Store
+	nameOf      func(string) string
+	http        *http.Client
+	rules       []Rule
+	webhook     Webhook
+	hist        []History
+	historySink func(History) // 持久化钩子（nil 表示不落盘）
+	states      map[string]*ruleState
+	errorSince  map[string]time.Time
+	listeners   []func(History)
+	notifyCh    chan Notification
 }
 
 // New 创建告警引擎并启动评估与通知循环
@@ -278,9 +279,13 @@ func (e *Engine) fire(r Rule, value int64, status string) {
 		e.hist = e.hist[len(e.hist)-historyCapacity:]
 	}
 	listeners := append([]func(History){}, e.listeners...)
+	sink := e.historySink
 	e.mu.Unlock()
 	for _, fn := range listeners {
 		fn(h)
+	}
+	if sink != nil {
+		sink(h)
 	}
 	select {
 	case e.notifyCh <- Notification{History: h, Rule: r}:
@@ -312,6 +317,23 @@ func (e *Engine) Close() {
 	if e.cancel != nil {
 		e.cancel()
 	}
+}
+
+// SetHistorySink 设置告警历史持久化钩子（每条触发/恢复记录调用一次）
+func (e *Engine) SetHistorySink(fn func(History)) {
+	e.mu.Lock()
+	e.historySink = fn
+	e.mu.Unlock()
+}
+
+// RestoreHistory 恢复告警历史（升序传入，保留最近 historyCapacity 条）
+func (e *Engine) RestoreHistory(recs []History) {
+	e.mu.Lock()
+	e.hist = append(e.hist, recs...)
+	if len(e.hist) > historyCapacity {
+		e.hist = e.hist[len(e.hist)-historyCapacity:]
+	}
+	e.mu.Unlock()
 }
 
 // History 返回最近的告警历史（时间倒序）

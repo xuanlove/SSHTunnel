@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import * as api from '@/api'
 import type { AccessRecord, ConnSnapshot, NodeStatus, TunnelTraffic } from '@/types'
 import type { AlertHistory, MetricPoint } from '@/api'
@@ -118,6 +119,9 @@ const drawerOpen = ref(false)
 const detailTab = ref<'conns' | 'history' | 'trend'>('conns')
 const nodeHistory = ref<AccessRecord[]>([])
 const nodeHistoryLoading = ref(false)
+const histRange = ref<'1h' | '6h' | '24h' | '7d' | ''>('24h')
+const histResult = ref<'' | 'success' | 'failed' | 'denied'>('')
+const histExporting = ref(false)
 const trendRange = ref('1h')
 const trendPoints = ref<MetricPoint[]>([])
 const trendLoading = ref(false)
@@ -131,13 +135,30 @@ const nodeConnections = computed<ConnSnapshot[]>(() => {
   return connections.value.filter(c => c.tunnel_id === activeNodeId.value)
 })
 
+// histFromISO 将时间范围选择转换为 RFC3339 起点
+function histFromISO(): string {
+  const durs: Record<string, number> = {
+    '1h': 3600e3,
+    '6h': 21600e3,
+    '24h': 86400e3,
+    '7d': 604800e3,
+  }
+  const d = durs[histRange.value]
+  return d ? new Date(Date.now() - d).toISOString() : ''
+}
+
 async function loadNodeHistory() {
   const id = activeNodeId.value
   if (!id) return
   nodeHistoryLoading.value = true
   try {
-    const recs = await api.getNodeHistory(id, 500)
-    // 节点可能已切换，仅应用当前节点的结果
+    // 持久化检索：覆盖重启前的分片数据，支持时间/结果过滤
+    const recs = await api.searchAccessHistory({
+      tunnel_id: id,
+      from: histFromISO(),
+      result: histResult.value || '',
+      limit: 500,
+    })
     if (id === activeNodeId.value) nodeHistory.value = recs
   } catch {
     // 保留上次数据
@@ -146,10 +167,45 @@ async function loadNodeHistory() {
   }
 }
 
+watch([histRange, histResult], () => {
+  if (drawerOpen.value) void loadNodeHistory()
+})
+
+function downloadCSV(csv: string) {
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const aEl = document.createElement('a')
+  aEl.href = url
+  aEl.download = `access-history-${new Date().toISOString().slice(0, 10)}.csv`
+  aEl.click()
+  URL.revokeObjectURL(url)
+}
+
+async function handleExportHistory() {
+  const id = activeNodeId.value
+  if (!id) return
+  histExporting.value = true
+  try {
+    const csv = await api.exportAccessHistoryCSV({
+      tunnel_id: id,
+      from: histFromISO(),
+      result: histResult.value || '',
+    })
+    downloadCSV(csv)
+    ElMessage.success('已导出 CSV')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '导出失败')
+  } finally {
+    histExporting.value = false
+  }
+}
+
 function openNode(node: TunnelTraffic) {
   activeNodeId.value = node.id
   nodeHistory.value = []
   trendPoints.value = []
+  histRange.value = '24h'
+  histResult.value = ''
   detailTab.value = 'conns'
   drawerOpen.value = true
   void loadNodeHistory()
@@ -328,6 +384,25 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
           </el-tab-pane>
 
           <el-tab-pane :label="`访问历史 (${nodeHistory.length})`" name="history">
+            <div class="history-controls">
+              <el-select v-model="histRange" size="small" style="width: 110px">
+                <el-option label="近 1 小时" value="1h" />
+                <el-option label="近 6 小时" value="6h" />
+                <el-option label="近 24 小时" value="24h" />
+                <el-option label="近 7 天" value="7d" />
+                <el-option label="全部" value="" />
+              </el-select>
+              <el-select v-model="histResult" size="small" style="width: 100px">
+                <el-option label="全部结果" value="" />
+                <el-option label="成功" value="success" />
+                <el-option label="失败" value="failed" />
+                <el-option label="拒绝" value="denied" />
+              </el-select>
+              <el-button size="small" :loading="histExporting" @click="handleExportHistory">
+                导出 CSV
+              </el-button>
+              <span class="history-note">持久化保存 30 天，重启后仍可检索</span>
+            </div>
             <el-table
               :data="nodeHistory"
               size="small"
@@ -537,6 +612,17 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
 }
 .trend-controls {
   margin-bottom: 10px;
+}
+.history-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.history-note {
+  font-size: 12px;
+  color: #6d717a;
 }
 .alert-banner {
   border-radius: 6px;
