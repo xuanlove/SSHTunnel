@@ -119,4 +119,10 @@ describe('rangeToFromISO', () => {
     expect(rangeToFromISO('', NOW)).toBe('')
     expect(rangeToFromISO('99h', NOW)).toBe('')
   })
+
+  it('原型链键不得被当作有效档位（不得抛异常）', () => {
+    expect(rangeToFromISO('constructor', NOW)).toBe('')
+    expect(rangeToFromISO('toString', NOW)).toBe('')
+    expect(rangeToFromISO('__proto__', NOW)).toBe('')
+  })
 })

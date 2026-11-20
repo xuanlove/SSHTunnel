@@ -51,7 +51,9 @@ export function formatElapsed(startedAt?: string, nowMs = Date.now()): string {
   return h > 0 ? `${h}:${p(m)}:${p(sec)}` : `${m}:${p(sec)}`
 }
 
-// 时间范围选择（1h/6h/24h/7d）转换为 RFC3339 起点；空或未知范围返回空串
+// 时间范围选择（1h/6h/24h/7d）转换为 RFC3339 起点；空或未知范围返回空串。
+// 使用 hasOwnProperty 校验：避免 constructor/toString 等原型链键被当作有效档位，
+// 进而用函数参与减法得到 NaN 并在 toISOString 处抛 RangeError。
 export function rangeToFromISO(range: string, nowMs = Date.now()): string {
   const durs: Record<string, number> = {
     '1h': 3600e3,
@@ -59,6 +61,6 @@ export function rangeToFromISO(range: string, nowMs = Date.now()): string {
     '24h': 86400e3,
     '7d': 604800e3,
   }
-  const d = durs[range]
+  const d = Object.prototype.hasOwnProperty.call(durs, range) ? durs[range] : 0
   return d ? new Date(nowMs - d).toISOString() : ''
 }

@@ -260,7 +260,7 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
       <div class="actions">
         <span class="updated" v-if="lastUpdated">{{ formatTime(lastUpdated) }} 更新</span>
         <el-switch v-model="autoRefresh" active-text="自动刷新" @change="restartTimer" />
-        <el-button :loading="loading" @click="load">刷新</el-button>
+        <el-button :loading="loading" data-testid="status-refresh" @click="load">刷新</el-button>
       </div>
     </div>
 
@@ -391,7 +391,7 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
                 <el-option label="失败" value="failed" />
                 <el-option label="拒绝" value="denied" />
               </el-select>
-              <el-button size="small" :loading="histExporting" @click="handleExportHistory">
+              <el-button size="small" :loading="histExporting" data-testid="history-export" @click="handleExportHistory">
                 导出 CSV
               </el-button>
               <span class="history-note">持久化保存 30 天，重启后仍可检索</span>

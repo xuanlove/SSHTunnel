@@ -29,3 +29,6 @@ build/bin/
 
 # 前端依赖（不纳入版本控制）
 frontend/node_modules/
+
+# 前端测试覆盖率报告
+frontend/coverage/

@@ -127,19 +127,89 @@ describe('Status 视图', () => {
     const w = mountStatus()
     await flushPromises()
     vi.mocked(api.searchAccessHistory).mockClear()
+    const before = Date.now()
     await w.findAll('.node-card')[0].trigger('click')
     await flushPromises()
+    const after = Date.now()
     expect(api.searchAccessHistory).toHaveBeenCalledTimes(1)
     const q = vi.mocked(api.searchAccessHistory).mock.calls[0][0]
     expect(q.tunnel_id).toBe('t1')
     expect(q.result).toBe('')
     expect(q.limit).toBe(500)
-    // 默认范围 24h：from 距今约 86400 秒（允许 2s 误差）
-    const ageMs = Date.now() - Date.parse(q.from!)
-    expect(ageMs).toBeGreaterThan(86400e3 - 2000)
-    expect(ageMs).toBeLessThan(86400e3 + 2000)
+    // from 应精确等于「点击时刻 - 24h」，用调用前后时间戳夹逼，避免时延导致假失败
+    const from = Date.parse(q.from!)
+    expect(from).toBeGreaterThanOrEqual(before - 86400e3)
+    expect(from).toBeLessThanOrEqual(after - 86400e3)
     // Teleport 被 VTU stub 在组件树内，抽屉内容渲染于 wrapper 中
     expect(w.text()).toContain('节点：demo-1')
+  })
+
+  it('节点卡片支持键盘 Enter 打开抽屉', async () => {
+    const w = mountStatus()
+    await flushPromises()
+    vi.mocked(api.searchAccessHistory).mockClear()
+    await w.findAll('.node-card')[0].trigger('keydown.enter')
+    await flushPromises()
+    expect(w.text()).toContain('节点：demo-1')
+    expect(api.searchAccessHistory).toHaveBeenCalledWith(expect.objectContaining({ tunnel_id: 't1' }))
+  })
+
+  it('切换访问历史时间范围后按新范围重新检索', async () => {
+    const w = mountStatus()
+    await flushPromises()
+    await w.findAll('.node-card')[0].trigger('click')
+    await flushPromises()
+    vi.mocked(api.searchAccessHistory).mockClear()
+    const selects = w.findAllComponents({ name: 'ElSelect' })
+    expect(selects.length).toBeGreaterThanOrEqual(2)
+    selects[0].vm.$emit('update:modelValue', '1h')
+    await flushPromises()
+    expect(api.searchAccessHistory).toHaveBeenCalledTimes(1)
+    const q = vi.mocked(api.searchAccessHistory).mock.calls[0][0]
+    const age = Date.now() - Date.parse(q.from!)
+    expect(age).toBeGreaterThan(3600e3 - 5000)
+    expect(age).toBeLessThan(3600e3 + 5000)
+  })
+
+  it('导出 CSV 调用导出接口并触发浏览器下载', async () => {
+    const w = mountStatus()
+    await flushPromises()
+    await w.findAll('.node-card')[0].trigger('click')
+    await flushPromises()
+
+    const createObjectURL = vi.fn(() => 'blob:mock')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true, writable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true, writable: true })
+    let downloadName = ''
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloadName = this.download
+    })
+
+    try {
+      await w.find('[data-testid="history-export"]').trigger('click')
+      await flushPromises()
+      expect(api.exportAccessHistoryCSV).toHaveBeenCalledWith(
+        expect.objectContaining({ tunnel_id: 't1', result: '' }),
+      )
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(downloadName).toMatch(/^access-history-\d{4}-\d{2}-\d{2}\.csv$/)
+      expect(revokeObjectURL).toHaveBeenCalledTimes(1)
+    } finally {
+      clickSpy.mockRestore()
+    }
+  })
+
+  it('切换到趋势标签后按默认 1h 加载该节点指标', async () => {
+    const w = mountStatus()
+    await flushPromises()
+    await w.findAll('.node-card')[0].trigger('click')
+    await flushPromises()
+    const trendTab = w.findAll('.el-tabs__item').find(t => t.text().includes('趋势'))
+    expect(trendTab).toBeTruthy()
+    await trendTab!.trigger('click')
+    await flushPromises()
+    expect(api.getMetrics).toHaveBeenCalledWith('1h', 't1')
   })
 
   it('节点数据刷新时若该节点已被删除则关闭抽屉', async () => {
@@ -152,9 +222,9 @@ describe('Status 视图', () => {
     vi.mocked(api.getNodeStatus).mockResolvedValue(makeStatus({
       tunnels: [makeStatus().tunnels[0]],
     }))
-    const refreshBtn = w.findAll('button').find(b => b.text() === '刷新')
-    expect(refreshBtn).toBeTruthy()
-    await refreshBtn!.trigger('click')
+    const refreshBtn = w.find('[data-testid="status-refresh"]')
+    expect(refreshBtn.exists()).toBe(true)
+    await refreshBtn.trigger('click')
     await flushPromises()
     expect(w.text()).not.toContain('节点：demo-2')
     expect(w.text()).toContain('节点详情')

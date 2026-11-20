@@ -861,13 +861,13 @@ go test ./internal/tunnel/...
 ```bash
 cd frontend
 
-# 单次运行（CI 使用）
+# 单次运行
 npm test
 
 # 监听模式
 npm run test:watch
 
-# 覆盖率报告
+# 覆盖率报告（CI 使用；对 utils/api/TrendChart 设阈值，未达标即失败）
 npm run test:coverage
 ```
 

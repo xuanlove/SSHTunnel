@@ -136,7 +136,70 @@ describe('api · web 模式（无 window.go，走 HTTP）', () => {
     expect(location.hash).toBe('#/login')
   })
 
-  it('仅 WEB 模式的接口在 desktop 模式抛错（反向：此处 isWeb 时正常走 HTTP）', async () => {
+  it('checkAuthStatus 请求公开鉴权状态端点', async () => {
+    const api = await loadApi()
+    const fetchMock = stubFetch(() => jsonRes({ code: 0, data: { auth_enabled: true, tls_enabled: false } }))
+    expect(await api.checkAuthStatus()).toEqual({ auth_enabled: true, tls_enabled: false })
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/auth/status')
+  })
+
+  it('saveConfig 新建走 POST、编辑走 PUT', async () => {
+    const api = await loadApi()
+    const fetchMock = stubFetch(() => jsonRes({ code: 0, data: { id: 't1' } }))
+    await api.saveConfig({ id: '', name: 'demo' } as any)
+    await api.saveConfig({ id: 't1', name: 'demo' } as any)
+    const [createPath, createInit] = fetchMock.mock.calls[0]
+    expect(createPath).toBe('/api/configs')
+    expect(createInit!.method).toBe('POST')
+    expect(JSON.parse(String(createInit!.body))).toEqual({ id: '', name: 'demo' })
+    const [updatePath, updateInit] = fetchMock.mock.calls[1]
+    expect(updatePath).toBe('/api/configs/t1')
+    expect(updateInit!.method).toBe('PUT')
+  })
+
+  it('httpPost 遇到 401 同样清除 token 并跳登录', async () => {
+    const api = await loadApi()
+    api.setToken('stale')
+    stubFetch(() => jsonRes({}, 401))
+    await expect(api.startTunnel('t1')).rejects.toThrow('未授权')
+    expect(api.getToken()).toBeNull()
+    expect(location.hash).toBe('#/login')
+  })
+
+  it('httpDelete 成功调用删除端点', async () => {
+    const api = await loadApi()
+    const fetchMock = stubFetch(() => jsonRes({ code: 0, data: null }))
+    await api.deleteConfig('t1')
+    const [path, init] = fetchMock.mock.calls[0]
+    expect(path).toBe('/api/configs/t1')
+    expect(init!.method).toBe('DELETE')
+  })
+
+  it('updateWebAuthSettings 开启后自动保存返回的 token', async () => {
+    const api = await loadApi()
+    stubFetch(() => jsonRes({ code: 0, data: { enabled: true, username: 'u', token: 'tk-9' } }))
+    const st = await api.updateWebAuthSettings({ enabled: true, username: 'u', password: 'p' })
+    expect(st).toEqual({ enabled: true, username: 'u' })
+    expect(api.getToken()).toBe('tk-9')
+    expect(localStorage.getItem('sshtunnel_token')).toBe('tk-9')
+  })
+
+  it('updateWebAuthSettings 关闭后清除 token', async () => {
+    const api = await loadApi()
+    api.setToken('tk-old')
+    stubFetch(() => jsonRes({ code: 0, data: { enabled: false, username: '' } }))
+    await api.updateWebAuthSettings({ enabled: false, username: '', password: '' })
+    expect(api.getToken()).toBeNull()
+    expect(localStorage.getItem('sshtunnel_token')).toBeNull()
+  })
+
+  it('geoIPAvailable 请求失败时降级为 false', async () => {
+    const api = await loadApi()
+    stubFetch(() => { throw new Error('network down') })
+    expect(await api.geoIPAvailable()).toBe(false)
+  })
+
+  it('getWebAuthSettings 在 web 模式走 HTTP', async () => {
     const api = await loadApi()
     stubFetch(() => jsonRes({ code: 0, data: { enabled: true, username: 'u' } }))
     const st = await api.getWebAuthSettings()
@@ -195,5 +258,37 @@ describe('api · desktop 模式（window.go 注入，走 Wails 绑定）', () =>
     const api = await loadApi()
     expect(await api.testAlertWebhook()).toBe(true)
     expect(TestAlertWebhook).toHaveBeenCalledTimes(1)
+  })
+
+  it('checkAuthStatus 桌面端直接返回关闭状态且不发请求', async () => {
+    stubGoApp({})
+    const fetchMock = stubFetch(() => jsonRes({ code: 0, data: {} }))
+    const api = await loadApi()
+    expect(await api.checkAuthStatus()).toEqual({ auth_enabled: false, tls_enabled: false })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('onTunnelStatus 桌面端经 EventsOnMultiple 订阅 tunnel:status', async () => {
+    stubGoApp({})
+    let registered: ((data: any) => void) | null = null
+    ;(window as any).runtime = {
+      EventsOnMultiple: vi.fn((name: string, cb: (d: any) => void) => {
+        if (name === 'tunnel:status') registered = cb
+        return () => {}
+      }),
+    }
+    const api = await loadApi()
+    const cb = vi.fn()
+    api.onTunnelStatus(cb)
+    expect(registered).toBeTruthy()
+    registered!({ tunnel_id: 't1', status: 'running' })
+    expect(cb).toHaveBeenCalledWith({ tunnel_id: 't1', status: 'running' })
+  })
+
+  it('仅 WEB 模式的接口在 desktop 模式抛错', async () => {
+    stubGoApp({})
+    const api = await loadApi()
+    await expect(api.getWebTLSSettings()).rejects.toThrow('仅 WEB 模式支持面板 HTTPS 设置')
+    await expect(api.regenerateDeployToken()).rejects.toThrow('仅 WEB 模式支持部署令牌')
   })
 })

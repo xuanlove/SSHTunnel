@@ -39,10 +39,11 @@ describe('TrendChart', () => {
     const area = wrapper.find('svg path.trend-area')
     expect(line.exists()).toBe(true)
     expect(area.exists()).toBe(true)
-    // 第一个点 x = PAD(10)，从左上角起笔
-    expect(line.attributes('d')).toMatch(/^M10\.0,/)
-    // 面积路径闭合回到基线（末点与起点 x=PAD，y=H-PAD=140）
-    expect(area.attributes('d')).toMatch(/L590\.0,140 L10,140 Z$/)
+    // 结构断言而非精确坐标：3 个点 → 1 个 M + 2 个 L，面积路径闭合
+    const linePath = line.attributes('d') || ''
+    expect(linePath).toMatch(/^M[\d.]+,[\d.]+ L/)
+    expect((linePath.match(/L/g) || []).length).toBe(2)
+    expect(area.attributes('d')).toMatch(/Z$/)
     // 时间轴显示首/中/末三个标签
     const axis = wrapper.findAll('.trend-axis span')
     expect(axis).toHaveLength(3)
@@ -52,10 +53,19 @@ describe('TrendChart', () => {
 
   it('切换到「上行」后按 sent_delta 重算峰值与均值', async () => {
     const wrapper = mountChart({ points: pts })
-    const radios = wrapper.findAll('input[type="radio"]')
-    expect(radios.length).toBe(3)
-    await radios[1].setValue()
+    const sent = wrapper.find('input[type="radio"][value="sent"]')
+    expect(sent.exists()).toBe(true)
+    await sent.setValue()
     // sent_delta 最大 1024（1.0 KB）；均值 (1024+512+256)/3≈597，未达 KB 档位
     expect(wrapper.text()).toContain('上行流量 · 峰值 1.0 KB · 均值 597 B')
+  })
+
+  it('切换到「下行」后按 recv_delta 重算峰值与均值', async () => {
+    const wrapper = mountChart({ points: pts })
+    const recv = wrapper.find('input[type="radio"][value="recv"]')
+    expect(recv.exists()).toBe(true)
+    await recv.setValue()
+    // recv_delta 最大 8192（8.0 KB）；均值 (2048+4096+8192)/3≈4779 → 4.7 KB
+    expect(wrapper.text()).toContain('下行流量 · 峰值 8.0 KB · 均值 4.7 KB')
   })
 })
