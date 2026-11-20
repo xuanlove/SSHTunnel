@@ -162,6 +162,19 @@ type TunnelConfig struct {
 // userConfigDir 默认使用系统配置目录（可被测试覆盖）
 var userConfigDir = os.UserConfigDir
 
+// Dir 返回应用配置目录（已创建，权限 0700）
+func Dir() (string, error) {
+	dir, err := userConfigDir()
+	if err != nil {
+		return "", err
+	}
+	cfgDir := filepath.Join(dir, "sshtunnel")
+	if err := os.MkdirAll(cfgDir, 0700); err != nil {
+		return "", err
+	}
+	return cfgDir, nil
+}
+
 // Manager 配置管理器
 type Manager struct {
 	mu      sync.RWMutex

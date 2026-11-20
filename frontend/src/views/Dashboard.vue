@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTunnelStore } from '@/stores/tunnel'
 import { useRouter } from 'vue-router'
 import * as api from '@/api'
 import type { TunnelConfig, TunnelStats } from '@/types'
+import type { MetricPoint } from '@/api'
 import { formatBytes } from '@/utils/format'
+import TrendChart from '@/components/TrendChart.vue'
 
 const store = useTunnelStore()
 const router = useRouter()
@@ -27,13 +29,35 @@ async function loadStats() {
   }
 }
 
+// ===== 全局趋势（每 30 秒刷新）=====
+const trendRange = ref('1h')
+const trendPoints = ref<MetricPoint[]>([])
+const trendLoading = ref(false)
+let trendTimer = 0
+
+async function loadTrend() {
+  trendLoading.value = true
+  try {
+    trendPoints.value = await api.getMetrics(trendRange.value)
+  } catch {
+    // 趋势获取失败不影响主流程
+  } finally {
+    trendLoading.value = false
+  }
+}
+
+watch(trendRange, () => { void loadTrend() })
+
 onMounted(() => {
   void loadStats()
+  void loadTrend()
   statsTimer = window.setInterval(loadStats, 3000)
+  trendTimer = window.setInterval(loadTrend, 30000)
 })
 
 onUnmounted(() => {
   if (statsTimer) window.clearInterval(statsTimer)
+  if (trendTimer) window.clearInterval(trendTimer)
 })
 
 const statusType = (s: string) => {
@@ -140,6 +164,20 @@ async function handleStopAll() {
         <el-button type="primary" @click="router.push('/config')">新建隧道</el-button>
       </div>
     </div>
+
+    <el-card class="trend-card" shadow="never">
+      <template #header>
+        <div class="trend-header">
+          <span class="trend-title">全局趋势</span>
+          <el-radio-group v-model="trendRange" size="small">
+            <el-radio-button value="1h">1 小时</el-radio-button>
+            <el-radio-button value="6h">6 小时</el-radio-button>
+            <el-radio-button value="24h">24 小时</el-radio-button>
+          </el-radio-group>
+        </div>
+      </template>
+      <TrendChart :points="trendPoints" :loading="trendLoading" />
+    </el-card>
 
     <el-empty v-if="!store.configs.length && !store.loading" description="暂无隧道配置">
       <el-button type="primary" @click="router.push('/config')">立即创建</el-button>
@@ -278,5 +316,27 @@ async function handleStopAll() {
   gap: 6px;
   border-top: 1px solid #3a3f4b;
   padding-top: 10px;
+}
+.trend-card {
+  --el-card-bg-color: #252830;
+  border: 1px solid #3a3f4b;
+}
+.trend-card :deep(.el-card__header) {
+  border-bottom: 1px solid #3a3f4b;
+  padding: 10px 16px;
+}
+.trend-card :deep(.el-card__body) {
+  padding: 12px 16px;
+}
+.trend-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.trend-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f5f6f7;
 }
 </style>

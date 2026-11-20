@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
+	"sshtunnel/internal/alert"
 	"sshtunnel/internal/config"
 	"sshtunnel/internal/logger"
+	"sshtunnel/internal/metrics"
 	"sshtunnel/internal/port"
 	"sshtunnel/internal/proxy"
 	"sshtunnel/internal/tunnel"
@@ -20,6 +23,8 @@ type App struct {
 	logger    *logger.Logger
 	cfgMgr    *config.Manager
 	tunnelMgr *tunnel.Manager
+	metrics   *metrics.Store
+	alerts    *alert.Engine
 	version   string
 }
 
@@ -68,8 +73,118 @@ func (a *App) init() error {
 	// 启动已勾选「开机启动」的隧道（异步执行，避免阻塞界面/服务启动）
 	go a.startAutoStartTunnels()
 
+	// 指标采样（24h 内存环形）与告警引擎
+	a.metrics = metrics.NewStore(24*time.Hour, 10*time.Second)
+	go a.metrics.Run(a.snapshotMetrics)
+	alertDir, err := config.Dir()
+	if err != nil {
+		return fmt.Errorf("初始化告警目录失败: %w", err)
+	}
+	a.alerts, err = alert.New(a.tunnelMgr, alertDir, a.logger, a.metrics, a.tunnelName)
+	if err != nil {
+		return fmt.Errorf("初始化告警引擎失败: %w", err)
+	}
+
 	a.logger.Info("SSH Tunnel Manager 启动完成")
 	return nil
+}
+
+// snapshotMetrics 汇总当前统计供采样
+func (a *App) snapshotMetrics() map[string]metrics.Raw {
+	out := make(map[string]metrics.Raw)
+	var g metrics.Raw
+	for id, st := range a.tunnelMgr.Stats() {
+		out[id] = metrics.Raw{
+			ActiveConns: st.ActiveConns,
+			TotalConns:  st.TotalConns,
+			BytesSent:   st.BytesSent,
+			BytesRecv:   st.BytesRecv,
+		}
+		g.ActiveConns += st.ActiveConns
+		g.TotalConns += st.TotalConns
+		g.BytesSent += st.BytesSent
+		g.BytesRecv += st.BytesRecv
+	}
+	out[metrics.GlobalKey] = g
+	return out
+}
+
+// tunnelName 按 ID 查找隧道名称
+func (a *App) tunnelName(id string) string {
+	for _, c := range a.cfgMgr.List() {
+		if c.ID == id {
+			return c.Name
+		}
+	}
+	return ""
+}
+
+// GetMetrics 返回趋势数据（rangeKey: 1h/6h/24h；tunnelID 为空表示全局）
+func (a *App) GetMetrics(rangeKey string, tunnelID string) []metrics.Point {
+	if a.metrics == nil {
+		return []metrics.Point{}
+	}
+	key := tunnelID
+	if key == "" {
+		key = metrics.GlobalKey
+	}
+	return a.metrics.Query(key, time.Now().Add(-metrics.ParseRange(rangeKey)), 120)
+}
+
+// GetAlertRules 返回告警规则
+func (a *App) GetAlertRules() []alert.Rule {
+	if a.alerts == nil {
+		return []alert.Rule{}
+	}
+	return a.alerts.Rules()
+}
+
+// SaveAlertRule 新增或更新告警规则
+func (a *App) SaveAlertRule(r alert.Rule) (alert.Rule, error) {
+	if a.alerts == nil {
+		return alert.Rule{}, fmt.Errorf("告警引擎未初始化")
+	}
+	return a.alerts.SaveRule(r)
+}
+
+// DeleteAlertRule 删除告警规则
+func (a *App) DeleteAlertRule(id string) error {
+	if a.alerts == nil {
+		return fmt.Errorf("告警引擎未初始化")
+	}
+	return a.alerts.DeleteRule(id)
+}
+
+// GetAlertHistory 返回最近的告警历史
+func (a *App) GetAlertHistory(limit int) []alert.History {
+	if a.alerts == nil {
+		return []alert.History{}
+	}
+	return a.alerts.History(limit)
+}
+
+// GetAlertWebhook 返回通知配置
+func (a *App) GetAlertWebhook() alert.Webhook {
+	if a.alerts == nil {
+		return alert.Webhook{}
+	}
+	return a.alerts.Webhook()
+}
+
+// SaveAlertWebhook 保存通知配置
+func (a *App) SaveAlertWebhook(w alert.Webhook) error {
+	if a.alerts == nil {
+		return fmt.Errorf("告警引擎未初始化")
+	}
+	return a.alerts.SaveWebhook(w)
+}
+
+// TestAlertWebhook 发送测试通知
+func (a *App) TestAlertWebhook() error {
+	if a.alerts == nil {
+		return fmt.Errorf("告警引擎未初始化")
+	}
+	return a.alerts.TestWebhook()
 }
 
 // startAutoStartTunnels 启动所有标记为开机启动的隧道

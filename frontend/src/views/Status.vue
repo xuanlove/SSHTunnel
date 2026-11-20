@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import * as api from '@/api'
 import type { AccessRecord, ConnSnapshot, NodeStatus, TunnelTraffic } from '@/types'
+import type { AlertHistory, MetricPoint } from '@/api'
 import { formatBytes, formatDuration, formatElapsed, formatTime } from '@/utils/format'
+import TrendChart from '@/components/TrendChart.vue'
 
 const status = ref<NodeStatus | null>(null)
 const autoRefresh = ref(true)
@@ -17,7 +19,12 @@ async function load() {
   if (loading.value) return // 上一轮未返回时跳过，避免请求叠加
   loading.value = true
   try {
-    status.value = await api.getNodeStatus(200)
+    const [st, alerts] = await Promise.all([
+      api.getNodeStatus(200),
+      api.getAlertHistory(10).catch(() => [] as AlertHistory[]),
+    ])
+    status.value = st
+    alertHistory.value = alerts
     lastUpdated.value = new Date()
     now.value = Date.now()
     // 节点详情打开时同步刷新该节点的访问历史；节点已被删除则关闭抽屉
@@ -94,12 +101,25 @@ const overviewCards = computed(() => {
 const connections = computed<ConnSnapshot[]>(() => status.value?.connections || [])
 const nodes = computed<TunnelTraffic[]>(() => status.value?.tunnels || [])
 
+// ===== 当前告警（按规则取最新状态）=====
+const alertHistory = ref<AlertHistory[]>([])
+const activeAlerts = computed<AlertHistory[]>(() => {
+  const latest = new Map<string, AlertHistory>()
+  for (const h of alertHistory.value) {
+    if (!latest.has(h.rule_id)) latest.set(h.rule_id, h)
+  }
+  return [...latest.values()].filter(h => h.status === 'firing')
+})
+
 // ===== 节点详情（抽屉） =====
 const activeNodeId = ref('')
 const drawerOpen = ref(false)
-const detailTab = ref<'conns' | 'history'>('conns')
+const detailTab = ref<'conns' | 'history' | 'trend'>('conns')
 const nodeHistory = ref<AccessRecord[]>([])
 const nodeHistoryLoading = ref(false)
+const trendRange = ref('1h')
+const trendPoints = ref<MetricPoint[]>([])
+const trendLoading = ref(false)
 
 const activeNode = computed<TunnelTraffic | null>(
   () => nodes.value.find(n => n.id === activeNodeId.value) || null,
@@ -128,10 +148,33 @@ async function loadNodeHistory() {
 function openNode(node: TunnelTraffic) {
   activeNodeId.value = node.id
   nodeHistory.value = []
+  trendPoints.value = []
   detailTab.value = 'conns'
   drawerOpen.value = true
   void loadNodeHistory()
 }
+
+async function loadNodeTrend() {
+  const id = activeNodeId.value
+  if (!id) return
+  trendLoading.value = true
+  try {
+    const pts = await api.getMetrics(trendRange.value, id)
+    if (id === activeNodeId.value) trendPoints.value = pts
+  } catch {
+    // 趋势获取失败保留上次数据
+  } finally {
+    if (id === activeNodeId.value) trendLoading.value = false
+  }
+}
+
+watch(trendRange, () => {
+  if (drawerOpen.value) void loadNodeTrend()
+})
+
+watch(detailTab, tab => {
+  if (tab === 'trend' && drawerOpen.value) void loadNodeTrend()
+})
 
 function closeNode() {
   drawerOpen.value = false
@@ -170,6 +213,15 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
         <el-button :loading="loading" @click="load">刷新</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="activeAlerts.length"
+      type="error"
+      :closable="false"
+      show-icon
+      class="alert-banner"
+      :title="`当前 ${activeAlerts.length} 条告警：${activeAlerts[0].message}`"
+    />
 
     <div class="overview">
       <div class="stat-card" v-for="card in overviewCards" :key="card.label">
@@ -302,6 +354,17 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
                 <template #default="{ row }">{{ row.denied ? '-' : `${row.duration_ms} ms` }}</template>
               </el-table-column>
             </el-table>
+          </el-tab-pane>
+
+          <el-tab-pane label="趋势" name="trend">
+            <div class="trend-controls">
+              <el-radio-group v-model="trendRange" size="small">
+                <el-radio-button value="1h">1 小时</el-radio-button>
+                <el-radio-button value="6h">6 小时</el-radio-button>
+                <el-radio-button value="24h">24 小时</el-radio-button>
+              </el-radio-group>
+            </div>
+            <TrendChart :points="trendPoints" :loading="trendLoading" />
           </el-tab-pane>
         </el-tabs>
       </div>
@@ -470,6 +533,12 @@ function resultType(row: AccessRecord): 'success' | 'warning' | 'danger' {
   grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin-bottom: 16px;
+}
+.trend-controls {
+  margin-bottom: 10px;
+}
+.alert-banner {
+  border-radius: 6px;
 }
 :deep(.el-drawer) {
   background-color: #1e2128;

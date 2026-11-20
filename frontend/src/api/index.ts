@@ -347,6 +347,106 @@ export async function getNodeHistory(tunnelID: string, limit = 500): Promise<Acc
   return httpGet<AccessRecord[]>(`/api/node/history?tunnel_id=${encodeURIComponent(tunnelID)}&limit=${limit}`)
 }
 
+// ===== 趋势指标与告警 =====
+export interface MetricPoint {
+  time: string
+  active_conns: number
+  conn_delta: number
+  sent_delta: number
+  recv_delta: number
+}
+
+export interface AlertRule {
+  id: string
+  name: string
+  type: 'tunnel_down' | 'conn_threshold' | 'traffic_threshold'
+  enabled: boolean
+  tunnel_id?: string
+  threshold: number
+  duration_seconds: number
+  cooldown_seconds: number
+  created_at?: string
+}
+
+export interface AlertWebhook {
+  enabled: boolean
+  url: string
+  format: 'generic' | 'wecom' | 'feishu' | ''
+}
+
+export interface AlertHistory {
+  time: string
+  rule_id: string
+  rule_name: string
+  tunnel_id?: string
+  tunnel_name?: string
+  type: string
+  value: number
+  status: 'firing' | 'resolved'
+  message: string
+}
+
+// 获取趋势数据（rangeKey: 1h/6h/24h；tunnelID 为空表示全局）
+export async function getMetrics(rangeKey: string, tunnelID = '', limit = 120): Promise<MetricPoint[]> {
+  if (!isWeb) {
+    return App.GetMetrics(rangeKey, tunnelID) as unknown as Promise<MetricPoint[]>
+  }
+  const q = `range=${encodeURIComponent(rangeKey)}&tunnel_id=${encodeURIComponent(tunnelID)}&limit=${limit}`
+  return httpGet<MetricPoint[]>(`/api/metrics?${q}`)
+}
+
+export async function getAlertRules(): Promise<AlertRule[]> {
+  if (!isWeb) {
+    return App.GetAlertRules() as unknown as Promise<AlertRule[]>
+  }
+  return httpGet<AlertRule[]>('/api/alerts/rules')
+}
+
+export async function saveAlertRule(rule: AlertRule): Promise<AlertRule> {
+  if (!isWeb) {
+    return App.SaveAlertRule(rule) as unknown as Promise<AlertRule>
+  }
+  return httpPost<AlertRule>('/api/alerts/rules', rule)
+}
+
+export async function deleteAlertRule(id: string): Promise<void> {
+  if (!isWeb) {
+    await App.DeleteAlertRule(id)
+    return
+  }
+  await httpDelete<null>(`/api/alerts/rules?id=${encodeURIComponent(id)}`)
+}
+
+export async function getAlertHistory(limit = 100): Promise<AlertHistory[]> {
+  if (!isWeb) {
+    return App.GetAlertHistory(limit) as unknown as Promise<AlertHistory[]>
+  }
+  return httpGet<AlertHistory[]>(`/api/alerts/history?limit=${limit}`)
+}
+
+export async function getAlertWebhook(): Promise<AlertWebhook> {
+  if (!isWeb) {
+    return App.GetAlertWebhook() as unknown as Promise<AlertWebhook>
+  }
+  return httpGet<AlertWebhook>('/api/alerts/webhook')
+}
+
+export async function saveAlertWebhook(hook: AlertWebhook): Promise<AlertWebhook> {
+  if (!isWeb) {
+    await App.SaveAlertWebhook(hook)
+    return hook
+  }
+  return httpPost<AlertWebhook>('/api/alerts/webhook', hook)
+}
+
+export async function testAlertWebhook(): Promise<boolean> {
+  if (!isWeb) {
+    await App.TestAlertWebhook()
+    return true
+  }
+  return httpPost<boolean>('/api/alerts/test', {})
+}
+
 export interface GeoIPStatus {
   loaded: boolean
   type: string // Country | City

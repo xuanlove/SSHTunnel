@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"sshtunnel/internal/alert"
 	"sshtunnel/internal/config"
 	"sshtunnel/internal/logger"
+	"sshtunnel/internal/metrics"
 	"sshtunnel/internal/port"
 	"sshtunnel/internal/proxy"
 	"sshtunnel/internal/sshclient"
@@ -35,6 +37,8 @@ type Handler struct {
 	commit    string // git commit
 	variant   string // 构建变体：web 或 desktop
 	repo      string // GitHub 仓库，用于版本检查
+	metrics   *metrics.Store
+	alerts    *alert.Engine
 }
 
 // NewHandler 创建 API 处理器。
@@ -105,6 +109,18 @@ func (h *Handler) WithVersion(version, commit, variant, repo string) *Handler {
 	return h
 }
 
+// WithMetrics 注入指标存储
+func (h *Handler) WithMetrics(store *metrics.Store) *Handler {
+	h.metrics = store
+	return h
+}
+
+// WithAlert 注入告警引擎
+func (h *Handler) WithAlert(engine *alert.Engine) *Handler {
+	h.alerts = engine
+	return h
+}
+
 // JWTSecret 返回 JWT 密钥（供 main.go 传递给 Server）
 func (h *Handler) JWTSecret() []byte {
 	return h.jwtSecret
@@ -133,6 +149,11 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/tunnels/stats", h.handleTunnelStats)
 	mux.HandleFunc("/node/status", h.handleNodeStatus)
 	mux.HandleFunc("/node/history", h.handleNodeHistory)
+	mux.HandleFunc("/metrics", h.handleMetrics)
+	mux.HandleFunc("/alerts/rules", h.handleAlertRules)
+	mux.HandleFunc("/alerts/history", h.handleAlertHistory)
+	mux.HandleFunc("/alerts/webhook", h.handleAlertWebhook)
+	mux.HandleFunc("/alerts/test", h.handleAlertTest)
 	mux.HandleFunc("/logs", h.handleLogs)
 	mux.HandleFunc("/logs/stream", h.handleLogStream) // WebSocket
 	mux.HandleFunc("/port/check", h.handlePortCheck)
@@ -727,6 +748,128 @@ func (h *Handler) handleNodeHistory(w http.ResponseWriter, r *http.Request) {
 		recs = []proxy.AccessRecord{}
 	}
 	writeJSON(w, 0, "success", recs)
+}
+
+// handleMetrics 返回趋势数据
+func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	if h.metrics == nil {
+		writeJSON(w, 0, "success", []metrics.Point{})
+		return
+	}
+	key := r.URL.Query().Get("tunnel_id")
+	if key == "" {
+		key = metrics.GlobalKey
+	}
+	limit := 120
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	pts := h.metrics.Query(key, time.Now().Add(-metrics.ParseRange(r.URL.Query().Get("range"))), limit)
+	writeJSON(w, 0, "success", pts)
+}
+
+// handleAlertRules 查询、保存、删除告警规则
+func (h *Handler) handleAlertRules(w http.ResponseWriter, r *http.Request) {
+	if h.alerts == nil {
+		writeError(w, 50002, "告警引擎未初始化")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 0, "success", h.alerts.Rules())
+	case http.MethodPost, http.MethodPut:
+		var rule alert.Rule
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&rule); err != nil {
+			writeError(w, 400, "请求参数错误")
+			return
+		}
+		saved, err := h.alerts.SaveRule(rule)
+		if err != nil {
+			writeError(w, 40002, err.Error())
+			return
+		}
+		writeJSON(w, 0, "success", saved)
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			writeError(w, 400, "缺少 id")
+			return
+		}
+		if err := h.alerts.DeleteRule(id); err != nil {
+			writeError(w, 40002, err.Error())
+			return
+		}
+		writeJSON(w, 0, "success", nil)
+	default:
+		writeError(w, 405, "方法不允许")
+	}
+}
+
+// handleAlertHistory 返回最近的告警历史
+func (h *Handler) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	if h.alerts == nil {
+		writeJSON(w, 0, "success", []alert.History{})
+		return
+	}
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	writeJSON(w, 0, "success", h.alerts.History(limit))
+}
+
+// handleAlertWebhook 查询或保存通知配置
+func (h *Handler) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
+	if h.alerts == nil {
+		writeError(w, 50002, "告警引擎未初始化")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 0, "success", h.alerts.Webhook())
+	case http.MethodPost, http.MethodPut:
+		var hook alert.Webhook
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&hook); err != nil {
+			writeError(w, 400, "请求参数错误")
+			return
+		}
+		if err := h.alerts.SaveWebhook(hook); err != nil {
+			writeError(w, 40002, err.Error())
+			return
+		}
+		writeJSON(w, 0, "success", h.alerts.Webhook())
+	default:
+		writeError(w, 405, "方法不允许")
+	}
+}
+
+// handleAlertTest 发送测试通知
+func (h *Handler) handleAlertTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "方法不允许")
+		return
+	}
+	if h.alerts == nil {
+		writeError(w, 50002, "告警引擎未初始化")
+		return
+	}
+	if err := h.alerts.TestWebhook(); err != nil {
+		writeError(w, 50002, err.Error())
+		return
+	}
+	writeJSON(w, 0, "success", true)
 }
 
 // handleLogs 获取最近日志

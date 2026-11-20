@@ -82,6 +82,38 @@ export function GetVersion() {
   return window['go']['main']['App']['GetVersion']();
 }
 
+export function GetMetrics(arg1, arg2) {
+  return window['go']['main']['App']['GetMetrics'](arg1, arg2);
+}
+
+export function GetAlertRules() {
+  return window['go']['main']['App']['GetAlertRules']();
+}
+
+export function SaveAlertRule(arg1) {
+  return window['go']['main']['App']['SaveAlertRule'](arg1);
+}
+
+export function DeleteAlertRule(arg1) {
+  return window['go']['main']['App']['DeleteAlertRule'](arg1);
+}
+
+export function GetAlertHistory(arg1) {
+  return window['go']['main']['App']['GetAlertHistory'](arg1);
+}
+
+export function GetAlertWebhook() {
+  return window['go']['main']['App']['GetAlertWebhook']();
+}
+
+export function SaveAlertWebhook(arg1) {
+  return window['go']['main']['App']['SaveAlertWebhook'](arg1);
+}
+
+export function TestAlertWebhook() {
+  return window['go']['main']['App']['TestAlertWebhook']();
+}
+
 export function GetNodeHistory(arg1, arg2) {
   return window['go']['main']['App']['GetNodeHistory'](arg1, arg2);
 }

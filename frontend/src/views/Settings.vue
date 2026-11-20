@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import * as api from '@/api'
+import type { TunnelConfig } from '@/types'
+import { formatBytes, formatTime } from '@/utils/format'
 import CertSummary from '@/components/CertSummary.vue'
 
 const isWebMode = api.isWebMode
@@ -26,6 +28,7 @@ onMounted(async () => {
   }
   await loadGeoStatus()
   await loadWebTLS()
+  await loadAlerts()
   if (!isWebMode) return
   try {
     const s = await api.getWebAuthSettings()
@@ -232,6 +235,130 @@ async function handleGenCert() {
   }
 }
 
+// ===== 告警 =====
+const alertRules = ref<api.AlertRule[]>([])
+const alertHistory = ref<api.AlertHistory[]>([])
+const alertWebhook = ref<api.AlertWebhook>({ enabled: false, url: '', format: 'generic' })
+const tunnels = ref<TunnelConfig[]>([])
+const ruleDialog = ref(false)
+const ruleSaving = ref(false)
+const ruleForm = ref<api.AlertRule>({
+  id: '',
+  name: '',
+  type: 'tunnel_down',
+  enabled: true,
+  tunnel_id: '',
+  threshold: 0,
+  duration_seconds: 60,
+  cooldown_seconds: 300,
+})
+
+const trafficMB = computed({
+  get: () => {
+    const v = ruleForm.value.threshold || 0
+    return Math.round((v / (1024 * 1024)) * 100) / 100
+  },
+  set: (v: number) => {
+    ruleForm.value.threshold = Math.round(v * 1024 * 1024)
+  },
+})
+
+async function loadAlerts() {
+  try {
+    const [rules, hook, hist] = await Promise.all([
+      api.getAlertRules(),
+      api.getAlertWebhook(),
+      api.getAlertHistory(20),
+    ])
+    alertRules.value = rules
+    alertWebhook.value = hook
+    alertHistory.value = hist
+    try {
+      tunnels.value = await api.listConfigs()
+    } catch {
+      // 隧道列表加载失败时规则仍可查看
+    }
+  } catch {
+    // 告警数据加载失败时保持空列表
+  }
+}
+
+function openRuleDialog(rule?: api.AlertRule) {
+  if (rule) {
+    ruleForm.value = { ...rule }
+  } else {
+    ruleForm.value = {
+      id: '',
+      name: '',
+      type: 'tunnel_down',
+      enabled: true,
+      tunnel_id: tunnels.value[0]?.id || '',
+      threshold: 0,
+      duration_seconds: 60,
+      cooldown_seconds: 300,
+    }
+  }
+  ruleDialog.value = true
+}
+
+async function handleSaveRule() {
+  ruleSaving.value = true
+  try {
+    const saved = await api.saveAlertRule(ruleForm.value)
+    const idx = alertRules.value.findIndex(r => r.id === saved.id)
+    if (idx >= 0) alertRules.value[idx] = saved
+    else alertRules.value.push(saved)
+    ruleDialog.value = false
+    ElMessage.success('告警规则已保存')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '保存失败')
+  } finally {
+    ruleSaving.value = false
+  }
+}
+
+async function handleDeleteRule(rule: api.AlertRule) {
+  try {
+    await ElMessageBox.confirm(`确定删除规则「${rule.name}」？`, '提示', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await api.deleteAlertRule(rule.id)
+    alertRules.value = alertRules.value.filter(r => r.id !== rule.id)
+    ElMessage.success('规则已删除')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '删除失败')
+  }
+}
+
+async function handleSaveWebhook() {
+  try {
+    alertWebhook.value = await api.saveAlertWebhook(alertWebhook.value)
+    ElMessage.success('通知配置已保存')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '保存失败')
+  }
+}
+
+async function handleTestWebhook() {
+  try {
+    await api.testAlertWebhook()
+    ElMessage.success('测试通知已发送')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '测试通知发送失败')
+  }
+}
+
+function alertTypeText(t: string): string {
+  return { tunnel_down: '隧道断开', conn_threshold: '连接数', traffic_threshold: '流量' }[t] || t
+}
+
+function tunnelName(id?: string): string {
+  if (!id) return '全局'
+  return tunnels.value.find(t => t.id === id)?.name || id
+}
+
 </script>
 
 <template>
@@ -245,6 +372,122 @@ async function handleGenCert() {
       <div class="info-row"><span class="label">技术栈</span><span>Wails v2 + Vue 3 + Go</span></div>
       <div class="info-row"><span class="label">功能</span><span>SSH 多跳隧道、本地端口转发、HTTP/HTTPS/SOCKS4/SOCKS5 代理</span></div>
     </el-card>
+
+    <el-card class="panel">
+      <template #header>
+        <div class="panel-header">
+          <span>告警</span>
+          <el-button size="small" type="primary" @click="openRuleDialog()">新增规则</el-button>
+        </div>
+      </template>
+
+      <el-table :data="alertRules" size="small" class="dark-table" empty-text="暂无告警规则">
+        <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
+        <el-table-column label="类型" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" type="info">{{ alertTypeText(row.type) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="范围" min-width="120" show-overflow-tooltip>
+          <template #default="{ row }">{{ tunnelName(row.tunnel_id) }}</template>
+        </el-table-column>
+        <el-table-column label="阈值" width="120">
+          <template #default="{ row }">
+            {{ row.type === 'traffic_threshold' ? formatBytes(row.threshold) : row.type === 'conn_threshold' ? row.threshold : '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="持续/冷却" width="110">
+          <template #default="{ row }">{{ row.duration_seconds }}s / {{ row.cooldown_seconds }}s</template>
+        </el-table-column>
+        <el-table-column label="状态" width="80">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.enabled ? 'success' : 'info'">
+              {{ row.enabled ? '启用' : '停用' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="130">
+          <template #default="{ row }">
+            <el-button size="small" text @click="openRuleDialog(row)">编辑</el-button>
+            <el-button size="small" text type="danger" @click="handleDeleteRule(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div class="webhook-form">
+        <span class="form-title">Webhook 通知</span>
+        <el-switch v-model="alertWebhook.enabled" active-text="启用" />
+        <el-select v-model="alertWebhook.format" style="width: 130px">
+          <el-option label="通用 JSON" value="generic" />
+          <el-option label="企业微信" value="wecom" />
+          <el-option label="飞书" value="feishu" />
+        </el-select>
+        <el-input v-model="alertWebhook.url" placeholder="https://..." class="webhook-url" />
+        <el-button @click="handleSaveWebhook">保存</el-button>
+        <el-button :disabled="!alertWebhook.enabled" @click="handleTestWebhook">测试</el-button>
+      </div>
+
+      <div class="form-title history-title">最近告警</div>
+      <el-table :data="alertHistory" size="small" class="dark-table" empty-text="暂无告警记录">
+        <el-table-column label="时间" width="160">
+          <template #default="{ row }">{{ formatTime(row.time) }}</template>
+        </el-table-column>
+        <el-table-column prop="rule_name" label="规则" width="130" show-overflow-tooltip />
+        <el-table-column label="状态" width="80">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.status === 'firing' ? 'danger' : 'success'">
+              {{ row.status === 'firing' ? '告警' : '恢复' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="message" label="内容" min-width="240" show-overflow-tooltip />
+      </el-table>
+    </el-card>
+
+    <el-dialog v-model="ruleDialog" :title="ruleForm.id ? '编辑告警规则' : '新增告警规则'" width="520px">
+      <el-form label-width="96px">
+        <el-form-item label="名称">
+          <el-input v-model="ruleForm.name" placeholder="留空使用默认名称" />
+        </el-form-item>
+        <el-form-item label="类型">
+          <el-select v-model="ruleForm.type" style="width: 100%">
+            <el-option label="隧道断开" value="tunnel_down" />
+            <el-option label="连接数阈值" value="conn_threshold" />
+            <el-option label="流量阈值（5 分钟）" value="traffic_threshold" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="ruleForm.type === 'tunnel_down'" label="隧道">
+          <el-select v-model="ruleForm.tunnel_id" style="width: 100%">
+            <el-option v-for="t in tunnels" :key="t.id" :label="t.name" :value="t.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-else label="范围">
+          <el-select v-model="ruleForm.tunnel_id" style="width: 100%">
+            <el-option label="全局" value="" />
+            <el-option v-for="t in tunnels" :key="t.id" :label="t.name" :value="t.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="ruleForm.type === 'conn_threshold'" label="连接数">
+          <el-input-number v-model="ruleForm.threshold" :min="1" />
+        </el-form-item>
+        <el-form-item v-if="ruleForm.type === 'traffic_threshold'" label="流量 (MB)">
+          <el-input-number v-model="trafficMB" :min="0.1" :step="1" />
+        </el-form-item>
+        <el-form-item label="持续 (秒)">
+          <el-input-number v-model="ruleForm.duration_seconds" :min="0" />
+        </el-form-item>
+        <el-form-item label="冷却 (秒)">
+          <el-input-number v-model="ruleForm.cooldown_seconds" :min="0" />
+        </el-form-item>
+        <el-form-item label="启用">
+          <el-switch v-model="ruleForm.enabled" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="ruleDialog = false">取消</el-button>
+        <el-button type="primary" :loading="ruleSaving" @click="handleSaveRule">保存</el-button>
+      </template>
+    </el-dialog>
 
     <el-card v-if="isWebMode" class="panel">
       <template #header><span>WEB 访问密码</span></template>
@@ -454,5 +697,41 @@ async function handleGenCert() {
   background-color: #14161a;
   padding: 1px 4px;
   border-radius: 3px;
+}
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.webhook-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.form-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e0e3e8;
+}
+.history-title {
+  margin-top: 16px;
+  margin-bottom: 8px;
+}
+.webhook-url {
+  flex: 1;
+  min-width: 220px;
+}
+.dark-table {
+  --el-table-bg-color: #252830;
+  --el-table-tr-bg-color: #252830;
+  --el-table-header-bg-color: #2b2f38;
+  --el-table-row-hover-bg-color: #2f333e;
+  --el-table-border-color: #3a3f4b;
+  --el-table-text-color: #e0e3e8;
+  --el-table-header-text-color: #c0c3cb;
+  --el-table-empty-text-color: #8a8d95;
 }
 </style>

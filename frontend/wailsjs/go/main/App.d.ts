@@ -43,6 +43,22 @@ export function GeoIPStatus():Promise<any>;
 
 export function GetVersion():Promise<string>;
 
+export function GetMetrics(arg1:string,arg2:string):Promise<any>;
+
+export function GetAlertRules():Promise<any>;
+
+export function SaveAlertRule(arg1:any):Promise<any>;
+
+export function DeleteAlertRule(arg1:string):Promise<any>;
+
+export function GetAlertHistory(arg1:number):Promise<any>;
+
+export function GetAlertWebhook():Promise<any>;
+
+export function SaveAlertWebhook(arg1:any):Promise<any>;
+
+export function TestAlertWebhook():Promise<any>;
+
 export function GetNodeHistory(arg1:string,arg2:number):Promise<any>;
 
 export function GetNodeStatus(arg1:number):Promise<any>;

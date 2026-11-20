@@ -19,6 +19,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"sshtunnel/internal/alert"
 	"sshtunnel/internal/logger"
 	"sshtunnel/internal/proxy"
 	"sshtunnel/internal/updater"
@@ -180,7 +181,16 @@ func startWebServer(app *App, authUser, authPass string) {
 	// 创建 API Handler
 	handler := web.NewHandler(app.cfgMgr, app.tunnelMgr, app.logger,
 		generateJWTSecret(), "", "", hub).
-		WithVersion(version, commit, buildVariant, *flagRepo)
+		WithVersion(version, commit, buildVariant, *flagRepo).
+		WithMetrics(app.metrics).
+		WithAlert(app.alerts)
+
+	// 告警事件实时广播到 WEB 客户端
+	if app.alerts != nil {
+		app.alerts.OnEvent(func(h alert.History) {
+			hub.Broadcast(web.WSMessage{Type: "alert", Data: h})
+		})
+	}
 
 	// 加载持久化的访问密码设置；--auth 启动参数覆盖（仅内存）
 	handler.UsePersistentAuth(authUser, authPass)
