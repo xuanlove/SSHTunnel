@@ -233,7 +233,12 @@ download_binary() {
 
     # 校验 sha256（发布资产附带同名 .sha256；缺失时兼容旧版本）
     local checksum_file="${tmp_file}.sha256"
-    if curl -fsSL -o "$checksum_file" "${download_url}.sha256" 2>/dev/null; then
+    local sum_ok=false
+    command -v sha256sum >/dev/null 2>&1 && sum_ok=true
+    command -v shasum >/dev/null 2>&1 && sum_ok=true
+    if ! $sum_ok; then
+        warn "未找到 sha256sum/shasum，跳过完整性校验"
+    elif curl -fsSL -o "$checksum_file" "${download_url}.sha256" 2>/dev/null; then
         local expected actual
         expected="$(awk '{print $1}' "$checksum_file" | head -1)"
         if command -v sha256sum >/dev/null 2>&1; then

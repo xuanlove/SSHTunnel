@@ -20,7 +20,7 @@ type WSMessage struct {
 
 // WebSocket 推送参数
 const (
-	wsSendBuffer   = 64              // 每连接发送队列长度
+	wsSendBuffer   = 256             // 每连接发送队列长度（约 256 条消息）
 	wsMaxClients   = 64              // 最大并发连接数
 	wsWriteTimeout = 5 * time.Second // 单次写超时
 )
@@ -56,7 +56,15 @@ func (h *Hub) Broadcast(msg WSMessage) {
 		select {
 		case c.send <- data:
 		default:
-			h.removeLocked(c)
+			// 队列满：丢弃最旧一条并重试，避免误断短暂繁忙的客户端
+			select {
+			case <-c.send:
+			default:
+			}
+			select {
+			case c.send <- data:
+			default:
+			}
 		}
 	}
 	h.mu.Unlock()

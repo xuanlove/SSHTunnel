@@ -264,7 +264,7 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request, start time.Tim
 	resp.Header.Set("Via", "1.1 sshtunnel")
 	resp.Close = true
 	resp.Body = &countReadCloser{r: resp.Body, stats: s.stats, conn: entry}
-	if err := resp.Write(conn); err != nil {
+	if err := resp.Write(&idleWriter{conn: conn, timeout: idleWriteTimeout}); err != nil {
 		s.logAccess(conn, target, start, "失败: 回写响应失败")
 		return
 	}

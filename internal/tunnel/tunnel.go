@@ -130,6 +130,7 @@ func (m *Manager) Start(cfg *config.TunnelConfig) error {
 			t.cancel()
 		}
 		if archive {
+			t.waitBridgeDone(300 * time.Millisecond)
 			m.archive(cfg.ID, t)
 		}
 		m.emitStatus(cfg.ID, string(config.StatusError))
@@ -739,6 +740,20 @@ func (t *Tunnel) handleForward(conn net.Conn, lf config.LocalForward, target str
 	proxy.BridgeStats(conn, targetConn, stats, entry)
 }
 
+// waitBridgeDone 等待指定隧道的桥接连接收尾（最多 d）
+func (t *Tunnel) waitBridgeDone(d time.Duration) {
+	if t.conns == nil {
+		return
+	}
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if t.conns.CountByTunnel(t.cfg.ID) == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // stop 停止隧道
 func (t *Tunnel) stop() {
 	if t.cancel != nil {
@@ -747,14 +762,8 @@ func (t *Tunnel) stop() {
 	close(t.stopCh)
 	t.cleanupResources()
 	// 等待桥接连接收尾（最多 300ms），使最后一批字节计入统计后再注销
+	t.waitBridgeDone(300 * time.Millisecond)
 	if t.conns != nil {
-		deadline := time.Now().Add(300 * time.Millisecond)
-		for time.Now().Before(deadline) {
-			if t.conns.CountByTunnel(t.cfg.ID) == 0 {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
 		t.conns.RemoveTunnel(t.cfg.ID)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"sync/atomic"
+	"time"
 )
 
 // TrafficStats 并发安全的连接数与流量计数。
@@ -101,13 +102,33 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// idleWriteTimeout 桥接写方向空闲超时（对端长时间不读则断开连接）
+const idleWriteTimeout = 30 * time.Second
+
+// idleWriter 每次写入前重置写超时，避免对端不读导致 goroutine 永久阻塞
+type idleWriter struct {
+	conn    net.Conn
+	timeout time.Duration
+}
+
+func (w *idleWriter) Write(p []byte) (int, error) {
+	_ = w.conn.SetWriteDeadline(time.Now().Add(w.timeout))
+	n, err := w.conn.Write(p)
+	if err != nil {
+		return n, err
+	}
+	_ = w.conn.SetWriteDeadline(time.Time{})
+	return n, nil
+}
+
 // BridgeStats 双向桥接并按方向统计流量（按写入字节实时累计）。
 // a 为客户端侧连接，b 为隧道目标侧连接；stats 与 conn 均可为 nil。
 func BridgeStats(a, b net.Conn, stats *TrafficStats, conn *ConnEntry) {
-	aw, bw := io.Writer(a), io.Writer(b)
+	aw := io.Writer(&idleWriter{conn: a, timeout: idleWriteTimeout})
+	bw := io.Writer(&idleWriter{conn: b, timeout: idleWriteTimeout})
 	if stats != nil || conn != nil {
-		aw = &countWriter{w: a, stats: stats, conn: conn}             // 目标 -> 客户端 = 下行
-		bw = &countWriter{w: b, stats: stats, conn: conn, sent: true} // 客户端 -> 目标 = 上行
+		aw = &countWriter{w: aw, stats: stats, conn: conn}             // 目标 -> 客户端 = 下行
+		bw = &countWriter{w: bw, stats: stats, conn: conn, sent: true} // 客户端 -> 目标 = 上行
 	}
 	done := make(chan struct{}, 2)
 	go func() {

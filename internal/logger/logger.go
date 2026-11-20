@@ -71,6 +71,8 @@ func New() (*Logger, error) {
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return nil, err
 	}
+	// 收紧已存在目录的权限（升级用户此前的目录可能为 0755）
+	_ = os.Chmod(logDir, 0700)
 	logFile := filepath.Join(logDir, fmt.Sprintf("sshtunnel-%s.log", time.Now().Format("2006-01-02")))
 	return newLoggerAt(logFile, defaultMaxLogSize)
 }
@@ -221,7 +223,12 @@ func (l *Logger) rotateLocked() {
 		return
 	}
 	l.file = f
-	l.size = 0
+	// 若重命名失败（原文件仍存在），按实际大小继续跟踪，避免反复触发轮转
+	if st, err := f.Stat(); err == nil {
+		l.size = st.Size()
+	} else {
+		l.size = 0
+	}
 }
 
 // Close 关闭日志文件

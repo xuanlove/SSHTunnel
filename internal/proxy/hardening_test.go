@@ -164,6 +164,9 @@ func TestHTTPConnectPreservesPrefetchedBytes(t *testing.T) {
 
 // TestCityRuleRequiresCityDB 城市规则在未加载城市库时必须启动失败
 func TestCityRuleRequiresCityDB(t *testing.T) {
+	if geoIPCityReady() {
+		t.Skip("当前已加载城市级数据库，跳过")
+	}
 	lc := config.ProxyListener{
 		ID:       "city-rule",
 		Protocol: config.ProxySOCKS5,
