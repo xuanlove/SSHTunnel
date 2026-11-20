@@ -51,3 +51,5 @@ gh workflow run build-macos-desktop.yml -f version=v1.3.5 -f upload_release=true
 发布 v1.6.0 构建：2026-11-20T01:58:46Z
 
 发布 v1.7.0 构建：2026-11-20T11:25:31Z
+
+发布 v1.7.1 构建：2026-11-20T14:52:34Z
