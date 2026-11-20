@@ -59,6 +59,31 @@ func TestStoreDownsample(t *testing.T) {
 	}
 }
 
+// TestQuerySinceBoundary since 之前的样本仅作为增量基准，不产生趋势点
+func TestQuerySinceBoundary(t *testing.T) {
+	s := NewStore(time.Hour, 10*time.Second)
+	base := time.Now().Add(-time.Hour)
+	s.Add("t1", base, Raw{TotalConns: 1})
+	s.Add("t1", base.Add(10*time.Second), Raw{TotalConns: 2})
+	since := base.Add(20 * time.Second)
+	s.Add("t1", since, Raw{TotalConns: 3})
+	s.Add("t1", since.Add(10*time.Second), Raw{TotalConns: 4})
+
+	pts := s.Query("t1", since, 120)
+	if len(pts) != 2 {
+		t.Fatalf("点数 = %d, want 2", len(pts))
+	}
+	for _, p := range pts {
+		if p.Time.Before(since) {
+			t.Errorf("趋势点 %v 早于 since %v", p.Time, since)
+		}
+	}
+	// 基准为 since 前最后样本（TotalConns=2）：两点增量均为 1
+	if pts[0].ConnDelta != 1 || pts[1].ConnDelta != 1 {
+		t.Errorf("增量不符: %+v", pts)
+	}
+}
+
 func TestParseRange(t *testing.T) {
 	cases := map[string]time.Duration{
 		"1h":  time.Hour,

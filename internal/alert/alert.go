@@ -1,6 +1,7 @@
 package alert
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -72,6 +73,8 @@ type ruleState struct {
 // Engine 告警引擎
 type Engine struct {
 	mu         sync.Mutex
+	ctx        context.Context
+	cancel     context.CancelFunc
 	mgr        *tunnel.Manager
 	store      *fileStore
 	log        *logger.Logger
@@ -101,7 +104,10 @@ func New(mgr *tunnel.Manager, dir string, log *logger.Logger, mstore *metrics.St
 		}
 		data = Data{}
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
+		ctx:        ctx,
+		cancel:     cancel,
 		mgr:        mgr,
 		store:      fs,
 		log:        log,
@@ -148,8 +154,13 @@ func (e *Engine) HandleStatus(tunnelID, status string) {
 func (e *Engine) run() {
 	ticker := time.NewTicker(evaluateInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		e.Evaluate()
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			e.Evaluate()
+		}
 	}
 }
 
@@ -233,7 +244,8 @@ func (e *Engine) apply(r Rule, trigger bool, value int64, now time.Time) {
 	}
 	if st.firing {
 		cooldown := time.Duration(r.Cooldown) * time.Second
-		if cooldown > 0 && now.Sub(st.lastFire) < cooldown {
+		// 冷却为 0：持续触发期间不重复通知，恢复后再次触发才会重新告警
+		if cooldown <= 0 || now.Sub(st.lastFire) < cooldown {
 			e.mu.Unlock()
 			return
 		}
@@ -280,13 +292,25 @@ func (e *Engine) fire(r Rule, value int64, status string) {
 }
 
 func (e *Engine) notifyLoop() {
-	for n := range e.notifyCh {
-		e.mu.Lock()
-		w := e.webhook
-		e.mu.Unlock()
-		if err := SendNotification(e.http, w, n); err != nil && e.log != nil {
-			e.log.Warnf("告警 Webhook 发送失败: %v", err)
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case n := <-e.notifyCh:
+			e.mu.Lock()
+			w := e.webhook
+			e.mu.Unlock()
+			if err := SendNotification(e.http, w, n); err != nil && e.log != nil {
+				e.log.Warnf("告警 Webhook 发送失败: %v", err)
+			}
 		}
+	}
+}
+
+// Close 停止评估与通知循环（进程退出前调用；调用后引擎不再产生告警）
+func (e *Engine) Close() {
+	if e.cancel != nil {
+		e.cancel()
 	}
 }
 

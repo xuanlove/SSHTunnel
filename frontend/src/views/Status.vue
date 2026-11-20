@@ -21,7 +21,8 @@ async function load() {
   try {
     const [st, alerts] = await Promise.all([
       api.getNodeStatus(200),
-      api.getAlertHistory(10).catch(() => [] as AlertHistory[]),
+      // 取全量历史（后端保留 200 条），避免规则较多时横幅状态缺失或过期
+      api.getAlertHistory(200).catch(() => [] as AlertHistory[]),
     ])
     status.value = st
     alertHistory.value = alerts

@@ -145,6 +145,33 @@ func TestSendNotificationFormats(t *testing.T) {
 	}
 }
 
+// TestApplyZeroCooldownNotifyOnce 冷却为 0 时持续触发仅通知一次，恢复后再次触发重新告警
+func TestApplyZeroCooldownNotifyOnce(t *testing.T) {
+	e := &Engine{states: map[string]*ruleState{}, notifyCh: make(chan Notification, 8), hist: []History{}}
+	rule := Rule{ID: "r0", Name: "测试", Type: TypeConnThreshold, Threshold: 1, Cooldown: 0}
+	now := time.Now()
+
+	e.apply(rule, true, 5, now)
+	e.apply(rule, true, 6, now.Add(10*time.Second))
+	e.apply(rule, true, 7, now.Add(time.Minute))
+	e.mu.Lock()
+	n := len(e.hist)
+	e.mu.Unlock()
+	if n != 1 {
+		t.Errorf("冷却为 0 时持续触发应仅通知一次: %d", n)
+	}
+
+	e.apply(rule, false, 0, now.Add(2*time.Minute)) // 恢复
+	e.apply(rule, true, 8, now.Add(3*time.Minute))  // 再次触发
+	e.mu.Lock()
+	n = len(e.hist)
+	last := e.hist[len(e.hist)-1]
+	e.mu.Unlock()
+	if n != 3 || last.Status != StatusFiring {
+		t.Errorf("恢复后再次触发应重新告警: n=%d last=%+v", n, last)
+	}
+}
+
 func TestPersistReload(t *testing.T) {
 	dir := t.TempDir()
 	e, err := New(nil, dir, nil, nil, nil)

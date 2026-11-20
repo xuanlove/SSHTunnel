@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"time"
@@ -104,18 +105,24 @@ func (s *Store) Add(key string, ts time.Time, raw Raw) {
 	})
 }
 
-// Run 周期采样；snapshot 返回各序列的累计值
-func (s *Store) Run(snapshot func() map[string]Raw) {
+// Run 周期采样；snapshot 返回各序列的累计值。ctx 取消后停止采样
+func (s *Store) Run(ctx context.Context, snapshot func() map[string]Raw) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
-	for ts := range ticker.C {
-		for key, raw := range snapshot() {
-			s.Add(key, ts, raw)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ts := <-ticker.C:
+			for key, raw := range snapshot() {
+				s.Add(key, ts, raw)
+			}
 		}
 	}
 }
 
-// Query 返回 since 之后的趋势点（按时间升序，最多 maxPoints 个）
+// Query 返回 since 之后的趋势点（按时间升序，最多 maxPoints 个）。
+// 以 since 前最近一个样本为增量基准，返回的点均在 since 之后。
 func (s *Store) Query(key string, since time.Time, maxPoints int) []Point {
 	if maxPoints <= 0 {
 		maxPoints = 120
@@ -133,7 +140,6 @@ func (s *Store) Query(key string, since time.Time, maxPoints int) []Point {
 	}
 	sort.Slice(samples, func(i, j int) bool { return samples[i].Time.Before(samples[j].Time) })
 
-	// 取 since 前最近一个样本作为增量基准
 	start := 0
 	for i := 0; i < len(samples); i++ {
 		if samples[i].Time.Before(since) {
@@ -141,9 +147,6 @@ func (s *Store) Query(key string, since time.Time, maxPoints int) []Point {
 		} else {
 			break
 		}
-	}
-	if start > 0 {
-		start--
 	}
 
 	type deltaPoint struct {
@@ -192,7 +195,8 @@ func (s *Store) Query(key string, since time.Time, maxPoints int) []Point {
 			idx = maxPoints - 1
 		}
 		for len(buckets) <= idx {
-			buckets = append(buckets, Point{Time: p.sample.Time})
+			// 空洞补位使用预期桶起始时间，保持时间轴单调
+			buckets = append(buckets, Point{Time: pts[0].sample.Time.Add(time.Duration(len(buckets)) * bucketDur)})
 		}
 		b := &buckets[idx]
 		if p.sample.ActiveConns > b.ActiveConns {

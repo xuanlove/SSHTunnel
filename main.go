@@ -119,6 +119,7 @@ func main() {
 	// 桌面模式或混合模式：启动 Wails
 	if mode == ModeDesktop || mode == ModeBoth {
 		startDesktop(app)
+		app.Close()
 		return
 	}
 
@@ -131,6 +132,7 @@ func main() {
 	if app.tunnelMgr != nil {
 		app.tunnelMgr.StopAll()
 	}
+	app.Close()
 }
 
 // parseAuth 解析 --auth=user:password

@@ -433,8 +433,7 @@ export async function getAlertWebhook(): Promise<AlertWebhook> {
 
 export async function saveAlertWebhook(hook: AlertWebhook): Promise<AlertWebhook> {
   if (!isWeb) {
-    await App.SaveAlertWebhook(hook)
-    return hook
+    return App.SaveAlertWebhook(hook) as unknown as Promise<AlertWebhook>
   }
   return httpPost<AlertWebhook>('/api/alerts/webhook', hook)
 }

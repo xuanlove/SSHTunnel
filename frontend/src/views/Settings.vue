@@ -478,6 +478,7 @@ function tunnelName(id?: string): string {
         </el-form-item>
         <el-form-item label="冷却 (秒)">
           <el-input-number v-model="ruleForm.cooldown_seconds" :min="0" />
+          <div class="form-tip">为 0 时持续触发期间仅通知一次，恢复后再次触发才重新告警</div>
         </el-form-item>
         <el-form-item label="启用">
           <el-switch v-model="ruleForm.enabled" />
@@ -723,6 +724,13 @@ function tunnelName(id?: string): string {
 .webhook-url {
   flex: 1;
   min-width: 220px;
+}
+.form-tip {
+  width: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #8a8d95;
+  line-height: 1.4;
 }
 .dark-table {
   --el-table-bg-color: #252830;

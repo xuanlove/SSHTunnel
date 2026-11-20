@@ -26,6 +26,8 @@ type App struct {
 	metrics   *metrics.Store
 	alerts    *alert.Engine
 	version   string
+	runCtx    context.Context    // 后台采样上下文
+	runStop   context.CancelFunc // 停止后台采样
 }
 
 // NewApp 创建应用实例
@@ -70,12 +72,11 @@ func (a *App) init() error {
 		a.cfgMgr.SetStatus(tunnelID, config.TunnelStatus(status))
 	})
 
-	// 启动已勾选「开机启动」的隧道（异步执行，避免阻塞界面/服务启动）
-	go a.startAutoStartTunnels()
-
-	// 指标采样（24h 内存环形）与告警引擎
+	// 指标采样（24h 内存环形）与告警引擎。
+	// 须在自启隧道之前初始化：隧道启动失败的 error 状态才能被告警引擎捕获。
+	a.runCtx, a.runStop = context.WithCancel(context.Background())
 	a.metrics = metrics.NewStore(24*time.Hour, 10*time.Second)
-	go a.metrics.Run(a.snapshotMetrics)
+	go a.metrics.Run(a.runCtx, a.snapshotMetrics)
 	alertDir, err := config.Dir()
 	if err != nil {
 		return fmt.Errorf("初始化告警目录失败: %w", err)
@@ -85,8 +86,21 @@ func (a *App) init() error {
 		return fmt.Errorf("初始化告警引擎失败: %w", err)
 	}
 
+	// 启动已勾选「开机启动」的隧道（异步执行，避免阻塞界面/服务启动）
+	go a.startAutoStartTunnels()
+
 	a.logger.Info("SSH Tunnel Manager 启动完成")
 	return nil
+}
+
+// Close 停止后台采样与告警循环（进程退出前调用）
+func (a *App) Close() {
+	if a.runStop != nil {
+		a.runStop()
+	}
+	if a.alerts != nil {
+		a.alerts.Close()
+	}
 }
 
 // snapshotMetrics 汇总当前统计供采样
@@ -171,12 +185,15 @@ func (a *App) GetAlertWebhook() alert.Webhook {
 	return a.alerts.Webhook()
 }
 
-// SaveAlertWebhook 保存通知配置
-func (a *App) SaveAlertWebhook(w alert.Webhook) error {
+// SaveAlertWebhook 保存通知配置（返回规范化后的配置）
+func (a *App) SaveAlertWebhook(w alert.Webhook) (alert.Webhook, error) {
 	if a.alerts == nil {
-		return fmt.Errorf("告警引擎未初始化")
+		return alert.Webhook{}, fmt.Errorf("告警引擎未初始化")
 	}
-	return a.alerts.SaveWebhook(w)
+	if err := a.alerts.SaveWebhook(w); err != nil {
+		return alert.Webhook{}, err
+	}
+	return a.alerts.Webhook(), nil
 }
 
 // TestAlertWebhook 发送测试通知
