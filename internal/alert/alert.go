@@ -95,7 +95,11 @@ func New(mgr *tunnel.Manager, dir string, log *logger.Logger, mstore *metrics.St
 	}
 	data, err := fs.Load()
 	if err != nil {
-		return nil, err
+		// 告警为可选功能：配置损坏不应阻断应用启动，降级为空配置（下次保存时覆盖）
+		if log != nil {
+			log.Warnf("告警配置加载失败，已忽略并使用空配置: %v", err)
+		}
+		data = Data{}
 	}
 	e := &Engine{
 		mgr:        mgr,
@@ -169,6 +173,15 @@ func (e *Engine) Evaluate() {
 			e.mu.Lock()
 			since, ok := e.errorSince[r.TunnelID]
 			e.mu.Unlock()
+			// 隧道已删除（不在运行与归档统计中）：清除残留状态并解除告警，
+			// 避免 errorSince 残留导致永久重复告警
+			if _, alive := stats[r.TunnelID]; !alive {
+				e.mu.Lock()
+				delete(e.errorSince, r.TunnelID)
+				e.mu.Unlock()
+				e.apply(r, false, 0, now)
+				continue
+			}
 			trigger := ok && now.Sub(since) >= time.Duration(r.Duration)*time.Second
 			e.apply(r, trigger, 0, now)
 		case TypeConnThreshold:

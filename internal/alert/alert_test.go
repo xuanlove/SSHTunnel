@@ -4,8 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"sshtunnel/internal/logger"
+	"sshtunnel/internal/tunnel"
 )
 
 func newTestEngine(t *testing.T) *Engine {
@@ -159,5 +164,72 @@ func TestPersistReload(t *testing.T) {
 	}
 	if len(e2.Rules()) != 1 || e2.Webhook().URL != "https://example.com/h" {
 		t.Errorf("持久化恢复不符: rules=%d webhook=%+v", len(e2.Rules()), e2.Webhook())
+	}
+}
+
+// TestNewWithCorruptConfig alerts.json 损坏时不应阻断启动，降级为空配置
+func TestNewWithCorruptConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alerts.json")
+	if err := os.WriteFile(path, []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("写入损坏配置失败: %v", err)
+	}
+	e, err := New(nil, dir, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("损坏配置不应导致创建失败: %v", err)
+	}
+	if len(e.Rules()) != 0 {
+		t.Errorf("损坏配置应降级为空规则: %d", len(e.Rules()))
+	}
+	// 降级后仍可正常保存并持久化
+	if _, err := e.SaveRule(Rule{Type: TypeConnThreshold, Threshold: 10, Enabled: true}); err != nil {
+		t.Fatalf("降级后保存规则失败: %v", err)
+	}
+	if len(e.Rules()) != 1 {
+		t.Errorf("保存后规则数 = %d, want 1", len(e.Rules()))
+	}
+}
+
+// TestTunnelDownDeletedTunnel 删除隧道后应清除残留状态并解除告警，不再重复触发
+func TestTunnelDownDeletedTunnel(t *testing.T) {
+	mgr := tunnel.NewManager(logger.NewTest()) // 无任何隧道：Stats() 为空，视为已删除
+	e, err := New(mgr, t.TempDir(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("创建引擎失败: %v", err)
+	}
+
+	rule := Rule{ID: "r1", Name: "断开告警", Type: TypeTunnelDown, TunnelID: "gone", Enabled: true, Duration: 30}
+	e.mu.Lock()
+	e.rules = []Rule{rule}
+	// 模拟隧道删除后残留的 error 状态与未恢复的 firing
+	e.errorSince["gone"] = time.Now().Add(-time.Hour)
+	e.states["r1"] = &ruleState{firing: true, since: time.Now().Add(-time.Hour), lastFire: time.Now().Add(-time.Hour)}
+	e.mu.Unlock()
+
+	e.Evaluate()
+
+	e.mu.Lock()
+	_, hasErr := e.errorSince["gone"]
+	st := e.states["r1"]
+	hist := append([]History{}, e.hist...)
+	e.mu.Unlock()
+
+	if hasErr {
+		t.Error("已删除隧道的 errorSince 应被清除")
+	}
+	if st == nil || st.firing {
+		t.Error("firing 状态应解除")
+	}
+	if len(hist) != 1 || hist[0].Status != StatusResolved {
+		t.Errorf("应产生一条 resolved 记录: %+v", hist)
+	}
+
+	// 再次评估不应产生新告警
+	e.Evaluate()
+	e.mu.Lock()
+	n := len(e.hist)
+	e.mu.Unlock()
+	if n != 1 {
+		t.Errorf("重复评估不应新增记录: %d", n)
 	}
 }
