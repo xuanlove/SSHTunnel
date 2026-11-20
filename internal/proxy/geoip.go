@@ -435,6 +435,13 @@ func GeoIPAvailable() bool {
 	return geoipDB != nil
 }
 
+// geoIPCityReady 当前是否加载了城市级数据库
+func geoIPCityReady() bool {
+	geoipMu.RLock()
+	defer geoipMu.RUnlock()
+	return geoipDB != nil && geoipType == GeoDBTypeCity
+}
+
 // CurrentGeoIPStatus 返回当前 GeoIP 状态
 func CurrentGeoIPStatus() GeoIPStatus {
 	settings := LoadGeoIPSettings()

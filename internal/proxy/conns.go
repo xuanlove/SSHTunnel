@@ -116,6 +116,22 @@ func (r *ConnRegistry) RemoveTunnel(tunnelID string) {
 	r.mu.Unlock()
 }
 
+// CountByTunnel 返回指定隧道当前的活动连接数
+func (r *ConnRegistry) CountByTunnel(tunnelID string) int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, e := range r.conns {
+		if e.meta.TunnelID == tunnelID {
+			n++
+		}
+	}
+	return n
+}
+
 // Snapshot 返回当前活动连接（按建立时间升序）
 func (r *ConnRegistry) Snapshot() []ConnSnapshot {
 	if r == nil {

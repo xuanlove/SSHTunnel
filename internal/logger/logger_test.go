@@ -1,10 +1,38 @@
 package logger
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestLoggerRotation 日志文件达到阈值后轮转并保留备份
+func TestLoggerRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.log")
+	l, err := newLoggerAt(path, 512)
+	if err != nil {
+		t.Fatalf("创建日志记录器失败: %v", err)
+	}
+	defer l.Close()
+
+	for i := 0; i < 100; i++ {
+		l.Info(strings.Repeat("x", 32))
+	}
+
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Errorf("应生成轮转备份 %s.1: %v", path, err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("读取当前日志失败: %v", err)
+	}
+	if st.Size() > 512 {
+		t.Errorf("当前日志大小 = %d, 超过阈值 512", st.Size())
+	}
+}
 
 func TestLoggerBasic(t *testing.T) {
 	// 使用 SetOutput 重定向避免污染真实日志文件

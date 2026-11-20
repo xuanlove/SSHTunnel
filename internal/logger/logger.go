@@ -41,10 +41,19 @@ type Entry struct {
 	TunnelID string    `json:"tunnel_id,omitempty"`
 }
 
+// 日志文件轮转参数
+const (
+	defaultMaxLogSize = 10 << 20 // 单文件上限 10MB
+	maxLogBackups     = 5        // 保留最近 5 份
+)
+
 // Logger 日志记录器
 type Logger struct {
 	mu      sync.Mutex
 	file    *os.File
+	path    string
+	maxSize int64
+	size    int64
 	level   Level
 	ring    []Entry
 	ringIdx int
@@ -59,16 +68,28 @@ func New() (*Logger, error) {
 		return nil, err
 	}
 	logDir := filepath.Join(dir, "sshtunnel", "logs")
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return nil, err
 	}
 	logFile := filepath.Join(logDir, fmt.Sprintf("sshtunnel-%s.log", time.Now().Format("2006-01-02")))
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	return newLoggerAt(logFile, defaultMaxLogSize)
+}
+
+// newLoggerAt 在指定路径创建日志记录器（便于测试轮转）
+func newLoggerAt(path string, maxSize int64) (*Logger, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, err
 	}
+	var size int64
+	if st, statErr := f.Stat(); statErr == nil {
+		size = st.Size()
+	}
 	return &Logger{
 		file:    f,
+		path:    path,
+		maxSize: maxSize,
+		size:    size,
 		level:   LevelDebug,
 		ringCap: 1000,
 		ring:    make([]Entry, 0, 1000),
@@ -107,7 +128,13 @@ func (l *Logger) log(lvl Level, tunnelID, msg string) {
 	// 写文件
 	line := fmt.Sprintf("%s [%s] %s\n", entry.Time.Format("2006-01-02 15:04:05"), entry.Level, entry.Message)
 	if l.file != nil {
-		_, _ = l.file.WriteString(line)
+		if l.maxSize > 0 && l.size+int64(len(line)) > l.maxSize {
+			l.rotateLocked()
+		}
+		if l.file != nil {
+			n, _ := l.file.WriteString(line)
+			l.size += int64(n)
+		}
 	}
 	// 写环形缓冲
 	if len(l.ring) < l.ringCap {
@@ -167,6 +194,34 @@ func (l *Logger) Recent(limit int) []Entry {
 		out[i] = l.ring[(start+i)%l.ringCap]
 	}
 	return out
+}
+
+// rotateLocked 轮转日志文件（调用方需持有锁）
+func (l *Logger) rotateLocked() {
+	if l.file != nil {
+		_ = l.file.Close()
+		l.file = nil
+	}
+	if l.path == "" {
+		return
+	}
+	// 删除最旧备份
+	_ = os.Remove(fmt.Sprintf("%s.%d", l.path, maxLogBackups))
+	// 依次后移 .4 -> .5 ... .1 -> .2
+	for i := maxLogBackups - 1; i >= 1; i-- {
+		old := fmt.Sprintf("%s.%d", l.path, i)
+		if _, err := os.Stat(old); err == nil {
+			_ = os.Rename(old, fmt.Sprintf("%s.%d", l.path, i+1))
+		}
+	}
+	_ = os.Rename(l.path, l.path+".1")
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		l.size = 0
+		return
+	}
+	l.file = f
+	l.size = 0
 }
 
 // Close 关闭日志文件

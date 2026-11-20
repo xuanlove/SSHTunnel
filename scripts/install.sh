@@ -231,6 +231,26 @@ download_binary() {
         exit 1
     fi
 
+    # 校验 sha256（发布资产附带同名 .sha256；缺失时兼容旧版本）
+    local checksum_file="${tmp_file}.sha256"
+    if curl -fsSL -o "$checksum_file" "${download_url}.sha256" 2>/dev/null; then
+        local expected actual
+        expected="$(awk '{print $1}' "$checksum_file" | head -1)"
+        if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$tmp_file" | awk '{print $1}')"
+        else
+            actual="$(shasum -a 256 "$tmp_file" | awk '{print $1}')"
+        fi
+        if [[ -z "$expected" || "$expected" != "$actual" ]]; then
+            error "sha256 校验失败，二进制可能被篡改或下载不完整"
+            rm -rf "$tmp_dir"
+            exit 1
+        fi
+        info "sha256 校验通过"
+    else
+        warn "未提供 sha256 校验和，跳过完整性校验"
+    fi
+
     echo "$tmp_file"
 }
 

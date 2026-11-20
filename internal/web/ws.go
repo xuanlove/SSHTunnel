@@ -18,55 +18,110 @@ type WSMessage struct {
 	Data interface{} `json:"data"`
 }
 
+// WebSocket 推送参数
+const (
+	wsSendBuffer   = 64              // 每连接发送队列长度
+	wsMaxClients   = 64              // 最大并发连接数
+	wsWriteTimeout = 5 * time.Second // 单次写超时
+)
+
+// wsClient 单个 WebSocket 连接（独立发送队列，避免慢客户端阻塞广播）
+type wsClient struct {
+	conn   *websocket.Conn
+	send   chan []byte
+	closed bool
+}
+
 // Hub 管理所有 WebSocket 连接，广播消息
 type Hub struct {
-	mu      sync.RWMutex
-	clients map[*websocket.Conn]bool
+	mu      sync.Mutex
+	clients map[*wsClient]struct{}
 }
 
 // NewHub 创建 hub
 func NewHub() *Hub {
 	return &Hub{
-		clients: make(map[*websocket.Conn]bool),
+		clients: make(map[*wsClient]struct{}),
 	}
 }
 
-// Broadcast 向所有客户端广播消息
+// Broadcast 向所有客户端广播消息；队列已满的慢客户端会被断开，不阻塞其他客户端
 func (h *Hub) Broadcast(msg WSMessage) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}
-	h.mu.RLock()
-	clients := make([]*websocket.Conn, 0, len(h.clients))
+	h.mu.Lock()
 	for c := range h.clients {
-		clients = append(clients, c)
+		select {
+		case c.send <- data:
+		default:
+			h.removeLocked(c)
+		}
 	}
-	h.mu.RUnlock()
+	h.mu.Unlock()
+}
 
-	for _, c := range clients {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := c.Write(ctx, websocket.MessageText, data)
-		cancel()
-		if err != nil {
-			h.removeClient(c)
+// addClient 注册连接并启动写协程；超过连接上限时拒绝
+func (h *Hub) addClient(c *websocket.Conn) *wsClient {
+	h.mu.Lock()
+	if len(h.clients) >= wsMaxClients {
+		h.mu.Unlock()
+		_ = c.Close(websocket.StatusTryAgainLater, "too many connections")
+		return nil
+	}
+	client := &wsClient{conn: c, send: make(chan []byte, wsSendBuffer)}
+	h.clients[client] = struct{}{}
+	h.mu.Unlock()
+	go client.writeLoop(h)
+	return client
+}
+
+// writeLoop 串行发送消息并执行心跳，避免并发写
+func (c *wsClient) writeLoop(h *Hub) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case msg, ok := <-c.send:
+			if !ok {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+			err := c.conn.Write(ctx, websocket.MessageText, msg)
+			cancel()
+			if err != nil {
+				h.removeClient(c)
+				return
+			}
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := c.conn.Ping(ctx)
+			cancel()
+			if err != nil {
+				h.removeClient(c)
+				return
+			}
 		}
 	}
 }
 
-func (h *Hub) addClient(c *websocket.Conn) {
+func (h *Hub) removeClient(c *wsClient) {
 	h.mu.Lock()
-	h.clients[c] = true
+	h.removeLocked(c)
 	h.mu.Unlock()
 }
 
-func (h *Hub) removeClient(c *websocket.Conn) {
-	h.mu.Lock()
-	if _, ok := h.clients[c]; ok {
-		_ = c.Close(websocket.StatusNormalClosure, "")
-		delete(h.clients, c)
+// removeLocked 移除连接（调用方需持有锁）
+func (h *Hub) removeLocked(c *wsClient) {
+	if c.closed {
+		return
 	}
-	h.mu.Unlock()
+	c.closed = true
+	delete(h.clients, c)
+	close(c.send)
+	// 关闭连接可能阻塞，放到独立 goroutine，避免持锁等待
+	go func() { _ = c.conn.Close(websocket.StatusNormalClosure, "") }()
 }
 
 // handleLogStream WebSocket 日志流 /api/logs/stream
@@ -91,7 +146,10 @@ func (h *Handler) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	h.hub.addClient(c)
+	client := h.hub.addClient(c)
+	if client == nil {
+		return
+	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -99,30 +157,13 @@ func (h *Handler) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	var once sync.Once
 	cleanup := func() {
 		once.Do(func() {
-			cancel()              // 通知心跳 goroutine 退出
-			h.hub.removeClient(c) // 幂等：已移除则跳过
+			cancel()                   // 通知读循环退出
+			h.hub.removeClient(client) // 幂等：已移除则跳过
 		})
 	}
 	defer cleanup()
 
-	// 心跳：周期性 Ping，失败或 context 取消即退出
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := c.Ping(ctx); err != nil {
-					cleanup()
-					return
-				}
-			}
-		}
-	}()
-
-	// 阻塞读取（忽略客户端消息）；读取错误触发 defer cleanup
+	// 阻塞读取（忽略客户端消息）；心跳由写协程串行执行
 	for {
 		if _, _, err := c.Read(ctx); err != nil {
 			return

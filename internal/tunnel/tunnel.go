@@ -746,8 +746,15 @@ func (t *Tunnel) stop() {
 	}
 	close(t.stopCh)
 	t.cleanupResources()
-	// 隧道停止后清理其活动连接，避免状态页展示已断开的残留连接
+	// 等待桥接连接收尾（最多 300ms），使最后一批字节计入统计后再注销
 	if t.conns != nil {
+		deadline := time.Now().Add(300 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if t.conns.CountByTunnel(t.cfg.ID) == 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 		t.conns.RemoveTunnel(t.cfg.ID)
 	}
 }

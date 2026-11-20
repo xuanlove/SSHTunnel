@@ -11,6 +11,13 @@ import (
 	"sshtunnel/internal/port"
 )
 
+// 握手与请求读取限制（包级变量便于测试调整）
+var (
+	handshakeTimeout  = 10 * time.Second
+	httpReadTimeout   = 15 * time.Second
+	maxHTTPHeaderSize = 64 << 10 // 64KB
+)
+
 // Dialer 出站 Dialer 抽象，由 SSH 隧道提供
 type Dialer interface {
 	Dial(network, address string) (net.Conn, error)
@@ -69,6 +76,11 @@ type BaseServer struct {
 	tunnelName string
 	conns      *ConnRegistry  // 活动连接注册表（nil 表示不采集）
 	history    *AccessHistory // 结构化访问历史（nil 表示不采集）
+
+	// 慢连接防护参数（创建时从默认值复制，便于测试调整）
+	hsTimeout   time.Duration
+	readTimeout time.Duration
+	maxHeader   int
 
 	// 防火墙拦截日志去重：同一来源 IP 在窗口期内只记录一次
 	blockLogMu sync.Mutex
@@ -274,21 +286,29 @@ func buildServerWithStats(lc config.ProxyListener, dialer Dialer, log LogFunc, s
 	}
 	addr := port.BindAddress(lc.ListenPort, lc.AllowExternal)
 
+	// 城市规则依赖城市级数据库：缺失时明确失败，避免黑名单静默失效
+	if lc.Firewall != nil && lc.Firewall.Enabled && len(lc.Firewall.Cities) > 0 && !geoIPCityReady() {
+		return nil, fmt.Errorf("代理 %s 配置了城市规则，但未加载城市级 GeoIP 数据库", lc.ID)
+	}
+
 	fw, err := NewFirewall(lc.Firewall, defaultGeoResolver{})
 	if err != nil {
 		return nil, fmt.Errorf("防火墙配置错误: %w", err)
 	}
 
 	base := &BaseServer{
-		id:         lc.ID,
-		protocol:   lc.Protocol,
-		listenAddr: addr,
-		listenPort: lc.ListenPort,
-		dialer:     dialer,
-		log:        log,
-		fw:         fw,
-		accessLog:  lc.AccessLog,
-		stats:      stats,
+		id:          lc.ID,
+		protocol:    lc.Protocol,
+		listenAddr:  addr,
+		listenPort:  lc.ListenPort,
+		dialer:      dialer,
+		log:         log,
+		fw:          fw,
+		accessLog:   lc.AccessLog,
+		stats:       stats,
+		hsTimeout:   handshakeTimeout,
+		readTimeout: httpReadTimeout,
+		maxHeader:   maxHTTPHeaderSize,
 	}
 	if tracker != nil {
 		base.tunnelID = tracker.TunnelID

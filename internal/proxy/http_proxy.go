@@ -107,12 +107,40 @@ func (s *httpServer) handleConn(conn net.Conn) {
 		return
 	}
 
+	// 请求头读取限制超时，防止慢速连接长期占用 goroutine
+	_ = conn.SetReadDeadline(time.Now().Add(s.readTimeout))
+	if tc, ok := conn.(*tls.Conn); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), s.hsTimeout)
+		err := tc.HandshakeContext(ctx)
+		cancel()
+		if err != nil {
+			return
+		}
+	}
+
 	start := time.Now()
 	br := bufio.NewReader(conn)
 	req, err := http.ReadRequest(br)
 	if err != nil {
 		return
 	}
+
+	// 限制请求头总大小，避免超大头部耗尽内存
+	headerSize := len(req.Method) + len(req.URL.String()) + len(req.Proto)
+	for k, vs := range req.Header {
+		headerSize += len(k)
+		for _, v := range vs {
+			headerSize += len(v)
+		}
+	}
+	if headerSize > s.maxHeader {
+		conn.Write([]byte("HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"))
+		s.logAccessDenied(conn, req.URL.Host, "请求头过大")
+		return
+	}
+
+	// 请求头读取完成，清除超时（后续 CONNECT/响应可能长时间传输）
+	_ = conn.SetReadDeadline(time.Time{})
 
 	// 认证校验
 	if !s.checkAuth(req) {

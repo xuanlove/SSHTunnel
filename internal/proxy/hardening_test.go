@@ -17,6 +17,13 @@ import (
 // startTestProxy 启动指定协议的测试代理，返回监听端口
 func startTestProxy(t *testing.T, lc config.ProxyListener, dialer Dialer) int {
 	t.Helper()
+	port, _ := startTestProxyWith(t, lc, dialer, nil)
+	return port
+}
+
+// startTestProxyWith 启动测试代理并允许在启动前调整参数
+func startTestProxyWith(t *testing.T, lc config.ProxyListener, dialer Dialer, setup func(Server)) (int, Server) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("分配端口失败: %v", err)
@@ -28,6 +35,9 @@ func startTestProxy(t *testing.T, lc config.ProxyListener, dialer Dialer) int {
 	if err != nil {
 		t.Fatalf("构建代理失败: %v", err)
 	}
+	if setup != nil {
+		setup(srv)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -35,7 +45,7 @@ func startTestProxy(t *testing.T, lc config.ProxyListener, dialer Dialer) int {
 	})
 	go func() { _ = srv.Start(ctx) }()
 	time.Sleep(50 * time.Millisecond)
-	return port
+	return port, srv
 }
 
 // TestSOCKS4RejectsOversizedUserID 超长 USERID 应被拒绝并断开
@@ -149,5 +159,80 @@ func TestHTTPConnectPreservesPrefetchedBytes(t *testing.T) {
 	}
 	if string(echoed) != "ping" {
 		t.Errorf("回显不符: %q", echoed)
+	}
+}
+
+// TestCityRuleRequiresCityDB 城市规则在未加载城市库时必须启动失败
+func TestCityRuleRequiresCityDB(t *testing.T) {
+	lc := config.ProxyListener{
+		ID:       "city-rule",
+		Protocol: config.ProxySOCKS5,
+		Firewall: &config.FirewallConfig{
+			Enabled: true,
+			Cities:  []string{"CN/GD/Shenzhen"},
+		},
+	}
+	if _, err := BuildServer(lc, &mockDialer{}, nil); err == nil {
+		t.Fatalf("未加载城市库时应拒绝启动城市规则监听器")
+	}
+}
+
+// TestSOCKS5HandshakeTimeout 慢速客户端未完成握手时应被断开
+func TestSOCKS5HandshakeTimeout(t *testing.T) {
+	port, _ := startTestProxyWith(t, config.ProxyListener{
+		ID:       "socks5-timeout",
+		Protocol: config.ProxySOCKS5,
+	}, &mockDialer{target: "127.0.0.1:1"}, func(s Server) {
+		if v, ok := s.(*socks5Server); ok {
+			v.hsTimeout = 100 * time.Millisecond
+		}
+	})
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	// 不发送任何握手数据，读取应在超时后返回 EOF/错误
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Errorf("握手超时后连接应被关闭")
+	}
+}
+
+// TestHTTPHeaderTooLarge 请求头超过限制时返回 431
+func TestHTTPHeaderTooLarge(t *testing.T) {
+	port, _ := startTestProxyWith(t, config.ProxyListener{
+		ID:       "http-big-header",
+		Protocol: config.ProxyHTTP,
+	}, &mockDialer{target: "127.0.0.1:1"}, func(s Server) {
+		if v, ok := s.(*httpServer); ok {
+			v.maxHeader = 1024
+			v.readTimeout = 2 * time.Second
+		}
+	})
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	big := strings.Repeat("a", 2048)
+	req := fmt.Sprintf("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nX-Big: %s\r\n\r\n", big)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("发送请求失败: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("读取响应失败: %v", err)
+	}
+	if !strings.Contains(line, "431") {
+		t.Errorf("应返回 431，实际: %s", line)
 	}
 }

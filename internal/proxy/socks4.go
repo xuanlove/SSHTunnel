@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -77,6 +78,17 @@ func (s *socks4Server) handleConn(conn net.Conn) {
 		return
 	}
 
+	// 握手阶段限制读超时，防止慢速连接长期占用 goroutine
+	_ = conn.SetReadDeadline(time.Now().Add(s.hsTimeout))
+	if tc, ok := conn.(*tls.Conn); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), s.hsTimeout)
+		err := tc.HandshakeContext(ctx)
+		cancel()
+		if err != nil {
+			return
+		}
+	}
+
 	start := time.Now()
 	// SOCKS4 协议: VN(1) CD(1) DSTPORT(2) DSTIP(4) USERID(null-terminated)
 	header := make([]byte, 8)
@@ -123,6 +135,9 @@ func (s *socks4Server) handleConn(conn net.Conn) {
 	}
 
 	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
+
+	// 握手完成，清除读超时（后续桥接可能长时间空闲）
+	_ = conn.SetReadDeadline(time.Time{})
 
 	// 通过 SSH 隧道连接目标
 	targetConn, err := s.dialer.Dial("tcp", target)
