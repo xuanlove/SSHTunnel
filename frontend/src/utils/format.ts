@@ -1,4 +1,4 @@
-// 通用展示格式化：字节数、运行时长、本地时间与已持续时长
+// 通用展示格式化与时间工具：字节数、运行时长、本地时间、已持续时长、时间范围
 
 // 字节数：B 不显示小数，其余按数值大小保留 0/1 位小数
 export function formatBytes(n?: number): string {
@@ -49,4 +49,16 @@ export function formatElapsed(startedAt?: string, nowMs = Date.now()): string {
   const sec = s % 60
   const p = (n: number) => String(n).padStart(2, '0')
   return h > 0 ? `${h}:${p(m)}:${p(sec)}` : `${m}:${p(sec)}`
+}
+
+// 时间范围选择（1h/6h/24h/7d）转换为 RFC3339 起点；空或未知范围返回空串
+export function rangeToFromISO(range: string, nowMs = Date.now()): string {
+  const durs: Record<string, number> = {
+    '1h': 3600e3,
+    '6h': 21600e3,
+    '24h': 86400e3,
+    '7d': 604800e3,
+  }
+  const d = durs[range]
+  return d ? new Date(nowMs - d).toISOString() : ''
 }

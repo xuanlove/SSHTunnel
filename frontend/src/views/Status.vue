@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import * as api from '@/api'
 import type { AccessRecord, ConnSnapshot, NodeStatus, TunnelTraffic } from '@/types'
 import type { AlertHistory, MetricPoint } from '@/api'
-import { formatBytes, formatDuration, formatElapsed, formatTime } from '@/utils/format'
+import { formatBytes, formatDuration, formatElapsed, formatTime, rangeToFromISO } from '@/utils/format'
 import TrendChart from '@/components/TrendChart.vue'
 
 const status = ref<NodeStatus | null>(null)
@@ -135,16 +135,9 @@ const nodeConnections = computed<ConnSnapshot[]>(() => {
   return connections.value.filter(c => c.tunnel_id === activeNodeId.value)
 })
 
-// histFromISO 将时间范围选择转换为 RFC3339 起点
+// histFromISO 将时间范围选择转换为 RFC3339 起点（换算逻辑在 utils 中单测覆盖）
 function histFromISO(): string {
-  const durs: Record<string, number> = {
-    '1h': 3600e3,
-    '6h': 21600e3,
-    '24h': 86400e3,
-    '7d': 604800e3,
-  }
-  const d = durs[histRange.value]
-  return d ? new Date(Date.now() - d).toISOString() : ''
+  return rangeToFromISO(histRange.value)
 }
 
 async function loadNodeHistory() {

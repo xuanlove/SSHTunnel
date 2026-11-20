@@ -839,14 +839,36 @@ Pinia store 封装 `configs`/`logs`/`loading` 状态与所有异步操作，日�
 运行测试：
 
 ```bash
-# 全部测试
+# 全部后端测试
 go test ./...
 
-# 带竞态检测
+# 带竞态检测（CI 使用）
 go test -race ./...
 
 # 指定包
 go test ./internal/tunnel/...
+```
+
+前端测试（vitest + @vue/test-utils + happy-dom）：
+
+| 文件 | 覆盖 |
+|------|------|
+| `src/utils/format.spec.ts` | 字节数/时长/本地时间格式化、时间范围换算的边界值与容错 |
+| `src/api/index.spec.ts` | web（fetch mock：鉴权头、401 幂等跳转、错误分支）/ desktop（`window.go` 绑定 stub）双模式 |
+| `src/components/TrendChart.spec.ts` | 空数据占位、折线/面积路径渲染、指标切换重算 |
+| `src/views/Status.spec.ts` | 概览/节点卡片渲染、告警横幅规则去重、节点抽屉与 24h 历史检索、节点删除关闭抽屉 |
+
+```bash
+cd frontend
+
+# 单次运行（CI 使用）
+npm test
+
+# 监听模式
+npm run test:watch
+
+# 覆盖率报告
+npm run test:coverage
 ```
 
 ### 提交规范
@@ -991,6 +1013,13 @@ npm run preview    # 预览构建产物
 ---
 
 ## 版本更新说明
+
+### v1.8.0
+
+- **前端测试基建**：引入 vitest + @vue/test-utils + happy-dom，建立与后端对齐的前端自动化测试防线（45 个用例）
+- **测试覆盖**：`utils/format` 纯函数边界值与容错（含从 Status.vue 抽出的时间范围换算 `rangeToFromISO`）；`api` 层 web/desktop 双模式分支（fetch mock：鉴权头、401 幂等跳转、业务错误；`window.go` Wails 绑定 stub）；`TrendChart` 空数据/路径渲染/指标切换；`Status` 视图告警横幅规则去重、节点抽屉历史检索与节点删除自动关闭
+- **CI**：Test 工作流前端 job 在类型检查前执行 `npm test`
+- 本版本不改变任何运行时行为
 
 ### v1.7.1
 

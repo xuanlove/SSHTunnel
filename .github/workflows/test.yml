@@ -45,6 +45,9 @@ jobs:
       - name: npm ci
         working-directory: frontend
         run: npm ci --no-audit --no-fund
+      - name: unit tests
+        working-directory: frontend
+        run: npm test
       - name: vue-tsc
         working-directory: frontend
         run: npx vue-tsc --noEmit
