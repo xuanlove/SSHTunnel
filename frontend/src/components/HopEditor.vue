@@ -58,6 +58,65 @@ function updateHop(idx: number, patch: Partial<HopConfig>) {
   arr[idx] = { ...arr[idx], ...patch }
   hops.value = arr
 }
+
+// 最小权限 SSH 账户示例（在跳板机执行）：无登录 Shell、仅密钥、仅允许 TCP 转发
+const sshAccountExample = `# 1) 创建无登录 Shell 的专用账户（默认无密码，仅密钥可登录）
+sudo useradd --system --user-group --create-home --shell "$(command -v nologin)" sshtunnel
+
+# 2) 写入公钥（替换为你的公钥内容）
+sudo install -d -m 700 -o sshtunnel -g sshtunnel /home/sshtunnel/.ssh
+echo 'ssh-ed25519 AAAA... your-key' | sudo tee /home/sshtunnel/.ssh/authorized_keys > /dev/null
+sudo chown sshtunnel:sshtunnel /home/sshtunnel/.ssh/authorized_keys
+sudo chmod 600 /home/sshtunnel/.ssh/authorized_keys
+
+# 3) 限制该账户只能做端口转发（追加到 sshd_config 末尾）
+sudo tee -a /etc/ssh/sshd_config > /dev/null <<'EOF'
+
+Match User sshtunnel
+    AllowTcpForwarding yes
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    PermitTunnel no
+EOF
+sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }
+
+# 4) 如确需密码认证：sudo passwd sshtunnel（不推荐）`
+
+// 复制文本：优先 Clipboard API，HTTP 非安全上下文下降级为 execCommand
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // 继续走降级方案
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+async function copyAccountExample() {
+  const ok = await copyText(sshAccountExample)
+  if (ok) {
+    ElMessage.success('账户创建命令已复制')
+  } else {
+    ElMessage.error('复制失败，请手动选择命令复制')
+  }
+}
 </script>
 
 <template>
@@ -129,6 +188,22 @@ function updateHop(idx: number, patch: Partial<HopConfig>) {
     </div>
 
     <el-button class="add-btn" @click="addHop">+ 添加跳板</el-button>
+
+    <el-collapse class="ssh-account-hint" data-testid="ssh-account-hint">
+      <el-collapse-item name="ssh-account">
+        <template #title>
+          <span class="hint-title">如何创建最小权限 SSH 账户</span>
+        </template>
+        <div class="hint-body">
+          <p class="hint-desc">
+            在 Linux 跳板机上以 root 执行，将 <code>sshtunnel</code> 替换为实际用户名。
+            该账户无登录 Shell，仅用于本项目的 TCP 端口转发 / 代理。
+          </p>
+          <pre class="hint-code">{{ sshAccountExample }}</pre>
+          <el-button size="small" data-testid="ssh-account-copy" @click="copyAccountExample">复制命令</el-button>
+        </div>
+      </el-collapse-item>
+    </el-collapse>
   </div>
 </template>
 
@@ -181,5 +256,56 @@ function updateHop(idx: number, patch: Partial<HopConfig>) {
 .add-btn {
   border-style: dashed;
   width: 100%;
+}
+.ssh-account-hint {
+  border: none;
+  --el-collapse-header-bg-color: transparent;
+  --el-collapse-content-bg-color: transparent;
+}
+.ssh-account-hint :deep(.el-collapse-item__header) {
+  height: 32px;
+  border-bottom: none;
+  background-color: transparent;
+  color: #8a8d95;
+  font-size: 12px;
+}
+.ssh-account-hint :deep(.el-collapse-item__wrap) {
+  border-bottom: none;
+  background-color: transparent;
+}
+.ssh-account-hint :deep(.el-collapse-item__content) {
+  padding-bottom: 4px;
+}
+.hint-title {
+  color: #409eff;
+  font-size: 12px;
+}
+.hint-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hint-desc {
+  margin: 0;
+  font-size: 12px;
+  color: #8a8d95;
+  line-height: 1.6;
+}
+.hint-desc code {
+  color: #c0c3cb;
+}
+.hint-code {
+  margin: 0;
+  padding: 10px;
+  max-height: 280px;
+  overflow: auto;
+  background-color: #14161a;
+  border: 1px solid #3a3f4b;
+  border-radius: 4px;
+  color: #c0c3cb;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
 }
 </style>
