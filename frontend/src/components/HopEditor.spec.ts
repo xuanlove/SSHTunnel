@@ -48,4 +48,54 @@ describe('HopEditor', () => {
     expect(copied).toContain('sudo useradd --system')
     expect(copied).toContain('Match User sshtunnel')
   })
+
+  it('用户名默认跟随第 1 跳用户名', async () => {
+    const w = mount(HopEditor, {
+      props: {
+        modelValue: [{ user: 'alice', host: '10.0.0.1', port: 22, auth_type: 'password' }],
+      },
+      global: { plugins: [ElementPlus] },
+    })
+    const input = w.find('input[data-testid="ssh-account-user"]').element as HTMLInputElement
+    expect(input.value).toBe('alice')
+  })
+
+  it('一键生成配置按用户名与公钥替换占位符并自动复制', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const w = mountEditor()
+
+    await w.find('input[data-testid="ssh-account-user"]').setValue('tunnelx')
+    await w.find('input[data-testid="ssh-account-pubkey"]').setValue('ssh-ed25519 AAAAC3Nz test@host')
+    await w.find('[data-testid="ssh-account-generate"]').trigger('click')
+    await flushPromises()
+
+    const code = w.find('.hint-code').text()
+    expect(code).toContain('sudo useradd --system --user-group --create-home --shell "$(command -v nologin)" tunnelx')
+    expect(code).toContain('/home/tunnelx/.ssh')
+    expect(code).toContain("echo 'ssh-ed25519 AAAAC3Nz test@host'")
+    expect(code).toContain('Match User tunnelx')
+    expect(code).not.toContain('sshtunnel')
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('Match User tunnelx'))
+    expect(w.text()).toContain('已按当前输入生成')
+  })
+
+  it('非法用户名不生成配置并给出提示', async () => {
+    const w = mountEditor()
+    await w.find('input[data-testid="ssh-account-user"]').setValue('Bad User')
+    await w.find('[data-testid="ssh-account-generate"]').trigger('click')
+    await flushPromises()
+    // 仍为默认示例
+    expect(w.find('.hint-code').text()).toContain('Match User sshtunnel')
+    expect(document.body.textContent).toContain('用户名只能包含')
+  })
+
+  it('非法公钥不生成配置并给出提示', async () => {
+    const w = mountEditor()
+    await w.find('input[data-testid="ssh-account-pubkey"]').setValue('not-a-key')
+    await w.find('[data-testid="ssh-account-generate"]').trigger('click')
+    await flushPromises()
+    expect(w.find('.hint-code').text()).toContain('ssh-ed25519 AAAA... your-key')
+    expect(document.body.textContent).toContain('公钥格式不正确')
+  })
 })

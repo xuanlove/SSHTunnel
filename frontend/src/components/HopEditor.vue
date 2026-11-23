@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as api from '@/api'
 import type { HopConfig } from '@/types'
@@ -59,20 +59,21 @@ function updateHop(idx: number, patch: Partial<HopConfig>) {
   hops.value = arr
 }
 
-// 最小权限 SSH 账户示例（在跳板机执行）：无登录 Shell、仅密钥、仅允许 TCP 转发
-const sshAccountExample = `# 1) 创建无登录 Shell 的专用账户（默认无密码，仅密钥可登录）
-sudo useradd --system --user-group --create-home --shell "$(command -v nologin)" sshtunnel
+// 最小权限 SSH 账户配置（在跳板机执行）：无登录 Shell、仅密钥、仅允许 TCP 转发
+function buildAccountCommands(user: string, pubKey: string): string {
+  return `# 1) 创建无登录 Shell 的专用账户（默认无密码，仅密钥可登录）
+sudo useradd --system --user-group --create-home --shell "$(command -v nologin)" ${user}
 
 # 2) 写入公钥（替换为你的公钥内容）
-sudo install -d -m 700 -o sshtunnel -g sshtunnel /home/sshtunnel/.ssh
-echo 'ssh-ed25519 AAAA... your-key' | sudo tee /home/sshtunnel/.ssh/authorized_keys > /dev/null
-sudo chown sshtunnel:sshtunnel /home/sshtunnel/.ssh/authorized_keys
-sudo chmod 600 /home/sshtunnel/.ssh/authorized_keys
+sudo install -d -m 700 -o ${user} -g ${user} /home/${user}/.ssh
+echo '${pubKey}' | sudo tee /home/${user}/.ssh/authorized_keys > /dev/null
+sudo chown ${user}:${user} /home/${user}/.ssh/authorized_keys
+sudo chmod 600 /home/${user}/.ssh/authorized_keys
 
 # 3) 限制该账户只能做端口转发（追加到 sshd_config 末尾）
 sudo tee -a /etc/ssh/sshd_config > /dev/null <<'EOF'
 
-Match User sshtunnel
+Match User ${user}
     AllowTcpForwarding yes
     PermitTTY no
     X11Forwarding no
@@ -81,7 +82,31 @@ Match User sshtunnel
 EOF
 sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }
 
-# 4) 如确需密码认证：sudo passwd sshtunnel（不推荐）`
+# 4) 如确需密码认证：sudo passwd ${user}（不推荐）`
+}
+
+const DEFAULT_USER = 'sshtunnel'
+const DEFAULT_PUBKEY = 'ssh-ed25519 AAAA... your-key'
+const ACCOUNT_USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/
+
+const accountUser = ref('')
+const accountPubKey = ref('')
+const accountCommands = ref(buildAccountCommands(DEFAULT_USER, DEFAULT_PUBKEY))
+const accountGenerated = ref(false)
+
+// 默认跟随第 1 跳用户名，用户手动填写后不再覆盖
+watch(
+  () => hops.value[0]?.user,
+  (u) => {
+    if (u && !accountUser.value) accountUser.value = u
+  },
+  { immediate: true },
+)
+
+// 输入变化后清除「已生成」标记，避免提示与实际内容不符
+watch([accountUser, accountPubKey], () => {
+  accountGenerated.value = false
+})
 
 // 复制文本：优先 Clipboard API，HTTP 非安全上下文下降级为 execCommand
 async function copyText(text: string): Promise<boolean> {
@@ -109,8 +134,30 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-async function copyAccountExample() {
-  const ok = await copyText(sshAccountExample)
+// 一键生成：按输入的用户名/公钥替换示例中的占位符，并复制到剪贴板
+async function generateAccountConfig() {
+  const user = (accountUser.value.trim() || hops.value[0]?.user?.trim() || DEFAULT_USER)
+  if (!ACCOUNT_USER_RE.test(user)) {
+    ElMessage.warning('用户名只能包含小写字母、数字、下划线和短横线，且以字母或下划线开头')
+    return
+  }
+  const pubKey = accountPubKey.value.trim()
+  if (pubKey && (!/^(ssh-|ecdsa-|sk-)/.test(pubKey) || /['\r\n]/.test(pubKey))) {
+    ElMessage.warning('公钥格式不正确（应为 ssh-ed25519 / ssh-rsa / ecdsa- 开头的单行内容）')
+    return
+  }
+  accountCommands.value = buildAccountCommands(user, pubKey || DEFAULT_PUBKEY)
+  accountGenerated.value = true
+  const ok = await copyText(accountCommands.value)
+  if (ok) {
+    ElMessage.success('已生成配置并复制到剪贴板')
+  } else {
+    ElMessage.success('已生成配置（自动复制失败，请手动复制）')
+  }
+}
+
+async function copyAccountCommands() {
+  const ok = await copyText(accountCommands.value)
   if (ok) {
     ElMessage.success('账户创建命令已复制')
   } else {
@@ -196,11 +243,33 @@ async function copyAccountExample() {
         </template>
         <div class="hint-body">
           <p class="hint-desc">
-            在 Linux 跳板机上以 root 执行，将 <code>sshtunnel</code> 替换为实际用户名。
+            在 Linux 跳板机上以 root 执行。用户名默认取第 1 跳，可修改；填入公钥后命令即为可直接执行的完整配置。
             该账户无登录 Shell，仅用于本项目的 TCP 端口转发 / 代理。
           </p>
-          <pre class="hint-code">{{ sshAccountExample }}</pre>
-          <el-button size="small" data-testid="ssh-account-copy" @click="copyAccountExample">复制命令</el-button>
+          <div class="hint-form">
+            <el-input
+              v-model="accountUser"
+              size="small"
+              placeholder="用户名（默认取第 1 跳）"
+              data-testid="ssh-account-user"
+              class="hint-user"
+            />
+            <el-input
+              v-model="accountPubKey"
+              size="small"
+              placeholder="公钥内容（可选，ssh-ed25519 AAAA...）"
+              data-testid="ssh-account-pubkey"
+              class="hint-pubkey"
+            />
+            <el-button size="small" type="primary" data-testid="ssh-account-generate" @click="generateAccountConfig">
+              一键生成配置
+            </el-button>
+          </div>
+          <pre class="hint-code">{{ accountCommands }}</pre>
+          <div class="hint-actions">
+            <el-button size="small" data-testid="ssh-account-copy" @click="copyAccountCommands">复制命令</el-button>
+            <span v-if="accountGenerated" class="hint-generated">已按当前输入生成</span>
+          </div>
         </div>
       </el-collapse-item>
     </el-collapse>
@@ -284,6 +353,27 @@ async function copyAccountExample() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.hint-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.hint-user {
+  width: 180px;
+}
+.hint-pubkey {
+  flex: 1;
+  min-width: 220px;
+}
+.hint-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hint-generated {
+  font-size: 12px;
+  color: #67c23a;
 }
 .hint-desc {
   margin: 0;
