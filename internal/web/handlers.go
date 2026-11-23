@@ -2,7 +2,9 @@ package web
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -497,9 +499,20 @@ func (h *Handler) resolveTLSSettings(enabled bool, certPEM, keyPEM, certFile, ke
 		next.KeyFile = WebKeyPath()
 	} else {
 		if f := strings.TrimSpace(certFile); f != "" {
+			// 显式指定的证书文件必须是有效 PEM 证书（无论是否启用 HTTPS）：
+			// 路径会被持久化，并在 GET /api/web/tls 时回读文件内容返回前端，
+			// 若不校验，任意路径可经此接口读取任意系统文件
+			data, err := os.ReadFile(f)
+			if err != nil || !validCertPEM(data) {
+				return next, fmt.Errorf("证书文件不存在或不是有效的 PEM 证书: %s", f)
+			}
 			next.CertFile = f
 		}
 		if f := strings.TrimSpace(keyFile); f != "" {
+			data, err := os.ReadFile(f)
+			if err != nil || !validKeyPEM(data) {
+				return next, fmt.Errorf("私钥文件不存在或不是有效的 PEM 私钥: %s", f)
+			}
 			next.KeyFile = f
 		}
 	}
@@ -513,6 +526,36 @@ func (h *Handler) resolveTLSSettings(enabled bool, certPEM, keyPEM, certFile, ke
 		}
 	}
 	return next, nil
+}
+
+// validCertPEM 判断数据是否包含可解析的 X.509 证书 PEM 块
+func validCertPEM(data []byte) bool {
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return false
+	}
+	_, err := x509.ParseCertificate(block.Bytes)
+	return err == nil
+}
+
+// validKeyPEM 判断数据是否包含 Go 支持的私钥 PEM 块（PKCS#8 / PKCS#1 / EC）
+func validKeyPEM(data []byte) bool {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return false
+	}
+	switch block.Type {
+	case "PRIVATE KEY":
+		_, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		return err == nil
+	case "RSA PRIVATE KEY":
+		_, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		return err == nil
+	case "EC PRIVATE KEY":
+		_, err := x509.ParseECPrivateKey(block.Bytes)
+		return err == nil
+	}
+	return false
 }
 
 // scheduleTLSReload 延迟触发监听重启，保证当前响应先返回客户端。

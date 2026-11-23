@@ -552,7 +552,10 @@ func (t *Tunnel) watchOnly() {
 		t.log.TunnelWarn(t.cfg.ID, "SSH 连接已关闭")
 	}
 	t.log.TunnelError(t.cfg.ID, "未启用自动重连，隧道已停止")
-	// 连接已不可用：移除运行实例并上报错误，避免界面长期显示「运行中」
+	// 连接已不可用：先关闭本地转发与代理监听（否则实例被移除后端口仍被占用，
+	// 重启隧道必然 EADDRINUSE，只能重启进程恢复），再移除运行实例并上报错误，
+	// 避免界面长期显示「运行中」
+	t.cleanupResources()
 	if t.onFatal != nil {
 		t.onFatal()
 	}

@@ -518,6 +518,66 @@ func TestHeartbeatFailureTriggersReconnect(t *testing.T) {
 	}
 }
 
+// TestWatchOnlyCleansUpListeners 未启用自动重连时断线，本地转发监听必须被关闭，
+// 否则实例虽被移除但端口仍被占用，重启隧道必然失败（僵尸隧道）。
+func TestWatchOnlyCleansUpListeners(t *testing.T) {
+	// 选一个空闲本地端口
+	fl, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("分配本地端口失败: %v", err)
+	}
+	localPort := fl.Addr().(*net.TCPAddr).Port
+	_ = fl.Close()
+
+	d := &mockDialer{results: []dialResult{{}}} // 仅初次连接，不应有重连拨号
+	withMockDialer(t, d)
+	m := newTestManager(t)
+	sc := &statusCollector{}
+	m.OnStatusChange(sc.cb)
+
+	cfg := &config.TunnelConfig{
+		ID:            "watch-only",
+		Name:          "仅监听断线",
+		HopChain:      []config.HopConfig{{User: "u", Host: "h", Port: 22, AuthType: "password", Password: "p"}},
+		TunnelType:    config.TunnelLocalForward,
+		AutoReconnect: false,
+		LocalForwards: []config.LocalForward{
+			{ID: "lf-1", LocalPort: localPort, RemoteHost: "127.0.0.1", RemotePort: 80},
+		},
+	}
+	if err := m.Start(cfg); err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+
+	// 模拟 SSH 断开（未启用自动重连 → watchOnly 路径）
+	d.lastClient().Close()
+
+	// 实例应被移除并上报 error 状态
+	if !waitFor(2*time.Second, func() bool { return !m.IsRunning("watch-only") }) {
+		t.Fatalf("断开后应从运行列表移除")
+	}
+	found := false
+	for _, s := range sc.snapshot() {
+		if s == string(config.StatusError) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("应上报 error 状态，实际: %v", sc.snapshot())
+	}
+	if d.callCount() != 1 {
+		t.Errorf("未启用重连时不应再次拨号，实际 %d 次", d.callCount())
+	}
+
+	// 关键回归：端口应被释放，可立即重新绑定（修复前僵尸监听占用端口）
+	ln2, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", localPort))
+	if err != nil {
+		t.Fatalf("断开后端口仍被占用，无法重新绑定: %v", err)
+	}
+	_ = ln2.Close()
+}
+
 // TestStartDialError 验证首次连接失败时 Start 返回错误且隧道未注册。
 func TestStartDialError(t *testing.T) {
 	d := &mockDialer{results: []dialResult{{err: errors.New("ssh unreachable")}}}

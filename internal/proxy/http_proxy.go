@@ -216,6 +216,10 @@ func (s *httpServer) handleConnect(conn net.Conn, req *http.Request, start time.
 // handleHTTP 处理普通 HTTP 请求转发
 func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request, start time.Time, entry *ConnEntry) {
 	target := req.URL.Host
+	// 绝对形式请求可省略默认端口（如 GET http://example.com/ HTTP/1.1），补默认 80
+	if req.URL.Port() == "" {
+		target = net.JoinHostPort(req.URL.Hostname(), "80")
+	}
 	// 通过 SSH 隧道连接目标
 	targetConn, err := s.dialer.Dial("tcp", target)
 	if err != nil {

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -336,6 +338,63 @@ func TestHTTPProxy_CONNECT(t *testing.T) {
 	}
 	if string(buf[:total]) != expected {
 		t.Errorf("回显不匹配: got %q, want %q", buf[:total], expected)
+	}
+}
+
+// strictDialer 模拟真实 SSH Dial：目标必须是 host:port 形式，缺省端口时拨号失败
+type strictDialer struct {
+	target string
+}
+
+func (d *strictDialer) Dial(network, address string) (net.Conn, error) {
+	if _, _, err := net.SplitHostPort(address); err != nil {
+		return nil, fmt.Errorf("dial %s: %w", address, err)
+	}
+	return net.Dial(network, d.target)
+}
+
+// TestHTTPProxy_PlainHTTP_PortlessHost 普通代理请求目标省略默认端口时应补 80 转发。
+// 修复前 `GET http://example.com/` 因 Dial 缺端口必然 502，纯 HTTP 代理不可用。
+func TestHTTPProxy_PlainHTTP_PortlessHost(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok-via-proxy"))
+	}))
+	defer ts.Close()
+
+	lc := config.ProxyListener{ID: "test-http-plain", Protocol: config.ProxyHTTP, ListenPort: 0}
+	port, handle, err := startProxyServer(t, lc, &strictDialer{target: ts.Listener.Addr().String()})
+	if err != nil {
+		t.Fatalf("启动 HTTP 代理失败: %v", err)
+	}
+	defer handle.Stop()
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	defer conn.Close()
+
+	// 绝对形式、无端口
+	req := "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("发送请求失败: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("读取状态行失败: %v", err)
+	}
+	if strings.Contains(statusLine, "502") {
+		t.Fatalf("无端口目标不应返回 502，got: %s", statusLine)
+	}
+	if !strings.Contains(statusLine, "200") {
+		t.Fatalf("应返回目标服务器的 200 响应, got: %s", statusLine)
+	}
+	body, _ := io.ReadAll(br)
+	if !strings.Contains(string(body), "ok-via-proxy") {
+		t.Errorf("响应体应来自目标服务器，got: %q", body)
 	}
 }
 
