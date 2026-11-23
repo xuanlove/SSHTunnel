@@ -83,16 +83,37 @@ describe('HopEditor', () => {
     expect(document.body.textContent).toContain('公钥为占位符')
   })
 
-  it('编辑输入后清除「已生成」标记', async () => {
+  it('编辑输入后清除公钥占位符警告', async () => {
     const w = mountEditor()
-    await w.find('input[data-testid="ssh-account-pubkey"]').setValue('ssh-ed25519 AAAAC3Nz x')
     await w.find('[data-testid="ssh-account-generate"]').trigger('click')
     await flushPromises()
-    expect(w.find('.hint-generated').exists()).toBe(true)
+    expect(w.find('.hint-warn').exists()).toBe(true)
 
     await w.find('input[data-testid="ssh-account-user"]').setValue('someone')
     await flushPromises()
-    expect(w.find('.hint-generated').exists()).toBe(false)
+    expect(w.find('.hint-warn').exists()).toBe(false)
+  })
+
+  it('复制命令时公钥为空给出占位符警告', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const w = mountEditor()
+    await w.find('[data-testid="ssh-account-copy"]').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(w.find('.hint-warn').exists()).toBe(true)
+    expect(document.body.textContent).toContain('公钥为占位符')
+  })
+
+  it('复制命令时非法用户名中止复制并提示', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const w = mountEditor()
+    await w.find('input[data-testid="ssh-account-user"]').setValue('Bad User')
+    await w.find('[data-testid="ssh-account-copy"]').trigger('click')
+    await flushPromises()
+    expect(writeText).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('用户名只能包含')
   })
 
   it('Clipboard API 不可用时降级 execCommand 复制', async () => {
@@ -100,6 +121,8 @@ describe('HopEditor', () => {
     const exec = vi.fn().mockReturnValue(true)
     ;(document as any).execCommand = exec
     const w = mountEditor()
+    // 填入合法公钥，避免走到占位符警告分支
+    await w.find('input[data-testid="ssh-account-pubkey"]').setValue('ssh-ed25519 AAAAC3Nz x')
     await w.find('[data-testid="ssh-account-copy"]').trigger('click')
     await flushPromises()
     expect(exec).toHaveBeenCalledWith('copy')
@@ -121,9 +144,11 @@ describe('HopEditor', () => {
     expect(code).toContain('/home/tunnelx/.ssh')
     expect(code).toContain("echo 'ssh-ed25519 AAAAC3Nz test@host'")
     expect(code).toContain('Match User tunnelx')
+    expect(code).toContain('# >>> ssh-tunnel tunnelx')
+    expect(code).toContain('tmp=$(mktemp)')
+    expect(code).toContain('sudo cat "$tmp" > /etc/ssh/sshd_config')
     expect(code).not.toContain('sshtunnel')
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining('Match User tunnelx'))
-    expect(w.text()).toContain('已按当前输入生成')
   })
 
   it('切换密码认证后生成密码模式配置并复制', async () => {
@@ -131,7 +156,7 @@ describe('HopEditor', () => {
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     const w = mountEditor()
     await w.find('input[data-testid="ssh-account-user"]').setValue('tunnelpw')
-    await w.find('input[value="password"]').setValue()
+    await w.find('[data-testid="ssh-account-auth"] input[value="password"]').setValue()
 
     // 公钥输入隐藏，预览立即切换为密码模式
     expect(w.find('input[data-testid="ssh-account-pubkey"]').exists()).toBe(false)
@@ -142,6 +167,7 @@ describe('HopEditor', () => {
 
     const code = w.find('.hint-code').text()
     expect(code).toContain('sudo passwd tunnelpw')
+    expect(code).toContain('# >>> ssh-tunnel tunnelpw')
     expect(code).toContain('PasswordAuthentication yes')
     expect(code).toContain('PubkeyAuthentication no')
     expect(code).not.toContain('authorized_keys')
@@ -149,6 +175,37 @@ describe('HopEditor', () => {
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining('sudo passwd tunnelpw'))
     // 密码模式不产生「公钥占位符」警告
     expect(w.find('.hint-warn').exists()).toBe(false)
+  })
+
+  it('认证方式默认跟随第 1 跳，手动切换后不再覆盖', async () => {
+    const hop = (authType: string) => [{ user: 'alice', host: '10.0.0.1', port: 22, auth_type: authType }]
+    const w = mount(HopEditor, {
+      props: { modelValue: hop('password') },
+      global: { plugins: [ElementPlus] },
+    })
+    const radio = (v: string) =>
+      w.find(`[data-testid="ssh-account-auth"] input[value="${v}"]`).element as HTMLInputElement
+
+    // 未手动选择：跟随第 1 跳的密码认证
+    expect(radio('password').checked).toBe(true)
+    expect(w.find('.hint-code').text()).toContain('sudo passwd alice')
+
+    // 手动切到公钥后，跳板认证方式再变化也不覆盖
+    await w.find('[data-testid="ssh-account-auth"] input[value="key"]').setValue()
+    await w.setProps({ modelValue: hop('key') })
+    await w.setProps({ modelValue: hop('password') })
+    expect(radio('key').checked).toBe(true)
+  })
+
+  it('切换认证方式后保留已填公钥', async () => {
+    const w = mountEditor()
+    await w.find('input[data-testid="ssh-account-pubkey"]').setValue('ssh-ed25519 AAAAC3Nz keep')
+    await w.find('[data-testid="ssh-account-auth"] input[value="password"]').setValue()
+    expect(w.find('input[data-testid="ssh-account-pubkey"]').exists()).toBe(false)
+
+    await w.find('[data-testid="ssh-account-auth"] input[value="key"]').setValue()
+    const input = w.find('input[data-testid="ssh-account-pubkey"]').element as HTMLInputElement
+    expect(input.value).toBe('ssh-ed25519 AAAAC3Nz keep')
   })
 
   it('非法用户名不生成配置并给出提示', async () => {
