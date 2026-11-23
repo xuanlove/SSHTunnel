@@ -59,8 +59,9 @@ function updateHop(idx: number, patch: Partial<HopConfig>) {
   hops.value = arr
 }
 
-// 最小权限 SSH 账户配置（在跳板机执行）：无登录 Shell、仅密钥、仅允许 TCP 转发
-function buildAccountCommands(user: string, pubKey: string): string {
+// 最小权限 SSH 账户配置（在跳板机执行）：无登录 Shell、仅允许 TCP 转发
+// 公钥模式：仅密钥登录；密码模式：仅密码登录，密码在服务器上交互设置
+function buildKeyCommands(user: string, pubKey: string): string {
   return `# 1) 创建无登录 Shell 的专用账户（默认无密码，仅密钥可登录）
 sudo useradd --system --user-group --create-home --shell "$(command -v nologin)" ${user}
 
@@ -70,19 +71,47 @@ echo '${pubKey}' | sudo tee /home/${user}/.ssh/authorized_keys > /dev/null
 sudo chown ${user}:${user} /home/${user}/.ssh/authorized_keys
 sudo chmod 600 /home/${user}/.ssh/authorized_keys
 
-# 3) 限制该账户只能做端口转发（追加到 sshd_config 末尾）
+# 3) 限制该账户只能做端口转发，且仅允许公钥认证
 sudo tee -a /etc/ssh/sshd_config > /dev/null <<'EOF'
 
 Match User ${user}
     AllowTcpForwarding yes
+    PubkeyAuthentication yes
+    PasswordAuthentication no
     PermitTTY no
     X11Forwarding no
     AllowAgentForwarding no
     PermitTunnel no
 EOF
-sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }
+sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }`
+}
 
-# 4) 如确需密码认证：sudo passwd ${user}（不推荐）`
+function buildPasswordCommands(user: string): string {
+  return `# 1) 创建无登录 Shell 的专用账户
+sudo useradd --system --user-group --create-home --shell "$(command -v nologin)" ${user}
+
+# 2) 交互设置密码（按提示输入两次；密码不会写入本脚本或剪贴板）
+sudo passwd ${user}
+
+# 3) 限制该账户只能做端口转发，且仅允许密码认证
+sudo tee -a /etc/ssh/sshd_config > /dev/null <<'EOF'
+
+Match User ${user}
+    AllowTcpForwarding yes
+    PubkeyAuthentication no
+    PasswordAuthentication yes
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    PermitTunnel no
+EOF
+sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }`
+}
+
+type AccountAuth = 'key' | 'password'
+
+function buildAccountCommands(auth: AccountAuth, user: string, pubKey: string): string {
+  return auth === 'password' ? buildPasswordCommands(user) : buildKeyCommands(user, pubKey)
 }
 
 const DEFAULT_USER = 'sshtunnel'
@@ -91,13 +120,29 @@ const ACCOUNT_USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/
 // 公钥格式：类型 + 空格 + base64 公钥 + 可选注释（如 ssh-ed25519 AAAAC3... user@host）
 const ACCOUNT_PUBKEY_RE = /^(ssh-|ecdsa-|sk-)\S+ [A-Za-z0-9+/=]+( .*)?$/
 
+const accountAuth = ref<AccountAuth>('key')
 const accountUser = ref('')
 const accountPubKey = ref('')
-const accountCommands = ref(buildAccountCommands(DEFAULT_USER, DEFAULT_PUBKEY))
 const accountGenerated = ref(false)
 const accountKeyPlaceholder = ref(false)
 // 用户是否手动编辑过用户名；未编辑时跟随第 1 跳
 const accountUserTouched = ref(false)
+
+// 预览用的用户名/公钥：非法输入回退到默认值，避免预览出现不可执行的配置
+function previewUser(): string {
+  const u = (accountUser.value.trim() || hops.value[0]?.user?.trim() || DEFAULT_USER)
+  return ACCOUNT_USER_RE.test(u) ? u : DEFAULT_USER
+}
+
+function previewPubKey(): string {
+  const k = accountPubKey.value.trim()
+  return k && ACCOUNT_PUBKEY_RE.test(k) && !/['\r\n]/.test(k) ? k : DEFAULT_PUBKEY
+}
+
+// 预览随认证方式与输入实时更新
+const accountCommands = computed(() =>
+  buildAccountCommands(accountAuth.value, previewUser(), previewPubKey()),
+)
 
 // 默认跟随第 1 跳用户名；用户手动编辑后不再覆盖
 watch(
@@ -108,8 +153,8 @@ watch(
   { immediate: true },
 )
 
-// 输入变化后清除生成状态标记，避免提示与实际内容不符
-watch([accountUser, accountPubKey], () => {
+// 输入或认证方式变化后清除生成状态标记，避免提示与实际内容不符
+watch([accountUser, accountPubKey, accountAuth], () => {
   accountGenerated.value = false
   accountKeyPlaceholder.value = false
 })
@@ -142,25 +187,27 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-// 一键生成：按输入的用户名/公钥替换示例中的占位符，并复制到剪贴板
+// 一键生成：校验当前输入，生成对应认证方式的完整配置并复制到剪贴板
 async function generateAccountConfig() {
   const user = (accountUser.value.trim() || hops.value[0]?.user?.trim() || DEFAULT_USER)
   if (!ACCOUNT_USER_RE.test(user)) {
     ElMessage.warning('用户名只能包含小写字母、数字、下划线和短横线，且以字母或下划线开头')
     return
   }
-  const pubKey = accountPubKey.value.trim()
-  // 拒绝含单引号/换行（会破坏 echo '...' 的引号包裹）；其余字符在单引号内均为字面量
-  if (pubKey && (!ACCOUNT_PUBKEY_RE.test(pubKey) || /['\r\n]/.test(pubKey))) {
-    ElMessage.warning('公钥格式不正确：请粘贴以 ssh-ed25519 / ssh-rsa / ecdsa- 开头的 .pub 公钥（单行）')
-    return
+  if (accountAuth.value === 'key') {
+    const pubKey = accountPubKey.value.trim()
+    // 拒绝含单引号/换行（会破坏 echo '...' 的引号包裹）；其余字符在单引号内均为字面量
+    if (pubKey && (!ACCOUNT_PUBKEY_RE.test(pubKey) || /['\r\n]/.test(pubKey))) {
+      ElMessage.warning('公钥格式不正确：请粘贴以 ssh-ed25519 / ssh-rsa / ecdsa- 开头的 .pub 公钥（单行）')
+      return
+    }
+    accountKeyPlaceholder.value = !pubKey
+  } else {
+    accountKeyPlaceholder.value = false
   }
-  const placeholderKey = !pubKey
-  accountCommands.value = buildAccountCommands(user, pubKey || DEFAULT_PUBKEY)
   accountGenerated.value = true
-  accountKeyPlaceholder.value = placeholderKey
   const copied = await copyText(accountCommands.value)
-  if (placeholderKey) {
+  if (accountKeyPlaceholder.value) {
     ElMessage.warning(
       copied
         ? '已生成配置并复制，但公钥为占位符，请替换后再执行'
@@ -260,9 +307,15 @@ async function copyAccountCommands() {
         </template>
         <div class="hint-body">
           <p class="hint-desc">
-            在 Linux 跳板机上以 root 执行。用户名默认取第 1 跳，可修改；填入公钥后命令即为可直接执行的完整配置。
-            该账户无登录 Shell，仅用于本项目的 TCP 端口转发 / 代理。
+            在 Linux 跳板机上以 root 执行。选择认证方式并填写用户名（默认跟随第 1 跳）：公钥模式可直接粘贴
+            <code>.pub</code> 公钥；密码模式将在服务器上交互设置密码。该账户无登录 Shell，仅用于本项目的 TCP 端口转发 / 代理。
           </p>
+          <div class="hint-auth">
+            <el-radio-group v-model="accountAuth" size="small" data-testid="ssh-account-auth">
+              <el-radio value="key">公钥认证</el-radio>
+              <el-radio value="password">密码认证</el-radio>
+            </el-radio-group>
+          </div>
           <div class="hint-form">
             <el-input
               v-model="accountUser"
@@ -274,13 +327,17 @@ async function copyAccountCommands() {
               @input="accountUserTouched = true"
             />
             <el-input
+              v-if="accountAuth === 'key'"
               v-model="accountPubKey"
               size="small"
-              placeholder="公钥内容（可选，ssh-ed25519 AAAA...）"
+              placeholder="公钥内容（ssh-ed25519 AAAA...）"
               aria-label="SSH 公钥内容"
               data-testid="ssh-account-pubkey"
               class="hint-pubkey"
             />
+            <span v-else class="hint-password-note">
+              执行到 <code>sudo passwd</code> 时交互输入密码，密码不会写入命令或剪贴板
+            </span>
             <el-button size="small" type="primary" data-testid="ssh-account-generate" @click="generateAccountConfig">
               一键生成配置
             </el-button>
@@ -379,6 +436,21 @@ async function copyAccountCommands() {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+.hint-auth {
+  display: flex;
+  align-items: center;
+}
+.hint-password-note {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  color: #8a8d95;
+}
+.hint-password-note code {
+  color: #c0c3cb;
 }
 .hint-user {
   width: 180px;

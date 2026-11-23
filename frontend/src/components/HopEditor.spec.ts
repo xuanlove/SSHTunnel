@@ -36,6 +36,8 @@ describe('HopEditor', () => {
     expect(code).toContain('authorized_keys')
     expect(code).toContain('Match User sshtunnel')
     expect(code).toContain('AllowTcpForwarding yes')
+    expect(code).toContain('PubkeyAuthentication yes')
+    expect(code).toContain('PasswordAuthentication no')
     expect(code).toContain('PermitTTY no')
   })
 
@@ -122,6 +124,31 @@ describe('HopEditor', () => {
     expect(code).not.toContain('sshtunnel')
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining('Match User tunnelx'))
     expect(w.text()).toContain('已按当前输入生成')
+  })
+
+  it('切换密码认证后生成密码模式配置并复制', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const w = mountEditor()
+    await w.find('input[data-testid="ssh-account-user"]').setValue('tunnelpw')
+    await w.find('input[value="password"]').setValue()
+
+    // 公钥输入隐藏，预览立即切换为密码模式
+    expect(w.find('input[data-testid="ssh-account-pubkey"]').exists()).toBe(false)
+    expect(w.find('.hint-code').text()).toContain('sudo passwd tunnelpw')
+
+    await w.find('[data-testid="ssh-account-generate"]').trigger('click')
+    await flushPromises()
+
+    const code = w.find('.hint-code').text()
+    expect(code).toContain('sudo passwd tunnelpw')
+    expect(code).toContain('PasswordAuthentication yes')
+    expect(code).toContain('PubkeyAuthentication no')
+    expect(code).not.toContain('authorized_keys')
+    expect(code).not.toContain('公钥')
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('sudo passwd tunnelpw'))
+    // 密码模式不产生「公钥占位符」警告
+    expect(w.find('.hint-warn').exists()).toBe(false)
   })
 
   it('非法用户名不生成配置并给出提示', async () => {
