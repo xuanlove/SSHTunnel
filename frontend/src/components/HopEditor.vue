@@ -88,24 +88,30 @@ sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload
 const DEFAULT_USER = 'sshtunnel'
 const DEFAULT_PUBKEY = 'ssh-ed25519 AAAA... your-key'
 const ACCOUNT_USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/
+// 公钥格式：类型 + 空格 + base64 公钥 + 可选注释（如 ssh-ed25519 AAAAC3... user@host）
+const ACCOUNT_PUBKEY_RE = /^(ssh-|ecdsa-|sk-)\S+ [A-Za-z0-9+/=]+( .*)?$/
 
 const accountUser = ref('')
 const accountPubKey = ref('')
 const accountCommands = ref(buildAccountCommands(DEFAULT_USER, DEFAULT_PUBKEY))
 const accountGenerated = ref(false)
+const accountKeyPlaceholder = ref(false)
+// 用户是否手动编辑过用户名；未编辑时跟随第 1 跳
+const accountUserTouched = ref(false)
 
-// 默认跟随第 1 跳用户名，用户手动填写后不再覆盖
+// 默认跟随第 1 跳用户名；用户手动编辑后不再覆盖
 watch(
   () => hops.value[0]?.user,
   (u) => {
-    if (u && !accountUser.value) accountUser.value = u
+    if (!accountUserTouched.value) accountUser.value = u || ''
   },
   { immediate: true },
 )
 
-// 输入变化后清除「已生成」标记，避免提示与实际内容不符
+// 输入变化后清除生成状态标记，避免提示与实际内容不符
 watch([accountUser, accountPubKey], () => {
   accountGenerated.value = false
+  accountKeyPlaceholder.value = false
 })
 
 // 复制文本：优先 Clipboard API，HTTP 非安全上下文下降级为 execCommand
@@ -125,10 +131,12 @@ async function copyText(text: string): Promise<boolean> {
     ta.style.position = 'fixed'
     ta.style.opacity = '0'
     document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
+    try {
+      ta.select()
+      return document.execCommand('copy')
+    } finally {
+      ta.remove()
+    }
   } catch {
     return false
   }
@@ -142,17 +150,26 @@ async function generateAccountConfig() {
     return
   }
   const pubKey = accountPubKey.value.trim()
-  if (pubKey && (!/^(ssh-|ecdsa-|sk-)/.test(pubKey) || /['\r\n]/.test(pubKey))) {
-    ElMessage.warning('公钥格式不正确（应为 ssh-ed25519 / ssh-rsa / ecdsa- 开头的单行内容）')
+  // 拒绝含单引号/换行（会破坏 echo '...' 的引号包裹）；其余字符在单引号内均为字面量
+  if (pubKey && (!ACCOUNT_PUBKEY_RE.test(pubKey) || /['\r\n]/.test(pubKey))) {
+    ElMessage.warning('公钥格式不正确：请粘贴以 ssh-ed25519 / ssh-rsa / ecdsa- 开头的 .pub 公钥（单行）')
     return
   }
+  const placeholderKey = !pubKey
   accountCommands.value = buildAccountCommands(user, pubKey || DEFAULT_PUBKEY)
   accountGenerated.value = true
-  const ok = await copyText(accountCommands.value)
-  if (ok) {
+  accountKeyPlaceholder.value = placeholderKey
+  const copied = await copyText(accountCommands.value)
+  if (placeholderKey) {
+    ElMessage.warning(
+      copied
+        ? '已生成配置并复制，但公钥为占位符，请替换后再执行'
+        : '已生成配置，但公钥为占位符，请替换后再执行',
+    )
+  } else if (copied) {
     ElMessage.success('已生成配置并复制到剪贴板')
   } else {
-    ElMessage.success('已生成配置（自动复制失败，请手动复制）')
+    ElMessage.warning('已生成配置（自动复制失败，请手动复制）')
   }
 }
 
@@ -250,14 +267,17 @@ async function copyAccountCommands() {
             <el-input
               v-model="accountUser"
               size="small"
-              placeholder="用户名（默认取第 1 跳）"
+              placeholder="用户名（默认跟随第 1 跳）"
+              aria-label="SSH 账户用户名"
               data-testid="ssh-account-user"
               class="hint-user"
+              @input="accountUserTouched = true"
             />
             <el-input
               v-model="accountPubKey"
               size="small"
               placeholder="公钥内容（可选，ssh-ed25519 AAAA...）"
+              aria-label="SSH 公钥内容"
               data-testid="ssh-account-pubkey"
               class="hint-pubkey"
             />
@@ -269,6 +289,7 @@ async function copyAccountCommands() {
           <div class="hint-actions">
             <el-button size="small" data-testid="ssh-account-copy" @click="copyAccountCommands">复制命令</el-button>
             <span v-if="accountGenerated" class="hint-generated">已按当前输入生成</span>
+            <span v-if="accountKeyPlaceholder" class="hint-warn">公钥未填写，命令中为占位符</span>
           </div>
         </div>
       </el-collapse-item>
@@ -374,6 +395,10 @@ async function copyAccountCommands() {
 .hint-generated {
   font-size: 12px;
   color: #67c23a;
+}
+.hint-warn {
+  font-size: 12px;
+  color: #e6a23c;
 }
 .hint-desc {
   margin: 0;

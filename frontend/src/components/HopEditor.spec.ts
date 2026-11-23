@@ -11,6 +11,8 @@ function mountEditor() {
 }
 
 afterEach(() => {
+  delete (navigator as any).clipboard
+  delete (document as any).execCommand
   document.body.innerHTML = ''
 })
 
@@ -49,15 +51,57 @@ describe('HopEditor', () => {
     expect(copied).toContain('Match User sshtunnel')
   })
 
-  it('用户名默认跟随第 1 跳用户名', async () => {
+  it('用户名默认跟随第 1 跳用户名，手动编辑后不再覆盖', async () => {
+    const hop = (user: string) => [{ user, host: '10.0.0.1', port: 22, auth_type: 'password' }]
     const w = mount(HopEditor, {
-      props: {
-        modelValue: [{ user: 'alice', host: '10.0.0.1', port: 22, auth_type: 'password' }],
-      },
+      props: { modelValue: hop('alice') },
       global: { plugins: [ElementPlus] },
     })
-    const input = w.find('input[data-testid="ssh-account-user"]').element as HTMLInputElement
-    expect(input.value).toBe('alice')
+    const userInput = () => w.find('input[data-testid="ssh-account-user"]').element as HTMLInputElement
+    expect(userInput().value).toBe('alice')
+
+    // 未手动编辑：随第 1 跳变化
+    await w.setProps({ modelValue: hop('bob') })
+    expect(userInput().value).toBe('bob')
+
+    // 手动编辑后：不再跟随
+    await w.find('input[data-testid="ssh-account-user"]').setValue('carol')
+    await w.setProps({ modelValue: hop('dave') })
+    expect(userInput().value).toBe('carol')
+  })
+
+  it('公钥未填写时生成占位配置并给出警告标记', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const w = mountEditor()
+    await w.find('[data-testid="ssh-account-generate"]').trigger('click')
+    await flushPromises()
+    expect(w.find('.hint-code').text()).toContain('ssh-ed25519 AAAA... your-key')
+    expect(w.find('.hint-warn').exists()).toBe(true)
+    expect(document.body.textContent).toContain('公钥为占位符')
+  })
+
+  it('编辑输入后清除「已生成」标记', async () => {
+    const w = mountEditor()
+    await w.find('input[data-testid="ssh-account-pubkey"]').setValue('ssh-ed25519 AAAAC3Nz x')
+    await w.find('[data-testid="ssh-account-generate"]').trigger('click')
+    await flushPromises()
+    expect(w.find('.hint-generated').exists()).toBe(true)
+
+    await w.find('input[data-testid="ssh-account-user"]').setValue('someone')
+    await flushPromises()
+    expect(w.find('.hint-generated').exists()).toBe(false)
+  })
+
+  it('Clipboard API 不可用时降级 execCommand 复制', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+    const exec = vi.fn().mockReturnValue(true)
+    ;(document as any).execCommand = exec
+    const w = mountEditor()
+    await w.find('[data-testid="ssh-account-copy"]').trigger('click')
+    await flushPromises()
+    expect(exec).toHaveBeenCalledWith('copy')
+    expect(document.body.textContent).toContain('账户创建命令已复制')
   })
 
   it('一键生成配置按用户名与公钥替换占位符并自动复制', async () => {
