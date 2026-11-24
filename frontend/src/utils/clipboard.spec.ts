@@ -49,4 +49,12 @@ describe('copyText', () => {
     execMock.mockReturnValue(false)
     await expect(copyText('token-3')).resolves.toBe(false)
   })
+
+  it('execCommand 抛出异常时返回 false', async () => {
+    setClipboard(undefined)
+    execMock.mockImplementation(() => {
+      throw new Error('not allowed')
+    })
+    await expect(copyText('token-4')).resolves.toBe(false)
+  })
 })
