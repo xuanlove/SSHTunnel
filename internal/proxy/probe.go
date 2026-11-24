@@ -259,14 +259,18 @@ type bufferedConn struct {
 
 func (c *bufferedConn) Read(b []byte) (int, error) { return c.r.Read(b) }
 
-// truncate 截断字符串到 max 字节（按 rune 安全截断）
+// truncate 截断字符串到 max 个 rune（rune 边界安全，不会切断多字节字符）
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	runes := []rune(s)
-	if len(runes) > max {
-		return string(runes[:max]) + "..."
+	n := 0
+	for i := range s {
+		if n == max {
+			return s[:i] + "..."
+		}
+		n++
 	}
-	return s[:max] + "..."
+	// rune 数未超过 max（长字符串由多字节字符构成），无需截断
+	return s
 }

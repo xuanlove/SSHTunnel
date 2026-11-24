@@ -1,7 +1,14 @@
 package sshclient
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"net"
+	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestParseHopChain(t *testing.T) {
@@ -103,5 +110,91 @@ func TestParseHopChain(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// genEd25519 在内存生成 ed25519 密钥对并转为 SSH 公钥（模拟 server 端主机公钥）
+func genEd25519(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("生成 ed25519 密钥失败: %v", err)
+	}
+	pub, err := ssh.NewPublicKey(priv.Public())
+	if err != nil {
+		t.Fatalf("构造 SSH 公钥失败: %v", err)
+	}
+	return pub
+}
+
+func TestNormalizeHostKey(t *testing.T) {
+	pub := genEd25519(t)
+	blob := pub.Marshal()
+	blobB64 := base64.RawStdEncoding.EncodeToString(blob)
+	wantFP := fingerprintKey(pub)
+
+	authorizedLine := pub.Type() + " " + blobB64 + " user@host"
+
+	// 三种输入均应规范化为同一指纹
+	for _, tt := range []struct {
+		name  string
+		input string
+	}{
+		{"SHA256 指纹", wantFP},
+		{"base64 公钥裸串", blobB64},
+		{"authorized_keys 行", authorizedLine},
+		{"带空白与 padding 的指纹", "  " + wantFP + "=  "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeHostKey(tt.input)
+			if err != nil {
+				t.Fatalf("规范化失败: %v", err)
+			}
+			if got != wantFP {
+				t.Errorf("指纹不符: got %s, want %s", got, wantFP)
+			}
+		})
+	}
+
+	// 非法输入应报错
+	for _, bad := range []string{"", "SHA256:", "not base64!!!"} {
+		if _, err := NormalizeHostKey(bad); err == nil {
+			t.Errorf("非法输入 %q 应报错", bad)
+		}
+	}
+}
+
+func TestHostKeyCallback(t *testing.T) {
+	pub := genEd25519(t)
+	other := genEd25519(t)
+	fp := fingerprintKey(pub)
+	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}
+
+	// 匹配：指纹一致放行（authorized_keys 行形式同样应通过）
+	for _, hostKey := range []string{fp, pub.Type() + " " + base64.RawStdEncoding.EncodeToString(pub.Marshal()) + " c"} {
+		cb := hostKeyCallback(Hop{HostKey: hostKey})
+		if err := cb("srv.example.com", addr, pub); err != nil {
+			t.Errorf("密钥匹配应放行, host_key=%q: %v", hostKey, err)
+		}
+	}
+
+	// 不匹配：另一把密钥必须拒绝，且错误信息包含期望/实际指纹
+	cb := hostKeyCallback(Hop{HostKey: fp})
+	err := cb("srv.example.com", addr, other)
+	if err == nil {
+		t.Fatal("密钥不匹配应拒绝连接")
+	}
+	if !strings.Contains(err.Error(), "主机密钥校验失败") || !strings.Contains(err.Error(), fp) {
+		t.Errorf("错误信息应包含明确原因: %v", err)
+	}
+
+	// host_key 配置非法：拒绝连接
+	if err := hostKeyCallback(Hop{HostKey: "!!!"})(addr.String(), addr, pub); err == nil {
+		t.Error("host_key 配置非法应拒绝连接")
+	}
+
+	// 未配置 host_key：保持旧行为放行
+	if err := hostKeyCallback(Hop{})(addr.String(), addr, pub); err != nil {
+		t.Errorf("未配置 host_key 应放行: %v", err)
 	}
 }

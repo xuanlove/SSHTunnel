@@ -7,7 +7,9 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -248,16 +250,63 @@ func (h *Handler) handleGeoIPDownload(w http.ResponseWriter, r *http.Request) {
 		URL string `json:"url"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	// SSRF 加固：仅允许 https 且拒绝指向本机/内网的目标
+	if err := validateGeoIPURL(req.URL); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
 
 	h.log.Info("开始下载 GeoIP 城市数据库（Merged-IP）...")
 	src, size, err := proxy.DownloadCityDatabase(req.URL)
 	if err != nil {
+		// 详情仅记录到服务端日志；响应收敛为通用描述，不回显内部细节
 		h.log.Errorf("GeoIP 城市数据库下载失败: %v", err)
-		writeError(w, 50002, "下载失败: "+err.Error())
+		writeError(w, 50002, "下载失败，请检查下载地址或网络后重试")
 		return
 	}
 	h.log.Infof("GeoIP 城市数据库下载完成: %s (%.1f MB)", src, float64(size)/1024/1024)
 	writeJSON(w, 0, "success", proxy.CurrentGeoIPStatus())
+}
+
+// validateGeoIPURL 校验 GeoIP 数据库下载地址，防止被用作 SSRF 跳板：
+//   - 仅允许 https；
+//   - 目标为 IP 字面量时，拒绝回环/私网/链路本地/未指定地址；
+//   - 目标为主机名时，解析出的 IP 全部为内网/回环也拒绝（如 localhost → 127.0.0.1）。
+//
+// 错误信息为面向用户的通用描述，不回显内部细节。
+func validateGeoIPURL(raw string) error {
+	host := ""
+	if u, err := url.Parse(strings.TrimSpace(raw)); err == nil {
+		if u.Scheme == "https" {
+			host = u.Hostname()
+		}
+	}
+	if host == "" {
+		return fmt.Errorf("仅支持 https:// 的下载地址")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isRestrictedGeoIPTarget(ip) {
+			return fmt.Errorf("下载地址不可指向内网或本机地址")
+		}
+		return nil
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil || len(ips) == 0 {
+		// 解析失败不在此处定性（避免回显 DNS 细节），交由下载阶段统一报错
+		return nil
+	}
+	for _, ip := range ips {
+		if !isRestrictedGeoIPTarget(ip) {
+			return nil // 至少一个公网地址，放行
+		}
+	}
+	return fmt.Errorf("下载地址不可指向内网或本机地址")
+}
+
+// isRestrictedGeoIPTarget 判断 IP 是否为禁止下载的内网/本机目标
+func isRestrictedGeoIPTarget(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 // handleGeoIPCities 返回指定国家的省/城市下拉选项（首次调用会在后台构建索引）
@@ -414,16 +463,26 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 			"active":       h.tls.Active(),
 			"deploy_token": h.tls.DeployToken(),
 		}
-		// 回填已有证书内容，便于在界面上查看/修改
+		// 回填证书内容，便于在界面上查看/修改；
+		// 私钥默认脱敏（仅返回 has_key/key_masked 摘要），明文需显式 reveal_key=1
 		if s.CertFile != "" {
 			if data, err := os.ReadFile(s.CertFile); err == nil {
 				resp["cert_pem"] = string(data)
 			}
 		}
 		if s.KeyFile != "" {
+			hasKey := false
 			if data, err := os.ReadFile(s.KeyFile); err == nil {
-				resp["key_pem"] = string(data)
+				if r.URL.Query().Get("reveal_key") == "1" {
+					resp["key_pem"] = string(data)
+				} else {
+					resp["key_masked"] = maskKeyPEM(string(data))
+				}
+				hasKey = true
 			}
+			resp["has_key"] = hasKey
+		} else {
+			resp["has_key"] = false
 		}
 		writeJSON(w, 0, "success", mergeTLSSettings(resp, s))
 	case http.MethodPut:
@@ -476,6 +535,16 @@ func mergeTLSSettings(resp map[string]interface{}, s WebTLSSettings) map[string]
 	resp["cert_file"] = s.CertFile
 	resp["key_file"] = s.KeyFile
 	return resp
+}
+
+// maskKeyPEM 生成私钥的一行掩码摘要（不含任何密钥内容）：
+// 形如 "-----BEGIN RSA PRIVATE KEY-----（已隐藏）"，用于前端展示已配置状态。
+func maskKeyPEM(data string) string {
+	block, _ := pem.Decode([]byte(data))
+	if block == nil || block.Type == "" {
+		return "-----BEGIN PRIVATE KEY-----（已隐藏）"
+	}
+	return fmt.Sprintf("-----BEGIN %s-----（已隐藏）", block.Type)
 }
 
 // resolveTLSSettings 根据请求解析最终设置：优先使用 PEM 内容，其次文件路径，最后沿用旧值。

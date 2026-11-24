@@ -1,7 +1,10 @@
 package web
 
 import (
+	"bytes"
+	"log"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -145,6 +148,57 @@ func TestAuthStoreSecretPersistence(t *testing.T) {
 	// 内存模式：每次新实例各自随机（不落盘）
 	if string(NewAuthStore("").Secret()) == string(NewAuthStore("").Secret()) {
 		t.Errorf("内存模式下密钥不应相同")
+	}
+}
+
+// TestAuthStoreCorruptSettings 验证 settings.json 损坏时：输出 warning、按未启用处理且不 panic；
+// 重新保存后文件被原子写恢复（无残留临时文件、权限 0600）
+func TestAuthStoreCorruptSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	// 模拟中断写坏的残缺文件
+	if err := os.WriteFile(path, []byte(`{"auth_enabled":true,"username":"admin","pass`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 捕获标准 log 输出，确认解析失败不再静默
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	s := NewAuthStore(path)
+	if s.Enabled() {
+		t.Errorf("损坏的配置应按未启用处理")
+	}
+	log.SetOutput(prev) // 先恢复，避免后续持久化日志混入
+	if !strings.Contains(buf.String(), "加载 WEB 访问密码设置失败") {
+		t.Errorf("解析失败应输出 warning 日志，实际: %q", buf.String())
+	}
+
+	// 重新设置后应覆盖残缺文件且为原子写：目录无 .tmp 残留
+	if err := s.Set("admin", "pass123"); err != nil {
+		t.Fatalf("重新启用失败: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			t.Errorf("原子写不应残留临时文件: %s", e.Name())
+		}
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := st.Mode().Perm(); perm != 0600 {
+		t.Errorf("settings.json 权限 = %o, want 600", perm)
+	}
+	// 恢复后的文件可正常重新加载
+	if s2 := NewAuthStore(path); !s2.Enabled() || s2.Username() != "admin" {
+		t.Errorf("恢复后的配置应可正常加载")
 	}
 }
 

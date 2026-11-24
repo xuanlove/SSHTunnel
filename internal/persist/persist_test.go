@@ -2,6 +2,7 @@ package persist
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,94 @@ func TestWriterCloseEnqueue(t *testing.T) {
 	w := NewWriter(t.TempDir(), "x-", 0)
 	w.Close()
 	w.Enqueue(proxy.AccessRecord{}) // 不应 panic
+}
+
+// TestWriterReportsOpenError 分片打开失败时应触发注入的错误回调
+func TestWriterReportsOpenError(t *testing.T) {
+	base := t.TempDir()
+	// 用普通文件充当目录，使 MkdirAll/OpenFile 必然失败（ENOTDIR），与运行用户权限无关
+	blocker := filepath.Join(base, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 8)
+	w := NewWriterWithErrorLog(blocker, "access-", 0, func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	})
+	defer w.Close()
+	w.Enqueue(proxy.AccessRecord{TunnelID: "t1"})
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Error("错误回调不应收到 nil")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("分片打开失败应触发错误回调")
+	}
+}
+
+// TestReadJSONLDescBounded 大分片有界读取：仅保留末尾 N 行且顺序正确（新→旧），内存不随分片增长
+func TestReadJSONLDescBounded(t *testing.T) {
+	dir := t.TempDir()
+	const total = 1000
+	var b strings.Builder
+	for i := 0; i < total; i++ {
+		j, _ := json.Marshal(proxy.AccessRecord{TunnelID: fmt.Sprintf("t-%d", i)})
+		b.Write(j)
+		b.WriteByte('\n')
+	}
+	shard := filepath.Join(dir, "access-20260101.jsonl")
+	if err := os.WriteFile(shard, []byte(b.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// maxRecords 小于行数：环形缓冲发生回绕，应返回最后 N 条且时间倒序
+	recs, err := ReadJSONLDesc[proxy.AccessRecord](dir, "access-", 5)
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	if len(recs) != 5 {
+		t.Fatalf("应返回 5 条，实际 %d", len(recs))
+	}
+	for i, r := range recs {
+		want := fmt.Sprintf("t-%d", total-1-i)
+		if r.TunnelID != want {
+			t.Errorf("第 %d 条应为最新记录 %s，实际 %s", i, want, r.TunnelID)
+		}
+	}
+
+	// maxRecords=0：默认受 maxScanRecords 上限保护，全部行仍应完整返回
+	recs, err = ReadJSONLDesc[proxy.AccessRecord](dir, "access-", 0)
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	if len(recs) != total {
+		t.Errorf("不限制时应返回全部 %d 条，实际 %d", total, len(recs))
+	}
+	if recs[0].TunnelID != fmt.Sprintf("t-%d", total-1) || recs[total-1].TunnelID != "t-0" {
+		t.Errorf("倒序顺序不符: first=%s last=%s", recs[0].TunnelID, recs[total-1].TunnelID)
+	}
+
+	// 多分片：整体按分片天降序（新→旧），旧分片记录排在最后
+	old := filepath.Join(dir, "access-20251231.jsonl")
+	if err := os.WriteFile(old, []byte(`{"tunnel_id":"t-old"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	recs, _ = ReadJSONLDesc[proxy.AccessRecord](dir, "access-", 0)
+	if len(recs) != total+1 {
+		t.Errorf("多分片应返回全部 %d 条，实际 %d", total+1, len(recs))
+	}
+	if recs[0].TunnelID != fmt.Sprintf("t-%d", total-1) {
+		t.Errorf("新分片最新记录应在前，实际 %s", recs[0].TunnelID)
+	}
+	if recs[len(recs)-1].TunnelID != "t-old" {
+		t.Errorf("旧分片记录应排在最后，实际 %s", recs[len(recs)-1].TunnelID)
+	}
 }
 
 // TestSearchAccess 检索过滤：隧道/时间/结果/分页

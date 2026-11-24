@@ -226,4 +226,51 @@ describe('HopEditor', () => {
     expect(w.find('.hint-code').text()).toContain('ssh-ed25519 AAAA... your-key')
     expect(document.body.textContent).toContain('公钥格式不正确')
   })
+
+  it('主机密钥指纹输入绑定到 hop.host_key，清空时移除字段', async () => {
+    const w = mount(HopEditor, {
+      props: { modelValue: [{ user: 'u', host: 'h', port: 22, auth_type: 'password' }] },
+      global: { plugins: [ElementPlus] },
+    })
+    const input = w.find('input[data-testid="hop-host-key"]')
+    expect(input.exists()).toBe(true)
+
+    await input.setValue('  SHA256:AbCd  ')
+    let emitted = w.emitted('update:modelValue')!
+    let last = emitted[emitted.length - 1][0] as any[]
+    expect(last[0].host_key).toBe('SHA256:AbCd')
+
+    // 清空（纯空白）后应移除字段，避免冗余序列化
+    await input.setValue('   ')
+    emitted = w.emitted('update:modelValue')!
+    last = emitted[emitted.length - 1][0] as any[]
+    expect(last[0].host_key).toBeUndefined()
+  })
+
+  it('已配置的 host_key 回显到输入框', () => {
+    const w = mount(HopEditor, {
+      props: { modelValue: [{ user: 'u', host: 'h', port: 22, auth_type: 'password', host_key: 'SHA256:xyz' }] },
+      global: { plugins: [ElementPlus] },
+    })
+    const input = w.find('input[data-testid="hop-host-key"]').element as HTMLInputElement
+    expect(input.value).toBe('SHA256:xyz')
+  })
+
+  it('端口清空时保持原值，不写入 NaN/0', async () => {
+    const w = mount(HopEditor, {
+      props: { modelValue: [{ user: 'u', host: 'h', port: 22, auth_type: 'password' }] },
+      global: { plugins: [ElementPlus] },
+    })
+    const portInput = w.find('.hop-card .el-input-number input')
+    expect(portInput.exists()).toBe(true)
+    await portInput.setValue('')
+    await portInput.trigger('change')
+    await flushPromises()
+
+    const emitted = w.emitted('update:modelValue') ?? []
+    for (const call of emitted) {
+      const hop = (call[0] as any[])[0]
+      expect(hop.port).toBe(22)
+    }
+  })
 })

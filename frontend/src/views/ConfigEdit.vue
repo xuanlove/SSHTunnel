@@ -61,6 +61,15 @@ function updateLocalForward(idx: number, patch: Partial<LocalForward>) {
   form.local_forwards = arr
 }
 
+// 转发端口输入：清空/非法值（NaN、越界 1-65535）时保持原值不更新，避免 NaN/0 入库
+function updateForwardPort(idx: number, field: 'local_port' | 'remote_port', v: number | string | undefined | null) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 1 || n > 65535) return
+  const patch: Partial<LocalForward> = {}
+  patch[field] = n
+  updateLocalForward(idx, patch)
+}
+
 async function handleTest() {
   try {
     await api.testTunnelConfig({ ...form })
@@ -182,9 +191,9 @@ watch(() => route.params.id, initForm, { immediate: true })
       <el-form-item v-if="form.tunnel_type === 'local_forward'" label="本地转发">
         <div class="forward-list">
           <div v-for="(lf, idx) in form.local_forwards" :key="lf.id" class="forward-row">
-            <el-input-number v-model="lf.local_port" :min="1" :max="65535" controls-position="right" placeholder="本地端口" />
+            <el-input-number :model-value="lf.local_port" :min="1" :max="65535" controls-position="right" placeholder="本地端口" @update:model-value="(v: number | string | undefined | null) => updateForwardPort(idx, 'local_port', v)" />
             <el-input v-model="lf.remote_host" placeholder="远程主机" style="flex: 1" />
-            <el-input-number v-model="lf.remote_port" :min="1" :max="65535" controls-position="right" placeholder="远程端口" />
+            <el-input-number :model-value="lf.remote_port" :min="1" :max="65535" controls-position="right" placeholder="远程端口" @update:model-value="(v: number | string | undefined | null) => updateForwardPort(idx, 'remote_port', v)" />
             <el-switch v-model="lf.allow_external" active-text="外部访问" />
             <el-button type="danger" size="small" @click="removeLocalForward(idx)">删除</el-button>
           </div>

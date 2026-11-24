@@ -42,8 +42,11 @@ func (s *socks4Server) Start(ctx context.Context) error {
 	s.log("info", "SOCKS4 代理已启动")
 
 	go func() {
-		<-ctx.Done()
-		s.Stop()
+		select {
+		case <-ctx.Done():
+			s.Stop()
+		case <-s.stopChan():
+		}
 	}()
 
 	for {
@@ -129,7 +132,7 @@ func (s *socks4Server) handleConn(conn net.Conn) {
 	// 认证：检查 UserID
 	if !s.helper.checkUserID(userID) {
 		s.reply(conn, 0x5D) // 用户名不匹配
-		s.log("warn", "SOCKS4 认证失败: "+userID)
+		s.log("warn", "SOCKS4 认证失败: "+sanitizeLog(userID))
 		s.logAccessDenied(conn, "", "认证失败")
 		return
 	}

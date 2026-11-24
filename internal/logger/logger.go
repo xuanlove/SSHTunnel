@@ -145,9 +145,10 @@ func (l *Logger) log(lvl Level, tunnelID, msg string) {
 		l.ring[l.ringIdx] = entry
 		l.ringIdx = (l.ringIdx + 1) % l.ringCap
 	}
-	// 推送 sink
+	// 推送 sink：同步顺序调用，避免日志风暴下每条日志每 sink 一个 goroutine 造成无界并发。
+	// sink 实现必须非阻塞（如带缓冲队列的 Broadcast），否则会拖慢日志调用方。
 	for _, s := range l.sinks {
-		go s(entry)
+		s(entry)
 	}
 }
 

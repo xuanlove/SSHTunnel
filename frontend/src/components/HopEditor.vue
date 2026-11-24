@@ -31,6 +31,7 @@ async function parseSimple() {
           password: existing.password,
           key_content: existing.key_content,
           passphrase: existing.passphrase,
+          host_key: existing.host_key,
         }
       }
       // 简写解析结果不含 auth_type，默认按密码认证，避免界面误显示密钥输入
@@ -57,6 +58,19 @@ function updateHop(idx: number, patch: Partial<HopConfig>) {
   const arr = [...hops.value]
   arr[idx] = { ...arr[idx], ...patch }
   hops.value = arr
+}
+
+// 端口输入：清空/非法值（NaN、越界）时保持原值不更新，避免 NaN/0 直接入库
+function updateHopPort(idx: number, v: number | string | undefined | null) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 1 || n > 65535) return
+  updateHop(idx, { port: n })
+}
+
+// 主机密钥指纹：去除首尾空白；清空时移除字段，避免冗余序列化
+function updateHopHostKey(idx: number, v: string) {
+  const val = v.trim()
+  updateHop(idx, { host_key: val === '' ? undefined : val })
 }
 
 // 最小权限 SSH 账户配置（在跳板机执行）：无登录 Shell、仅允许 TCP 转发
@@ -288,7 +302,7 @@ async function copyAccountCommands() {
         </el-col>
         <el-col :span="6">
           <div class="field-label">端口</div>
-          <el-input-number :model-value="hop.port" :min="1" :max="65535" controls-position="right" style="width: 100%" @update:model-value="(v: number | string | undefined) => updateHop(idx, { port: Number(v) })" />
+          <el-input-number :model-value="hop.port" :min="1" :max="65535" controls-position="right" style="width: 100%" @update:model-value="(v: number | string | undefined | null) => updateHopPort(idx, v)" />
         </el-col>
       </el-row>
 
@@ -325,6 +339,16 @@ async function copyAccountCommands() {
           show-password
           :model-value="hop.passphrase"
           @update:model-value="(v: string) => updateHop(idx, { passphrase: v })"
+        />
+      </div>
+
+      <div class="hostkey-field">
+        <div class="field-label">主机密钥指纹（可选，用于防中间人）</div>
+        <el-input
+          :model-value="hop.host_key ?? ''"
+          placeholder="SHA256:..."
+          data-testid="hop-host-key"
+          @update:model-value="(v: string) => updateHopHostKey(idx, v)"
         />
       </div>
     </div>
@@ -424,6 +448,9 @@ async function copyAccountCommands() {
   margin-top: 10px;
 }
 .auth-fields {
+  margin-top: 8px;
+}
+.hostkey-field {
   margin-top: 8px;
 }
 .key-textarea :deep(.el-textarea__inner) {

@@ -123,6 +123,7 @@ func TestWebTLSSettingsRejectsNonPEMFiles(t *testing.T) {
 			KeyFile  string `json:"key_file"`
 			CertPEM  string `json:"cert_pem"`
 			KeyPEM   string `json:"key_pem"`
+			HasKey   bool   `json:"has_key"`
 		} `json:"data"`
 	}
 	json.NewDecoder(w.Body).Decode(&resp)
@@ -142,14 +143,19 @@ func TestWebTLSSettingsRejectsNonPEMFiles(t *testing.T) {
 			KeyFile  string `json:"key_file"`
 			CertPEM  string `json:"cert_pem"`
 			KeyPEM   string `json:"key_pem"`
+			HasKey   bool   `json:"has_key"`
 		} `json:"data"`
 	}{}
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp.Data.CertPEM == "" || !strings.Contains(resp.Data.CertPEM, "BEGIN CERTIFICATE") {
 		t.Errorf("GET 应回读证书 PEM 内容")
 	}
-	if resp.Data.KeyPEM == "" || !strings.Contains(resp.Data.KeyPEM, "PRIVATE KEY") {
-		t.Errorf("GET 应回读私钥 PEM 内容")
+	if !resp.Data.HasKey {
+		t.Errorf("GET 应回报 has_key=true")
+	}
+	// 默认 GET 不返回私钥明文（脱敏断言见 TestWebTLSKeyMaskingAndReveal）
+	if resp.Data.KeyPEM != "" {
+		t.Errorf("默认 GET 不应返回 key_pem 明文，实际长度 %d", len(resp.Data.KeyPEM))
 	}
 }
 
@@ -299,5 +305,151 @@ func TestLogin(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&resp2)
 	if resp2["code"].(float64) == 0 {
 		t.Error("错误凭据不应返回 code=0")
+	}
+}
+
+// 测试 /api/login 与其余 API 一致受请求体大小限制（默认 GET 无明文私钥配套的边界用例见 TLS 测试）
+func TestLoginRequestBodyLimited(t *testing.T) {
+	srv := NewServer(Config{}, NewHandler(nil, nil, logger.NewTest(), []byte("secret"), "admin", "pass123", nil))
+	mux := srv.buildRoutes()
+
+	// 超过 4MB 上限的登录请求应被拒绝（MaxBytesReader 触发解码失败），而非无限读入内存
+	big := strings.Repeat("a", maxRequestBody+1024)
+	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"`+big+`"}`))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code == http.StatusOK {
+		t.Errorf("超大请求体不应成功处理: %s", w.Body.String())
+	}
+}
+
+// 测试 GeoIP 下载接口的 SSRF 加固：拒绝非 https 与内网/回环目标，错误信息不回显内部细节
+func TestGeoIPDownloadRejectsInternalURLs(t *testing.T) {
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+	cases := []string{
+		"",                               // 空 URL
+		"http://example.com/geoip.mmdb",  // 非 https
+		"ftp://example.com/geoip.mmdb",   // 非 http(s)
+		"https://127.0.0.1/geoip.mmdb",   // 回环 IPv4
+		"https://[::1]/geoip.mmdb",       // 回环 IPv6
+		"https://0.0.0.0/geoip.mmdb",     // 未指定地址
+		"https://10.1.2.3/geoip.mmdb",    // 私网
+		"https://192.168.1.1/geoip.mmdb", // 私网
+		"https://172.16.0.9/geoip.mmdb",  // 私网
+		"https://169.254.3.4/geoip.mmdb", // 链路本地
+		"https://localhost/geoip.mmdb",   // 主机名解析为回环
+	}
+	for _, u := range cases {
+		body := fmt.Sprintf(`{"url":%q}`, u)
+		w := httptest.NewRecorder()
+		h.handleGeoIPDownload(w, httptest.NewRequest(http.MethodPost, "/api/geoip/download", strings.NewReader(body)))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("URL %q 应被拒绝（400），实际 %d: %s", u, w.Code, w.Body.String())
+			continue
+		}
+		var resp map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Errorf("URL %q 错误响应应为 JSON: %v", u, err)
+			continue
+		}
+		if c, _ := resp["code"].(float64); c != 400 {
+			t.Errorf("URL %q 业务码期望 400，实际 %v", u, resp["code"])
+		}
+		// 错误信息不回显内部细节（如具体 IP / DNS 错误）
+		if msg, _ := resp["message"].(string); strings.Contains(msg, "127.0.0.1") || strings.Contains(msg, "lookup") {
+			t.Errorf("URL %q 错误信息不应回显内部细节: %s", u, msg)
+		}
+	}
+}
+
+// 测试 GET /api/web/tls 私钥脱敏：默认只返回 has_key/key_masked 摘要，reveal_key=1 才返回明文；PUT 不受影响
+func TestWebTLSKeyMaskingAndReveal(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := generateTestCertPEM(t)
+	certFile := filepath.Join(dir, "cert.pem")
+	keyFile := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, []byte(certPEM), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, []byte(keyPEM), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+	h.tls = NewTLSStore(filepath.Join(dir, "web_tls.json"))
+
+	// PUT 保存证书对（PUT 行为不变）
+	putBody := fmt.Sprintf(`{"enabled":false,"cert_file":%q,"key_file":%q}`, certFile, keyFile)
+	w := httptest.NewRecorder()
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodPut, "/api/web/tls", strings.NewReader(putBody)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT 应成功，实际 %d: %s", w.Code, w.Body.String())
+	}
+
+	// 默认 GET：无 key_pem 明文，返回 has_key=true 与 key_masked 一行摘要
+	w = httptest.NewRecorder()
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodGet, "/api/web/tls", nil))
+	var resp struct {
+		Data struct {
+			HasKey    bool   `json:"has_key"`
+			KeyMasked string `json:"key_masked"`
+			KeyPEM    string `json:"key_pem"`
+			CertPEM   string `json:"cert_pem"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("解析默认 GET 响应失败: %v", err)
+	}
+	if !resp.Data.HasKey {
+		t.Errorf("默认 GET 应返回 has_key=true")
+	}
+	if resp.Data.KeyPEM != "" {
+		t.Errorf("默认 GET 不应返回私钥明文")
+	}
+	if !strings.Contains(resp.Data.KeyMasked, "BEGIN") || !strings.Contains(resp.Data.KeyMasked, "已隐藏") ||
+		strings.Contains(resp.Data.KeyMasked, "\n") {
+		t.Errorf("key_masked 应为单行 BEGIN ... （已隐藏）摘要，实际 %q", resp.Data.KeyMasked)
+	}
+	if strings.Contains(resp.Data.KeyMasked, keyPEM[:32]) {
+		t.Errorf("key_masked 不应包含私钥内容片段")
+	}
+
+	// reveal_key=1：返回明文 key_pem
+	w = httptest.NewRecorder()
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodGet, "/api/web/tls?reveal_key=1", nil))
+	resp = struct {
+		Data struct {
+			HasKey    bool   `json:"has_key"`
+			KeyMasked string `json:"key_masked"`
+			KeyPEM    string `json:"key_pem"`
+			CertPEM   string `json:"cert_pem"`
+		} `json:"data"`
+	}{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("解析 reveal GET 响应失败: %v", err)
+	}
+	if !strings.Contains(resp.Data.KeyPEM, "PRIVATE KEY") || !strings.Contains(resp.Data.KeyPEM, "END") {
+		t.Errorf("reveal_key=1 应返回私钥明文，实际 %q", resp.Data.KeyPEM)
+	}
+
+	// PUT 空证书/私钥内容表示保持不变：仅切换开关不应清掉已保存路径
+	w = httptest.NewRecorder()
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodPut, "/api/web/tls", strings.NewReader(`{"enabled":false}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("空内容 PUT 应成功（保持不变），实际 %d: %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodGet, "/api/web/tls", nil))
+	resp = struct {
+		Data struct {
+			HasKey    bool   `json:"has_key"`
+			KeyMasked string `json:"key_masked"`
+			KeyPEM    string `json:"key_pem"`
+			CertPEM   string `json:"cert_pem"`
+		} `json:"data"`
+	}{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !resp.Data.HasKey || resp.Data.CertPEM == "" {
+		t.Errorf("空内容 PUT 后已保存的证书对应保持不变（has_key=true 且证书仍可回读）")
 	}
 }

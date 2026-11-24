@@ -165,7 +165,7 @@ func TestWebTLSContentSave(t *testing.T) {
 		}
 	}
 
-	// GET 应回填证书内容
+	// GET 应回填证书内容；私钥默认脱敏（has_key/key_masked），明文需 reveal_key=1
 	rec2 := httptest.NewRecorder()
 	h.handleWebTLS(rec2, httptest.NewRequest("GET", "/web/tls", nil))
 	var resp struct {
@@ -173,6 +173,8 @@ func TestWebTLSContentSave(t *testing.T) {
 			Enabled   bool   `json:"enabled"`
 			CertPEM   string `json:"cert_pem"`
 			KeyPEM    string `json:"key_pem"`
+			HasKey    bool   `json:"has_key"`
+			KeyMasked string `json:"key_masked"`
 			DeployTok string `json:"deploy_token"`
 		} `json:"data"`
 	}
@@ -182,8 +184,8 @@ func TestWebTLSContentSave(t *testing.T) {
 	if !resp.Data.Enabled || !strings.Contains(resp.Data.CertPEM, "BEGIN CERTIFICATE") {
 		t.Errorf("GET 应回填证书内容")
 	}
-	if resp.Data.KeyPEM == "" || resp.Data.DeployTok == "" {
-		t.Errorf("GET 应返回私钥与部署令牌")
+	if !resp.Data.HasKey || resp.Data.KeyPEM != "" || !strings.Contains(resp.Data.KeyMasked, "已隐藏") || resp.Data.DeployTok == "" {
+		t.Errorf("GET 应回报 has_key/掩码私钥与部署令牌，且默认不返回明文: %+v", resp.Data)
 	}
 
 	// 无效证书内容应被拒绝

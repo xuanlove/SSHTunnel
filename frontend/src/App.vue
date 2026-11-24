@@ -16,7 +16,9 @@ const isLoginPage = computed(() => route.path === '/login')
 let loaded = false
 watch(
   () => route.path,
-  async (path) => {
+  async (path, prevPath) => {
+    // 从登录页离开（重新登录成功）后重置加载标记并重新拉取，避免列表陈旧
+    if (prevPath === '/login' && path !== '/login') loaded = false
     if (path === '/login' || loaded) return
     try {
       await store.loadConfigs()

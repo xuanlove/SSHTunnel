@@ -113,8 +113,12 @@ func (a *App) init() error {
 
 	// 持久化：访问/告警历史 JSONL 分片（30 天保留）与指标快照
 	a.historyDir = filepath.Join(alertDir, "history")
-	a.accessW = persist.NewWriter(a.historyDir, "access-", historyRetention)
-	a.alertW = persist.NewWriter(a.historyDir, "alerthist-", historyRetention)
+	a.accessW = persist.NewWriterWithErrorLog(a.historyDir, "access-", historyRetention, func(err error) {
+		a.logger.Warnf("访问历史写入失败: %v", err)
+	})
+	a.alertW = persist.NewWriterWithErrorLog(a.historyDir, "alerthist-", historyRetention, func(err error) {
+		a.logger.Warnf("告警历史写入失败: %v", err)
+	})
 	a.metricsPath = filepath.Join(alertDir, "metrics-snapshot.json")
 	a.restorePersistence()
 

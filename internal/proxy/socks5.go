@@ -41,8 +41,11 @@ func (s *socks5Server) Start(ctx context.Context) error {
 	s.log("info", "SOCKS5 代理已启动")
 
 	go func() {
-		<-ctx.Done()
-		s.Stop()
+		select {
+		case <-ctx.Done():
+			s.Stop()
+		case <-s.stopChan():
+		}
 	}()
 
 	for {
@@ -227,6 +230,11 @@ func (s *socks5Server) doUserPassAuth(conn net.Conn) bool {
 	if _, err := io.ReadFull(conn, ver); err != nil {
 		return false
 	}
+	// RFC 1929：子协商版本必须为 0x01，否则回失败状态并断开
+	if ver[0] != 0x01 {
+		conn.Write([]byte{0x01, 0x01})
+		return false
+	}
 	ulen := int(ver[1])
 	uname := make([]byte, ulen)
 	if _, err := io.ReadFull(conn, uname); err != nil {
@@ -243,7 +251,7 @@ func (s *socks5Server) doUserPassAuth(conn net.Conn) bool {
 
 	if !s.helper.checkSocks5(string(uname), string(passwd)) {
 		conn.Write([]byte{0x01, 0x01}) // 失败
-		s.log("warn", "SOCKS5 认证失败: "+string(uname))
+		s.log("warn", "SOCKS5 认证失败: "+sanitizeLog(string(uname)))
 		s.logAccessDenied(conn, "", "认证失败")
 		return false
 	}

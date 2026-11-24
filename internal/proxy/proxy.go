@@ -85,6 +85,7 @@ type BaseServer struct {
 	// 防火墙拦截日志去重：同一来源 IP 在窗口期内只记录一次
 	blockLogMu sync.Mutex
 	blockLogAt map[string]time.Time
+	stopCh     chan struct{} // 生命周期停止信号（Stop 时关闭，通知 watcher goroutine 退出）
 }
 
 // firewallBlockLogInterval 同一来源 IP 的防火墙拦截日志最小间隔
@@ -219,7 +220,7 @@ func (b *BaseServer) logAccess(conn net.Conn, target string, start time.Time, re
 
 // logAccessDenied 记录一条被拒绝的访问（防火墙/认证失败等）。
 // target 为空表示目标未知（如防火墙在握手前拦截），此时只记录来源；
-// 同一来源、原因与目标 10 分钟内仅记录一次（不同目标分别保留）。
+// 仅按来源 IP 去重（每 IP 每窗口一条），保证去重 map 有界（不同目标不会撑大键空间）。
 func (b *BaseServer) logAccessDenied(conn net.Conn, target, reason string) {
 	if !b.accessLog {
 		return
@@ -228,10 +229,7 @@ func (b *BaseServer) logAccessDenied(conn net.Conn, target, reason string) {
 	if ip := remoteIP(conn); ip != nil {
 		src = ip.String()
 	}
-	key := "deny:" + src + ":" + reason
-	if target != "" {
-		key += ":" + target
-	}
+	key := "deny:" + src
 	if !b.shouldLogBlock(key) {
 		return
 	}
@@ -252,7 +250,32 @@ func (b *BaseServer) setStatus(s ListenerStatus) {
 	b.mu.Unlock()
 }
 
+// stopChan 返回服务器生命周期停止信号 channel（Stop 时关闭）
+func (b *BaseServer) stopChan() <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopCh == nil {
+		b.stopCh = make(chan struct{})
+	}
+	return b.stopCh
+}
+
+// notifyStop 关闭生命周期停止信号 channel（幂等）
+func (b *BaseServer) notifyStop() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopCh == nil {
+		b.stopCh = make(chan struct{})
+	}
+	select {
+	case <-b.stopCh:
+	default:
+		close(b.stopCh)
+	}
+}
+
 func (b *BaseServer) stop() error {
+	b.notifyStop()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.listener != nil {

@@ -16,7 +16,9 @@ type Notification struct {
 	Rule    Rule    `json:"rule"`
 }
 
-// SendNotification 发送 Webhook 通知；format 支持 generic / wecom / feishu
+// SendNotification 发送 Webhook 通知；format 支持 generic / wecom / feishu。
+// 注意：URL 允许内网/回环地址（内网 IM 网关与自建告警服务是合法场景），
+// 设计取舍见 Engine.SaveWebhook 的注释；此处仅要求 http(s)。
 func SendNotification(client *http.Client, w Webhook, n Notification) error {
 	if !w.Enabled || w.URL == "" {
 		return nil

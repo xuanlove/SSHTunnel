@@ -205,6 +205,15 @@ describe('api · web 模式（无 window.go，走 HTTP）', () => {
     const st = await api.getWebAuthSettings()
     expect(st.enabled).toBe(true)
   })
+
+  it('getWebTLSSettings 默认不回显私钥，reveal=true 才携带 reveal_key=1', async () => {
+    const api = await loadApi()
+    const fetchMock = stubFetch(() => jsonRes({ code: 0, data: { active: false } }))
+    await api.getWebTLSSettings()
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/web/tls')
+    await api.getWebTLSSettings(true)
+    expect(String(fetchMock.mock.calls[1][0])).toBe('/api/web/tls?reveal_key=1')
+  })
 })
 
 describe('api · desktop 模式（window.go 注入，走 Wails 绑定）', () => {

@@ -59,7 +59,6 @@ type Tunnel struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	log           *logger.Logger
-	reconnecting  bool
 	stopCh        chan struct{}
 	keepAliveStop func() // 停止 SSH 心跳（nil 表示未启用）
 	// onFatal 致命错误回调（如重连次数耗尽），由 Manager 注入用于移除运行实例并更新状态
@@ -136,16 +135,18 @@ func (m *Manager) Start(cfg *config.TunnelConfig) error {
 		m.emitStatus(cfg.ID, string(config.StatusError))
 	}
 
-	// 先占位再拨号：并发/重复 Start 不会重复建连，拨号期间 Stop 也能找到实例
+	// 先占位再拨号：并发/重复 Start 不会重复建连，拨号期间 Stop 也能找到实例。
+	// ctx/cancel 在锁内创建并随占位一起发布：stop()/onFatal 经 map 取到实例时，
+	// 依赖 manager 锁建立的 happens-before 必然读到已初始化的值，消除无锁写入窗口。
 	m.mu.Lock()
 	if _, exists := m.tunnels[cfg.ID]; exists {
 		m.mu.Unlock()
 		return fmt.Errorf("隧道已在运行: %s", cfg.ID)
 	}
+	t.ctx, t.cancel = context.WithCancel(context.Background())
 	m.tunnels[cfg.ID] = t
 	m.mu.Unlock()
 
-	t.ctx, t.cancel = context.WithCancel(context.Background())
 	if err := t.run(); err != nil {
 		m.mu.Lock()
 		if cur, ok := m.tunnels[cfg.ID]; ok && cur == t {
@@ -485,6 +486,7 @@ func (t *Tunnel) connectAndServe() error {
 			Password:   h.Password,
 			KeyContent: h.KeyContent,
 			Passphrase: h.Passphrase,
+			HostKey:    h.HostKey,
 		}
 	}
 	client, err := dialer.Dial(hops)
@@ -583,7 +585,6 @@ func (t *Tunnel) watchAndReconnect() {
 		}
 
 		t.log.TunnelInfo(t.cfg.ID, "开始自动重连...")
-		t.reconnecting = true
 		t.cleanupResources()
 
 		// 重连策略：最大退避与最大次数均可按隧道配置（0 表示使用默认/无限）
@@ -601,7 +602,6 @@ func (t *Tunnel) watchAndReconnect() {
 		for {
 			select {
 			case <-t.stopCh:
-				t.reconnecting = false
 				return
 			case <-time.After(delay):
 			}
@@ -611,14 +611,12 @@ func (t *Tunnel) watchAndReconnect() {
 			if err := t.connectAndServe(); err != nil {
 				// 停止过程中产生的错误不再计为失败
 				if t.isStopped() {
-					t.reconnecting = false
 					return
 				}
 				// 清理本次可能已部分启动的监听器，避免下次重连端口冲突
 				t.cleanupResources()
 				t.log.TunnelWarn(t.cfg.ID, fmt.Sprintf("第 %d 次重连失败: %s", attempts, err.Error()))
 				if maxAttempts > 0 && attempts >= maxAttempts {
-					t.reconnecting = false
 					if t.isStopped() {
 						return
 					}
@@ -637,11 +635,9 @@ func (t *Tunnel) watchAndReconnect() {
 			}
 			// 停止与重连建连并发：已停止时清理本次新建的资源
 			if t.isStopped() {
-				t.reconnecting = false
 				t.cleanupResources()
 				return
 			}
-			t.reconnecting = false
 			t.log.TunnelInfo(t.cfg.ID, fmt.Sprintf("第 %d 次重连成功", attempts))
 			break
 		}
@@ -716,6 +712,12 @@ func (t *Tunnel) startLocalForward(lf config.LocalForward) error {
 				if t.isStopped() {
 					return
 				}
+				// 监听器已被清理（重连清理/watchOnly 收尾）导致的 Accept 错误
+				// 不是真实故障，降级为 debug，避免 ERROR 误导排查
+				if t.listenerRemoved(ln) {
+					t.log.TunnelDebug(t.cfg.ID, "监听器已清理，停止接受本地转发连接: "+err.Error())
+					return
+				}
 				t.log.TunnelError(t.cfg.ID, "接受本地转发连接失败: "+err.Error())
 				return
 			}
@@ -723,6 +725,18 @@ func (t *Tunnel) startLocalForward(lf config.LocalForward) error {
 		}
 	}()
 	return nil
+}
+
+// listenerRemoved 判断监听器是否已被 cleanupResources 移除（不再属于本隧道）。
+func (t *Tunnel) listenerRemoved(ln net.Listener) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, l := range t.fwdListeners {
+		if l == ln {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *Tunnel) handleForward(conn net.Conn, lf config.LocalForward, target string, stats *proxy.TrafficStats) {

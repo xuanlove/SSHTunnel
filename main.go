@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -208,8 +210,10 @@ func startWebServer(app *App, authUser, authPass string) {
 	}, handler)
 
 	go func() {
-		if err := srv.Start(); err != nil {
-			log.Printf("WEB 服务器错误: %v", err)
+		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// WEB 模式下服务启动失败（如端口占用）必须退出进程，避免假活
+			log.Printf("WEB 服务器启动失败: %v", err)
+			os.Exit(1)
 		}
 	}()
 }
@@ -244,7 +248,12 @@ func startDesktop(app *App) {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	if err := a.Init(); err != nil {
-		a.logger.Error("初始化失败: " + err.Error())
+		// Init 早期失败（如日志目录不可写）时 a.logger 可能为 nil，回退到 stderr，保证不 panic
+		if a.logger != nil {
+			a.logger.Error("初始化失败: " + err.Error())
+		} else {
+			fmt.Fprintln(os.Stderr, "初始化失败: "+err.Error())
+		}
 		return
 	}
 	// 连接日志实时推送到桌面端

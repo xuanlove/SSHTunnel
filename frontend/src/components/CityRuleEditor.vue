@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import * as api from '@/api'
 import type { CityProvince } from '@/api'
 
@@ -90,6 +90,12 @@ function onProvinceChange(row: RuleRow) {
 const catalogs = reactive<Record<string, CityProvince[]>>({})
 const loading = reactive<Record<string, boolean>>({})
 const retryTimers = new Map<string, number>()
+
+// 卸载时清理所有重试定时器，避免组件销毁后仍触发目录加载
+onUnmounted(() => {
+  retryTimers.forEach((t) => window.clearTimeout(t))
+  retryTimers.clear()
+})
 
 async function loadCatalog(country: string, attempt = 0) {
   if (!country || country === ANY || catalogs[country] || loading[country]) return

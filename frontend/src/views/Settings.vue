@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as api from '@/api'
 import type { TunnelConfig } from '@/types'
 import { formatBytes, formatTime } from '@/utils/format'
+import { copyText } from '@/utils/clipboard'
 import CertSummary from '@/components/CertSummary.vue'
 
 const isWebMode = api.isWebMode
@@ -18,6 +19,8 @@ const versionText = ref('')
 const authForm = ref({ enabled: false, username: '', password: '' })
 const authSaving = ref(false)
 const authLoaded = ref(false)
+// 加载时访问密码是否已开启：用于区分「首次开启必须设置密码」与「留空表示不修改」
+const authWasEnabled = ref(false)
 
 onMounted(async () => {
   try {
@@ -33,6 +36,7 @@ onMounted(async () => {
   try {
     const s = await api.getWebAuthSettings()
     authForm.value.enabled = s.enabled
+    authWasEnabled.value = s.enabled
     authForm.value.username = s.username || 'admin'
     authLoaded.value = true
   } catch {
@@ -41,9 +45,21 @@ onMounted(async () => {
 })
 
 async function handleSaveAuth() {
-  if (authForm.value.enabled && !authForm.value.username.trim()) {
-    ElMessage.warning('请填写用户名')
-    return
+  if (authForm.value.enabled) {
+    if (!authForm.value.username.trim()) {
+      ElMessage.warning('请填写用户名')
+      return
+    }
+    const pwd = authForm.value.password
+    // 首次开启必须设置密码；已开启时留空表示沿用原密码（与后端语义一致）
+    if (!pwd && !authWasEnabled.value) {
+      ElMessage.warning('请设置访问密码（至少 6 位）')
+      return
+    }
+    if (pwd && pwd.length < 6) {
+      ElMessage.warning('密码长度至少 6 位')
+      return
+    }
   }
   authSaving.value = true
   try {
@@ -53,6 +69,7 @@ async function handleSaveAuth() {
       password: authForm.value.password,
     })
     authForm.value.enabled = s.enabled
+    authWasEnabled.value = s.enabled
     authForm.value.username = s.username || authForm.value.username
     authForm.value.password = ''
     ElMessage.success(s.enabled ? '访问密码已开启' : '访问密码已关闭')
@@ -118,13 +135,29 @@ const webTls = ref({
   keyFile: '',
   active: false,
   deployToken: '',
+  // 服务器是否已保存私钥（默认查询不再返回明文，仅展示占位）
+  hasKey: false,
 })
 const webTlsSaving = ref(false)
+// 「查看私钥」拉取中
+const keyRevealing = ref(false)
+// 已回显到输入框的私钥原文基线：保存时与输入框内容比对，仅变更才提交 key_pem
+let revealedKeyPem = ''
+
+const keyPlaceholder = computed(() =>
+  webTls.value.hasKey
+    ? '已保存私钥（不显示）。点击「查看私钥」回显，或直接粘贴新私钥进行替换'
+    : '-----BEGIN PRIVATE KEY-----',
+)
 
 // WEB 面板证书摘要（使用者 CN / 到期时间）
 const webCertMeta = ref<api.CertInfo | null>(null)
 const webCertError = ref('')
 let webCertTimer = 0
+
+onUnmounted(() => {
+  if (webCertTimer) window.clearTimeout(webCertTimer)
+})
 
 async function inspectWebCert(pem: string) {
   if (!pem.trim()) {
@@ -158,9 +191,26 @@ async function loadWebTLS() {
     webTls.value.keyFile = s.key_file || ''
     webTls.value.deployToken = s.deploy_token || ''
     webTls.value.certPem = s.cert_pem || ''
-    webTls.value.keyPem = s.key_pem || ''
+    // 默认查询不返回明文私钥：仅记录是否存在，避免把掩码占位串当作真私钥提交
+    webTls.value.hasKey = !!s.has_key || !!s.key_masked
+    webTls.value.keyPem = ''
+    revealedKeyPem = ''
   } catch {
     // 忽略：仅 WEB 模式支持
+  }
+}
+
+// 点击才以 reveal_key=1 拉取明文私钥并填入输入框
+async function handleRevealKey() {
+  keyRevealing.value = true
+  try {
+    const s = await api.getWebTLSSettings(true)
+    webTls.value.keyPem = s.key_pem || ''
+    revealedKeyPem = webTls.value.keyPem
+  } catch (e: any) {
+    ElMessage.error(e?.message || '私钥获取失败')
+  } finally {
+    keyRevealing.value = false
   }
 }
 
@@ -171,15 +221,20 @@ async function handleSaveWebTLS() {
   }
   webTlsSaving.value = true
   try {
+    const keyTrim = webTls.value.keyPem.trim()
+    // 仅当用户实际修改过私钥（新粘贴或改动回显内容）才提交，空值/未变表示保持不变
+    const keyChanged = !!keyTrim && keyTrim !== revealedKeyPem.trim()
     const res = await api.updateWebTLSSettings({
       enabled: webTls.value.enabled,
       cert_pem: webTls.value.certPem.trim() || undefined,
-      key_pem: webTls.value.keyPem.trim() || undefined,
+      key_pem: keyChanged ? keyTrim : undefined,
     })
     webTls.value.active = res.active
     webTls.value.certFile = res.cert_file || ''
     webTls.value.keyFile = res.key_file || ''
+    if (typeof res.has_key === 'boolean') webTls.value.hasKey = res.has_key
     webTls.value.keyPem = ''
+    revealedKeyPem = ''
     ElMessage.success(
       res.active
         ? '已启用 HTTPS，监听正在重启，请改用 https:// 访问'
@@ -202,12 +257,9 @@ async function handleRegenerateToken() {
 }
 
 async function handleCopyToken() {
-  try {
-    await navigator.clipboard.writeText(webTls.value.deployToken)
-    ElMessage.success('已复制')
-  } catch {
-    ElMessage.warning('复制失败，请手动选择复制')
-  }
+  const ok = await copyText(webTls.value.deployToken)
+  if (ok) ElMessage.success('已复制')
+  else ElMessage.warning('复制失败，请手动选择复制')
 }
 
 async function handleCheckPort() {
@@ -581,8 +633,12 @@ function tunnelName(id?: string): string {
         v-model="webTls.keyPem"
         type="textarea"
         :rows="4"
-        placeholder="-----BEGIN PRIVATE KEY-----"
+        :placeholder="keyPlaceholder"
       />
+      <div class="key-actions" v-if="webTls.hasKey">
+        <el-button size="small" :loading="keyRevealing" @click="handleRevealKey">查看私钥</el-button>
+        <span class="key-hint">私钥已保存在服务器，默认不显示；仅当修改后保存才会重新提交</span>
+      </div>
       <div class="info-row" v-if="webTls.certFile">
         <span class="label">证书文件</span><span>{{ webTls.certFile }}</span>
       </div>
@@ -692,6 +748,16 @@ function tunnelName(id?: string): string {
   font-size: 12px;
   color: #8a8d95;
   margin: 10px 0 4px;
+}
+.key-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+.key-hint {
+  font-size: 12px;
+  color: #8a8d95;
 }
 .fw-tip code {
   color: #e0e3e8;

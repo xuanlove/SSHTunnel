@@ -1,7 +1,10 @@
 package sshclient
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -20,6 +23,7 @@ type Hop struct {
 	Password   string
 	KeyContent string // 密钥文本内容（PEM 格式）
 	Passphrase string
+	HostKey    string // 主机密钥指纹/公钥（SHA256:...、base64 公钥或 authorized_keys 行；空表示跳过校验）
 }
 
 // ParseHopChain 解析简写格式，支持 , 和 -> 两种分隔符
@@ -87,7 +91,7 @@ func Dial(hops []Hop) (*Client, error) {
 	cfg := &ssh.ClientConfig{
 		User:            first.User,
 		Auth:            auth,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback(first),
 		Timeout:         15 * time.Second,
 	}
 	addr := net.JoinHostPort(first.Host, strconv.Itoa(first.Port))
@@ -114,7 +118,7 @@ func Dial(hops []Hop) (*Client, error) {
 		nextCfg := &ssh.ClientConfig{
 			User:            hop.User,
 			Auth:            nextAuth,
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			HostKeyCallback: hostKeyCallback(hop),
 			Timeout:         15 * time.Second,
 		}
 		_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
@@ -184,6 +188,84 @@ func buildAuth(hop Hop) ([]ssh.AuthMethod, error) {
 	default: // password
 		return []ssh.AuthMethod{ssh.Password(hop.Password)}, nil
 	}
+}
+
+// insecureKeyWarnOnce 保证「未配置 host_key」的安全提示每进程只输出一次，避免每次拨号刷屏
+var insecureKeyWarnOnce sync.Once
+
+// hostKeyCallback 返回该跳的主机密钥回调：
+//   - 配置了 host_key：按 sha256(公钥 blob) 指纹严格校验，不匹配则拒绝连接
+//   - 未配置：保持旧行为跳过校验，并输出一次可配置 host_key 的安全提示
+func hostKeyCallback(hop Hop) ssh.HostKeyCallback {
+	if hop.HostKey == "" {
+		return func(string, net.Addr, ssh.PublicKey) error {
+			insecureKeyWarnOnce.Do(func() {
+				log.Println("[warn] SSH 主机密钥未校验（存在中间人风险）：可在跳板配置中填写 host_key 主机密钥指纹（SHA256:...）启用校验")
+			})
+			return nil
+		}
+	}
+	expected, cfgErr := NormalizeHostKey(hop.HostKey)
+	return func(hostname string, _ net.Addr, key ssh.PublicKey) error {
+		if cfgErr != nil {
+			return fmt.Errorf("host_key 配置无效: %w", cfgErr)
+		}
+		if got := fingerprintKey(key); got != expected {
+			return fmt.Errorf("主机密钥校验失败 %s: 期望 %s，实际 %s（服务器密钥已更换或存在中间人攻击）",
+				hostname, expected, got)
+		}
+		return nil
+	}
+}
+
+// fingerprintKey 计算 SSH 公钥的 SHA256 指纹（与 ssh-keygen 输出一致：SHA256:base64 无 padding）
+func fingerprintKey(key ssh.PublicKey) string {
+	sum := sha256.Sum256(key.Marshal())
+	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
+}
+
+// NormalizeHostKey 将用户输入的主机密钥规范化为 SHA256 指纹（SHA256:base64 无 padding）。
+// 支持三种输入：
+//   - OpenSSH 指纹：SHA256:xxxx（允许带 padding，统一去除）
+//   - base64 公钥裸串：xxxx（如 ssh-keygen -lf 输出的第二列）
+//   - authorized_keys 行：ssh-ed25519 xxxx comment（取第二列）
+func NormalizeHostKey(input string) (string, error) {
+	s := strings.TrimSpace(input)
+	if s == "" {
+		return "", fmt.Errorf("host_key 为空")
+	}
+	fields := strings.Fields(s)
+	if strings.HasPrefix(fields[0], "SHA256:") {
+		fp := strings.TrimPrefix(fields[0], "SHA256:")
+		raw, err := decodeBase64(fp)
+		if err != nil || len(raw) == 0 {
+			return "", fmt.Errorf("host_key 指纹不是合法的 base64: %q", fp)
+		}
+		return "SHA256:" + base64.RawStdEncoding.EncodeToString(raw), nil
+	}
+	blob := fields[0]
+	if len(fields) > 1 {
+		blob = fields[1] // authorized_keys 行：跳过第一列密钥类型
+	}
+	raw, err := decodeBase64(blob)
+	if err != nil || len(raw) == 0 {
+		return "", fmt.Errorf("host_key 不是合法的指纹或公钥: %q", blob)
+	}
+	sum := sha256.Sum256(raw)
+	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:]), nil
+}
+
+// decodeBase64 兼容标准/URL 字母表与是否带 padding 的 base64 解码
+func decodeBase64(s string) ([]byte, error) {
+	for _, enc := range []*base64.Encoding{
+		base64.RawStdEncoding, base64.StdEncoding,
+		base64.RawURLEncoding, base64.URLEncoding,
+	} {
+		if b, err := enc.DecodeString(s); err == nil && len(b) > 0 {
+			return b, nil
+		}
+	}
+	return nil, fmt.Errorf("无法解码 base64")
 }
 
 // Dial 通过 SSH 隧道连接远程地址（供代理与本地转发复用）

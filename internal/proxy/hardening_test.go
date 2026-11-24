@@ -239,3 +239,202 @@ func TestHTTPHeaderTooLarge(t *testing.T) {
 		t.Errorf("应返回 431，实际: %s", line)
 	}
 }
+
+// TestHTTPRejectsGiantSingleLine 200KB 单行请求行应被 64KB 上限立即拒绝，
+// 且不会在标准库解析阶段无限扩容（读侧内存受控，超限即断）
+func TestHTTPRejectsGiantSingleLine(t *testing.T) {
+	port := startTestProxy(t, config.ProxyListener{
+		ID:       "http-giant-line",
+		Protocol: config.ProxyHTTP,
+	}, &mockDialer{target: "127.0.0.1:1"})
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	// 单行 200KB 的请求行（无换行），远超 64KB 上限
+	line := "GET http://example.com/" + strings.Repeat("a", 200*1024) + " HTTP/1.1\r\n"
+	req := line + "Host: example.com\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("发送超大请求失败: %v", err)
+	}
+
+	// 期望收到 431 或连接被关闭（两者都算拒绝成功）
+	br := bufio.NewReader(conn)
+	resp, err := br.ReadString('\n')
+	if err == nil {
+		if !strings.Contains(resp, "431") {
+			t.Errorf("超长单行应被拒绝为 431，实际: %s", resp)
+		}
+	} else if _, isNet := err.(net.Error); isNet && !err.(net.Error).Timeout() {
+		t.Errorf("读取出现非预期网络错误: %v", err)
+	}
+}
+
+// TestHTTPSmallRequestStillAccepted 正常小请求在有界读取下仍应正常转发
+func TestHTTPSmallRequestStillAccepted(t *testing.T) {
+	echoAddr, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	port := startTestProxy(t, config.ProxyListener{
+		ID:       "http-small-ok",
+		Protocol: config.ProxyHTTP,
+	}, &mockDialer{target: echoAddr})
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	if _, err := conn.Write([]byte("CONNECT " + echoAddr + " HTTP/1.1\r\nHost: " + echoAddr + "\r\n\r\n")); err != nil {
+		t.Fatalf("发送 CONNECT 失败: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("读取响应失败: %v", err)
+	}
+	if !strings.Contains(line, " 200 ") {
+		t.Errorf("正常小请求应被接受并转发，实际: %s", line)
+	}
+}
+
+// TestSecureEqual 常量时间比较：等长/不等长/空串均正确且结果稳定
+func TestSecureEqual(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"both empty", "", "", true},
+		{"equal", "abc", "abc", true},
+		{"same length differ", "abc", "abd", false},
+		{"a longer", "abcd", "abc", false},
+		{"b longer", "abc", "abcd", false},
+		{"a empty", "", "abc", false},
+		{"b empty", "abc", "", false},
+		{"unicode equal", "用户", "用户", true},
+		{"unicode differ", "用户", "用户2", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for i := 0; i < 8; i++ { // 多次调用结果应稳定
+				if got := secureEqual(c.a, c.b); got != c.want {
+					t.Fatalf("secureEqual(%q, %q) 第 %d 次 = %v, 期望 %v", c.a, c.b, i, got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// TestSanitizeLog 日志字段中的 \r \n 及控制字符应被剔除，防止日志注入
+func TestSanitizeLog(t *testing.T) {
+	in := "user\r\nFAKE LOG LINE\x00\x1b[31mnext\tok"
+	out := sanitizeLog(in)
+	if strings.ContainsAny(out, "\r\n") {
+		t.Errorf("输出不应含换行符: %q", out)
+	}
+	for _, bad := range []string{"\x00", "\x1b"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("输出不应含控制字符 %q: %q", bad, out)
+		}
+	}
+	if !strings.Contains(out, "user") || !strings.Contains(out, "next") {
+		t.Errorf("正常内容应保留: %q", out)
+	}
+	if strings.Contains(out, "\t") {
+		t.Errorf("制表符属控制字符，应被剔除: %q", out)
+	}
+	if got := sanitizeLog("clean"); got != "clean" {
+		t.Errorf("无控制字符输入应原样返回: %q", got)
+	}
+}
+
+// TestSOCKS5RejectsBadSubnegotiationVER 子协商版本非 0x01 应按 RFC 1929 回失败状态并断开
+func TestSOCKS5RejectsBadSubnegotiationVER(t *testing.T) {
+	port := startTestProxy(t, config.ProxyListener{
+		ID:       "socks5-bad-subver",
+		Protocol: config.ProxySOCKS5,
+		Auth:     &config.AuthConfig{Username: "u", Password: "p"},
+	}, &mockDialer{target: "127.0.0.1:1"})
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	// 方法协商：仅提供用户名密码（0x02）
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x02}); err != nil {
+		t.Fatalf("发送握手失败: %v", err)
+	}
+	methodResp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, methodResp); err != nil {
+		t.Fatalf("读取方法协商响应失败: %v", err)
+	}
+	if methodResp[0] != 0x05 || methodResp[1] != 0x02 {
+		t.Fatalf("方法协商响应不符: %v", methodResp)
+	}
+
+	// 子协商：VER=0x02（非法）
+	if _, err := conn.Write([]byte{0x02, 0x01, 'u', 0x01, 'p'}); err != nil {
+		t.Fatalf("发送子协商失败: %v", err)
+	}
+	subResp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, subResp); err != nil {
+		t.Fatalf("读取子协商响应失败: %v", err)
+	}
+	if subResp[0] != 0x01 || subResp[1] != 0x01 {
+		t.Errorf("非法子协商版本应返回失败状态 {0x01,0x01}，实际: %v", subResp)
+	}
+
+	// 连接应被断开
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Errorf("非法子协商版本后连接应被关闭")
+	}
+}
+
+// TestProxyWatcherExitsOnStop Stop() 后生命周期停止信号应关闭，watcher goroutine 随之退出
+func TestProxyWatcherExitsOnStop(t *testing.T) {
+	servers := make([]*socks5Server, 0, 5)
+	for i := 0; i < 5; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("分配端口失败: %v", err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		_ = ln.Close()
+		srv, err := BuildServer(config.ProxyListener{
+			ID:         fmt.Sprintf("watcher-%d", i),
+			Protocol:   config.ProxySOCKS5,
+			ListenPort: port,
+		}, &mockDialer{target: "127.0.0.1:1"}, nil)
+		if err != nil {
+			t.Fatalf("构建代理失败: %v", err)
+		}
+		ss := srv.(*socks5Server)
+		servers = append(servers, ss)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _ = ss.Start(ctx) }()
+	}
+	time.Sleep(100 * time.Millisecond) // 等待 Start 完成、watcher 建立
+
+	for i, ss := range servers {
+		if err := ss.Stop(); err != nil {
+			t.Fatalf("Stop 失败: %v", err)
+		}
+		select {
+		case <-ss.stopCh:
+		default:
+			t.Errorf("server %d: Stop 后生命周期停止信号未关闭", i)
+		}
+	}
+}

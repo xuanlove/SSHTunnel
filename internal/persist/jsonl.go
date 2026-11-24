@@ -34,6 +34,9 @@ type Writer struct {
 	closed    bool
 	closedMu  sync.Mutex
 	dropped   atomic.Uint64
+	// onError 可选错误回调（由调用方在创建时注入；nil 时静默忽略错误）。
+	// 仅由 loop 协程读取，构造后不再变更，无需额外同步。
+	onError func(err error)
 
 	// 以下字段仅由 loop 协程访问
 	file *os.File
@@ -42,6 +45,16 @@ type Writer struct {
 
 // NewWriter 创建并启动写入器；retention 为分片保留时长（0 表示不过期）
 func NewWriter(dir, prefix string, retention time.Duration) *Writer {
+	return newWriter(dir, prefix, retention, nil)
+}
+
+// NewWriterWithErrorLog 同 NewWriter，另注入写错误回调（如接入日志），
+// 保持 NewWriter 原签名向后兼容。
+func NewWriterWithErrorLog(dir, prefix string, retention time.Duration, onError func(err error)) *Writer {
+	return newWriter(dir, prefix, retention, onError)
+}
+
+func newWriter(dir, prefix string, retention time.Duration, onError func(err error)) *Writer {
 	_ = os.MkdirAll(dir, 0700)
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &Writer{
@@ -51,6 +64,7 @@ func NewWriter(dir, prefix string, retention time.Duration) *Writer {
 		queue:     make(chan any, writeQueueSize),
 		ctx:       ctx,
 		cancel:    cancel,
+		onError:   onError,
 	}
 	if retention > 0 {
 		w.cleanup()
@@ -119,11 +133,22 @@ func (w *Writer) write(v any) {
 		path := filepath.Join(w.dir, fmt.Sprintf("%s%s.jsonl", w.prefix, day))
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
+			// 分片打开失败（磁盘满/权限/目录异常等）：上报错误并丢弃本条，避免静默丢数据
+			w.reportError(fmt.Errorf("打开历史分片 %s 失败: %w", path, err))
 			return
 		}
 		w.file, w.day = f, day
 	}
-	_, _ = w.file.Write(append(b, '\n'))
+	if _, err := w.file.Write(append(b, '\n')); err != nil {
+		w.reportError(fmt.Errorf("写入历史分片 %s%s.jsonl 失败: %w", w.prefix, w.day, err))
+	}
+}
+
+// reportError 上报写错误（未注入回调时静默）
+func (w *Writer) reportError(err error) {
+	if w.onError != nil {
+		w.onError(err)
+	}
 }
 
 func (w *Writer) closeFile() {
@@ -177,9 +202,14 @@ func shardFiles(dir, prefix string) []string {
 	return out
 }
 
-// ReadJSONLDesc 按分片天降序读取记录（整体新→旧），最多返回 maxRecords 条（0 表示不限）
+// ReadJSONLDesc 按分片天降序读取记录（整体新→旧），最多返回 maxRecords 条（0 表示不限）。
+// 顺序扫描分片时仅以环形缓冲保留最后 maxScanRecords 行，内存占用不随分片大小增长。
 func ReadJSONLDesc[T any](dir, prefix string, maxRecords int) ([]T, error) {
 	var out []T
+	keep := maxRecords
+	if keep <= 0 || keep > maxScanRecords {
+		keep = maxScanRecords
+	}
 	for _, path := range shardFiles(dir, prefix) {
 		f, err := os.Open(path)
 		if err != nil {
@@ -187,17 +217,29 @@ func ReadJSONLDesc[T any](dir, prefix string, maxRecords int) ([]T, error) {
 		}
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		var lines []json.RawMessage
+		// 环形缓冲保留最后 keep 行（0 = ring 首元素为最旧）
+		ring := make([]json.RawMessage, 0, keep)
+		head := 0
 		for sc.Scan() {
 			line := bytes.TrimSpace(sc.Bytes())
-			if len(line) > 0 {
-				lines = append(lines, json.RawMessage(line))
+			if len(line) == 0 {
+				continue
+			}
+			// 必须复制：scanner 复用底层缓冲区
+			raw := make(json.RawMessage, len(line))
+			copy(raw, line)
+			if len(ring) < keep {
+				ring = append(ring, raw)
+			} else {
+				ring[head] = raw
+				head = (head + 1) % keep
 			}
 		}
 		_ = f.Close()
-		for i := len(lines) - 1; i >= 0; i-- {
+		// 倒序遍历（新→旧）：head 指向最旧一条，最新一条位于 head-1
+		for i := len(ring) - 1; i >= 0; i-- {
 			var v T
-			if json.Unmarshal(lines[i], &v) == nil {
+			if json.Unmarshal(ring[(head+i)%len(ring)], &v) == nil {
 				out = append(out, v)
 				if maxRecords > 0 && len(out) >= maxRecords {
 					return out, nil

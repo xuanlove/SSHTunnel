@@ -123,22 +123,19 @@ func TestAccessRecordDeniedAndDisabled(t *testing.T) {
 	on := &BaseServer{id: "on", protocol: config.ProxySOCKS5, listenPort: 1080, accessLog: true, history: h}
 	on.logAccess(nil, "example.com:80", time.Now(), "成功")
 	on.logAccessDenied(nil, "example.org:443", "认证失败")
-	on.logAccessDenied(nil, "example.org:443", "认证失败") // 同一目标 10 分钟内去重
-	on.logAccessDenied(nil, "example.net:443", "认证失败") // 不同目标应分别记录
+	on.logAccessDenied(nil, "example.org:443", "认证失败") // 同一来源 10 分钟内去重
+	on.logAccessDenied(nil, "example.net:443", "认证失败") // 仅按来源 IP 去重：不同目标同样合并，保证去重 map 有界
 
 	recs := h.Recent(10)
-	if len(recs) != 3 {
-		t.Fatalf("历史条数 = %d, want 3: %+v", len(recs), recs)
+	if len(recs) != 2 {
+		t.Fatalf("历史条数 = %d, want 2: %+v", len(recs), recs)
 	}
-	// 倒序：最新的两条是拒绝记录，分别对应不同目标
-	if !recs[0].Denied || recs[0].Target != "example.net:443" {
-		t.Errorf("不同目标的拒绝记录应按目标区分: %+v", recs[0])
+	// 倒序：最新一条是拒绝记录（同一来源仅记录一次）
+	if !recs[0].Denied || !strings.Contains(recs[0].Result, "拒绝: 认证失败") || recs[0].Target != "example.org:443" {
+		t.Errorf("拒绝记录内容不符: %+v", recs[0])
 	}
-	if !recs[1].Denied || !strings.Contains(recs[1].Result, "拒绝: 认证失败") || recs[1].Target != "example.org:443" {
-		t.Errorf("拒绝记录内容不符: %+v", recs[1])
-	}
-	if recs[2].Denied || recs[2].Result != "成功" || recs[2].Target != "example.com:80" {
-		t.Errorf("成功记录内容不符: %+v", recs[2])
+	if recs[1].Denied || recs[1].Result != "成功" || recs[1].Target != "example.com:80" {
+		t.Errorf("成功记录内容不符: %+v", recs[1])
 	}
 }
 

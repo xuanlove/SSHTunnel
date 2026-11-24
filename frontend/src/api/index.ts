@@ -548,14 +548,19 @@ export interface WebTLSSettings {
   cert_file: string
   key_file: string
   cert_pem?: string
+  // 默认查询不再返回明文私钥：has_key 表示是否已保存，key_masked 为掩码展示；
+  // 仅 reveal=true 时返回明文 key_pem
+  has_key?: boolean
+  key_masked?: string
   key_pem?: string
   active: boolean
   deploy_token: string
 }
 
-export async function getWebTLSSettings(): Promise<WebTLSSettings> {
+// reveal 为 true 时后端才返回明文私钥 key_pem（用于「查看私钥」）
+export async function getWebTLSSettings(reveal = false): Promise<WebTLSSettings> {
   if (!isWeb) throw new Error('仅 WEB 模式支持面板 HTTPS 设置')
-  return httpGet<WebTLSSettings>('/api/web/tls')
+  return httpGet<WebTLSSettings>(reveal ? '/api/web/tls?reveal_key=1' : '/api/web/tls')
 }
 
 // 保存 HTTPS 设置；可直接提交证书/私钥 PEM 内容

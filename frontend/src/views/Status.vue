@@ -5,6 +5,7 @@ import * as api from '@/api'
 import type { AccessRecord, ConnSnapshot, NodeStatus, TunnelTraffic } from '@/types'
 import type { AlertHistory, MetricPoint } from '@/api'
 import { formatBytes, formatDuration, formatElapsed, formatTime, rangeToFromISO } from '@/utils/format'
+import { sanitizeCSV } from '@/utils/csv'
 import TrendChart from '@/components/TrendChart.vue'
 
 const status = ref<NodeStatus | null>(null)
@@ -184,7 +185,8 @@ async function handleExportHistory() {
       from: histFromISO(),
       result: histResult.value || '',
     })
-    downloadCSV(csv)
+    // target/source 等列为网络可控内容，导出前逐单元格做公式注入防护
+    downloadCSV(sanitizeCSV(csv))
     ElMessage.success('已导出 CSV')
   } catch (e: any) {
     ElMessage.error(e?.message || '导出失败')

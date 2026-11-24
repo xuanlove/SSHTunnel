@@ -157,7 +157,8 @@ func (s *Server) buildRoutes() *http.ServeMux {
 	// 公开路由
 	mux.HandleFunc("/api/auth/status", s.handleAuthStatus)
 	// 登录接口始终注册；未开启访问密码时返回提示（兼容运行时动态开启）
-	mux.HandleFunc("/api/login", s.handler.handleLogin)
+	// 与其余 API 一致限制请求体大小，避免超大请求耗尽内存
+	mux.Handle("/api/login", limitRequestBody(http.HandlerFunc(s.handler.handleLogin)))
 
 	// 受保护 API（未启用密码时直接放行，启用后需 Token；支持运行时切换）
 	protected := limitRequestBody(http.StripPrefix("/api", s.handler.apiRouter()))

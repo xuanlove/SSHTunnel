@@ -15,6 +15,7 @@ const (
 type loginAttempt struct {
 	failures int
 	until    time.Time
+	lastFail time.Time // 最近一次失败时间，用于过期清理
 }
 
 // loginLimiter 按来源 IP 限制登录失败次数，缓解在线爆破
@@ -31,6 +32,7 @@ func newLoginLimiter() *loginLimiter {
 func (l *loginLimiter) allow(src string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.expireLocked()
 	a, ok := l.attempts[src]
 	if !ok {
 		return true
@@ -50,14 +52,16 @@ func (l *loginLimiter) allow(src string) bool {
 func (l *loginLimiter) fail(src string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.expireLocked()
 	a := l.attempts[src]
 	if a == nil {
 		a = &loginAttempt{}
 		l.attempts[src] = a
 	}
 	a.failures++
+	a.lastFail = time.Now()
 	if a.failures >= loginMaxFailures {
-		a.until = time.Now().Add(loginLockDuration)
+		a.until = a.lastFail.Add(loginLockDuration)
 		a.failures = 0
 	}
 }
@@ -67,6 +71,17 @@ func (l *loginLimiter) reset(src string) {
 	l.mu.Lock()
 	delete(l.attempts, src)
 	l.mu.Unlock()
+}
+
+// expireLocked 清理超过 lockDuration 未活跃的记录（含未达锁定阈值的），
+// 保证 attempts map 有界；调用方需持有写锁。
+func (l *loginLimiter) expireLocked() {
+	now := time.Now()
+	for src, a := range l.attempts {
+		if now.Sub(a.lastFail) > loginLockDuration {
+			delete(l.attempts, src)
+		}
+	}
 }
 
 // loginSource 提取来源 IP（去掉端口）

@@ -2,10 +2,12 @@ package web
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"sshtunnel/internal/persist"
 )
 
 // WebAuthSettings 持久化的 WEB 访问密码配置（settings.json）
@@ -57,12 +61,15 @@ func NewAuthStore(path string) *AuthStore {
 		return s
 	}
 	var cfg WebAuthSettings
-	if json.Unmarshal(data, &cfg) == nil {
-		s.enabled = cfg.Enabled
-		s.username = cfg.Username
-		s.passHash = []byte(cfg.PasswordHash)
-		s.jwtSecret = cfg.JWTSecret
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		// 文件损坏（如中断写坏/手工误编辑）：输出 warning 并按未启用处理，不再完全静默
+		log.Printf("⚠️ 加载 WEB 访问密码设置失败（%s），已忽略并按未启用处理: %v", path, err)
+		return s
 	}
+	s.enabled = cfg.Enabled
+	s.username = cfg.Username
+	s.passHash = []byte(cfg.PasswordHash)
+	s.jwtSecret = cfg.JWTSecret
 	return s
 }
 
@@ -72,18 +79,29 @@ func (s *AuthStore) Secret() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.jwtSecret == "" {
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			// 极端情况下退化为时间派生密钥（仍可工作，仅重启后失效）
-			s.jwtSecret = fmt.Sprintf("fallback-%d", time.Now().UnixNano())
-			return []byte(s.jwtSecret)
-		}
-		s.jwtSecret = hex.EncodeToString(b)
+		s.jwtSecret = s.generateSecretLocked()
 		if s.path != "" {
 			_ = s.persistLocked()
 		}
 	}
 	return []byte(s.jwtSecret)
+}
+
+// generateSecretLocked 生成 JWT 签名密钥（调用方需持有写锁）。
+// 优先 crypto/rand 并多次重试；全部失败时退化为多源熵派生
+// （时间 + pid + 运行时地址），避免单点时间戳成为可预测密钥。
+func (s *AuthStore) generateSecretLocked() string {
+	b := make([]byte, 32)
+	for i := 0; i < 3; i++ {
+		if _, err := rand.Read(b); err == nil {
+			return hex.EncodeToString(b)
+		}
+	}
+	log.Printf("⚠️ crypto/rand 不可用，JWT 密钥退化为多源熵派生（建议重启进程排查系统熵源）")
+	seed := fmt.Sprintf("sshtunnel-jwt-%d-%d-%p-%p-%p",
+		time.Now().UnixNano(), os.Getpid(), s, &b, rand.Reader)
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])
 }
 
 // Enabled 当前是否启用访问密码。
@@ -179,6 +197,7 @@ func (s *AuthStore) persistLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
 		return err
 	}
-	// 含密码哈希，权限收紧为 0600
-	return os.WriteFile(s.path, data, 0600)
+	// 含密码哈希：原子写入（临时文件 + fsync + rename）且权限收紧为 0600，
+	// 避免中断产生残缺的 settings.json 导致配置丢失
+	return persist.WriteFileAtomic(s.path, data)
 }

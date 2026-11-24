@@ -2,9 +2,12 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -12,6 +15,33 @@ import (
 
 	"sshtunnel/internal/config"
 )
+
+// errHeaderTooLarge 请求头累计超过上限
+var errHeaderTooLarge = errors.New("请求头过大")
+
+// readBoundedHeader 有界读取请求头：逐段读取直到空行（CRLF CRLF），
+// 累计字节数超过 limit 立即返回 errHeaderTooLarge，
+// 避免 http.ReadRequest 的 textproto 读取器对单行无限扩容导致的内存放大。
+func readBoundedHeader(br *bufio.Reader, limit int) ([]byte, error) {
+	var buf bytes.Buffer
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if n := buf.Len() + len(chunk); n > limit {
+			return nil, errHeaderTooLarge
+		}
+		buf.Write(chunk)
+		if err == bufio.ErrBufferFull {
+			continue // 单行超长，继续读完该行并累计检查
+		}
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(chunk, []byte("\r\n")) || bytes.Equal(chunk, []byte("\n")) {
+			break // 空行：请求头结束
+		}
+	}
+	return buf.Bytes(), nil
+}
 
 // httpServer HTTP/HTTPS 代理服务器
 // 当 tlsCfg 为 nil 时为 HTTP 代理，否则为 HTTPS 代理（监听器包装 TLS）
@@ -70,9 +100,13 @@ func (s *httpServer) Start(ctx context.Context) error {
 	}
 	s.log("info", proto+" 代理已启动")
 
+	stopCh := s.stopChan()
 	go func() {
-		<-ctx.Done()
-		s.Stop()
+		select {
+		case <-ctx.Done():
+			s.Stop()
+		case <-stopCh:
+		}
 	}()
 
 	for {
@@ -120,22 +154,20 @@ func (s *httpServer) handleConn(conn net.Conn) {
 
 	start := time.Now()
 	br := bufio.NewReader(conn)
-	req, err := http.ReadRequest(br)
+	// 有界读取请求头：累计超限立即拒绝，防止单行无限扩容放大内存
+	head, err := readBoundedHeader(br, s.maxHeader)
 	if err != nil {
+		if errors.Is(err, errHeaderTooLarge) {
+			conn.Write([]byte("HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"))
+			s.logAccessDenied(conn, "", "请求头过大")
+		}
 		return
 	}
-
-	// 限制请求头总大小，避免超大头部耗尽内存
-	headerSize := len(req.Method) + len(req.URL.String()) + len(req.Proto)
-	for k, vs := range req.Header {
-		headerSize += len(k)
-		for _, v := range vs {
-			headerSize += len(v)
-		}
-	}
-	if headerSize > s.maxHeader {
-		conn.Write([]byte("HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"))
-		s.logAccessDenied(conn, req.URL.Host, "请求头过大")
+	// 头部已读出且总量受控，连同 bufio 预读的剩余数据交给标准库解析；
+	// 解析用 reader 需保留（其缓冲可能已预读后续字节），CONNECT 分支据此回灌
+	reqReader := bufio.NewReader(io.MultiReader(bytes.NewReader(head), br))
+	req, err := http.ReadRequest(reqReader)
+	if err != nil {
 		return
 	}
 
@@ -160,8 +192,8 @@ func (s *httpServer) handleConn(conn net.Conn) {
 
 	// CONNECT 方法（HTTPS 隧道）
 	if req.Method == http.MethodConnect {
-		// 回灌 bufio 预读的数据，避免客户端提前发送的 TLS 首包被丢弃
-		s.handleConnect(&bufferedConn{r: br, Conn: conn}, req, start, entry)
+		// 回灌解析 reader 中预读的数据，避免客户端提前发送的 TLS 首包被丢弃
+		s.handleConnect(&bufferedConn{r: reqReader, Conn: conn}, req, start, entry)
 		return
 	}
 

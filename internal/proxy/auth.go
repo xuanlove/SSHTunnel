@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 
 	"sshtunnel/internal/config"
@@ -18,11 +19,11 @@ func (a *authHelper) hasAuth() bool {
 }
 
 // secureEqual 常量时间字符串比较
+// 先对两侧做 sha256 归一为定长摘要再比较，避免长度差异导致的提前返回
 func secureEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
 // checkBasicAuth HTTP Basic Auth 校验（返回 base64 解码后的 user:pass）

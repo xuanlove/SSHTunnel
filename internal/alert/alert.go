@@ -416,7 +416,12 @@ func (e *Engine) Webhook() Webhook {
 	return e.webhook
 }
 
-// SaveWebhook 保存通知配置
+// SaveWebhook 保存通知配置。
+//
+// 设计取舍：此处刻意不拦截内网/回环 URL（仅校验 http(s) 前缀）——
+// 内网 IM 网关、自建告警服务（如 http://127.0.0.1:xxxx、http://10.x.x.x）是合法场景，
+// SSRF 式的内网拦截会误伤这些部署；该地址仅由管理员在本地面板配置，
+// 不来自不可信输入，且推送内容为告警摘要，风险可控。
 func (e *Engine) SaveWebhook(w Webhook) error {
 	w.URL = strings.TrimSpace(w.URL)
 	if w.Enabled && !strings.HasPrefix(w.URL, "http://") && !strings.HasPrefix(w.URL, "https://") {

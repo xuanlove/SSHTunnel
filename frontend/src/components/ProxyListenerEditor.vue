@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as api from '@/api'
 import type { FirewallConfig, FirewallMode, ProxyListener, ProxyProtocol } from '@/types'
@@ -39,6 +39,12 @@ function scheduleInspect(id: string, pem: string) {
   if (certTimers[id]) window.clearTimeout(certTimers[id])
   certTimers[id] = window.setTimeout(() => void inspectCert(id, pem), 400)
 }
+
+// 卸载时清理所有防抖定时器，避免组件销毁后仍触发证书解析
+onUnmounted(() => {
+  Object.values(certTimers).forEach((t) => window.clearTimeout(t))
+  for (const k of Object.keys(certTimers)) delete certTimers[k]
+})
 
 async function inspectCert(id: string, pem: string) {
   if (!pem.trim()) {
