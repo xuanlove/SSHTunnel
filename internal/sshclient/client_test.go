@@ -127,6 +127,26 @@ func genEd25519(t *testing.T) ssh.PublicKey {
 	return pub
 }
 
+func TestBuildAuthPasswordIncludesKeyboardInteractive(t *testing.T) {
+	methods, err := buildAuth(Hop{AuthType: "password", Password: "pw"})
+	if err != nil {
+		t.Fatalf("密码模式构造认证失败: %v", err)
+	}
+	// 密码模式应同时提供 Password 与 KeyboardInteractive（部分服务器禁用密码认证
+	// 但保留键盘交互认证，缺失会导致 unable to authenticate）
+	if len(methods) != 2 {
+		t.Fatalf("密码模式应提供 2 种认证方法（Password+KeyboardInteractive），实际 %d", len(methods))
+	}
+
+	keyMethods, err := buildAuth(Hop{AuthType: "key", KeyContent: "not-a-pem"})
+	if err == nil {
+		t.Fatalf("非法 PEM 应返回解析错误")
+	}
+	if keyMethods != nil {
+		t.Fatalf("解析失败时不应返回认证方法")
+	}
+}
+
 func TestNormalizeHostKey(t *testing.T) {
 	pub := genEd25519(t)
 	blob := pub.Marshal()

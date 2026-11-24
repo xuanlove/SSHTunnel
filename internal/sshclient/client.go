@@ -97,7 +97,7 @@ func Dial(hops []Hop) (*Client, error) {
 	addr := net.JoinHostPort(first.Host, strconv.Itoa(first.Port))
 	client, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("第一跳连接失败 %s: %w", addr, err)
+		return nil, fmt.Errorf("第一跳连接失败 %s: %w%s", addr, err, authHint(err))
 	}
 
 	// 后续跳板通过前一跳 Dial 串联
@@ -127,7 +127,7 @@ func Dial(hops []Hop) (*Client, error) {
 		if err != nil {
 			_ = conn.Close()
 			closeClients(client, intermediates)
-			return nil, fmt.Errorf("第 %d 跳握手失败: %w", i+1, err)
+			return nil, fmt.Errorf("第 %d 跳握手失败: %w%s", i+1, err, authHint(err))
 		}
 		intermediates = append(intermediates, client)
 		client = ssh.NewClient(ncc, chans, reqs)
@@ -186,8 +186,27 @@ func buildAuth(hop Hop) ([]ssh.AuthMethod, error) {
 		}
 		return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
 	default: // password
-		return []ssh.AuthMethod{ssh.Password(hop.Password)}, nil
+		return []ssh.AuthMethod{
+			ssh.Password(hop.Password),
+			// 部分服务器禁用密码认证但保留键盘交互认证（KbdInteractiveAuthentication/PAM），
+			// 以相同密码应答键盘交互挑战作为回退
+			ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+				answers := make([]string, len(questions))
+				for i := range questions {
+					answers[i] = hop.Password
+				}
+				return answers, nil
+			}),
+		}, nil
 	}
+}
+
+// authHint 对「认证被拒」类错误附加可操作的排查提示
+func authHint(err error) string {
+	if err != nil && strings.Contains(err.Error(), "unable to authenticate") {
+		return "（认证被服务器拒绝：请确认用户名与凭据正确，且服务器对该用户允许密码/键盘交互/公钥认证——若使用本项目生成的最小权限账户，请检查 sshd Match 块中的认证方式与客户端所选认证方式一致）"
+	}
+	return ""
 }
 
 // insecureKeyWarnOnce 保证「未配置 host_key」的安全提示每进程只输出一次，避免每次拨号刷屏
