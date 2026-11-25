@@ -51,7 +51,7 @@ type HopConfig struct {
 	Password   string `json:"password,omitempty"`
 	KeyContent string `json:"key_content,omitempty"` // 密钥文本内容（PEM 格式）
 	Passphrase string `json:"passphrase,omitempty"`
-	// HostKey 主机密钥指纹/公钥（连接时必填）。支持 SHA256:base64 指纹、base64 公钥
+	// HostKey 主机密钥指纹/公钥（可选）。支持 SHA256:base64 指纹、base64 公钥
 	// 或 authorized_keys 行；配置后严格校验服务器主机密钥以防中间人
 	HostKey string `json:"host_key,omitempty"`
 }

@@ -179,8 +179,13 @@ func TestNormalizeHostKey(t *testing.T) {
 		})
 	}
 
+	// 空输入表示未配置（可选），返回空串且不报错
+	if got, err := NormalizeHostKey(""); err != nil || got != "" {
+		t.Errorf("空 host_key 应视为未配置: got=%q err=%v", got, err)
+	}
+
 	// 非法输入应报错
-	for _, bad := range []string{"", "SHA256:", "not base64!!!"} {
+	for _, bad := range []string{"SHA256:", "not base64!!!"} {
 		if _, err := NormalizeHostKey(bad); err == nil {
 			t.Errorf("非法输入 %q 应报错", bad)
 		}
@@ -215,11 +220,14 @@ func TestHostKeyCallback(t *testing.T) {
 		t.Errorf("错误信息应包含明确原因: %v", err)
 	}
 
-	// 缺失或非法主机密钥在发起连接前即被拒绝。
-	for _, hostKey := range []string{"", "!!!"} {
-		if _, err := Dial([]Hop{{Host: "example.com", HostKey: hostKey}}); err == nil || !strings.Contains(err.Error(), "需要可信的主机密钥") {
-			t.Fatalf("无效 host_key 应拒绝连接: %v", err)
-		}
+	// 未配置 host_key（可选）时跳过校验：任意密钥均放行
+	if err := hostKeyCallback("")("srv.example.com", addr, other); err != nil {
+		t.Errorf("未配置 host_key 时应跳过校验: %v", err)
+	}
+
+	// 非法（非空）主机密钥在发起连接前即被拒绝
+	if _, err := Dial([]Hop{{Host: "example.com", HostKey: "!!!"}}); err == nil || !strings.Contains(err.Error(), "主机密钥配置无效") {
+		t.Fatalf("非法 host_key 应拒绝连接: %v", err)
 	}
 }
 

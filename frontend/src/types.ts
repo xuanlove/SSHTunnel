@@ -14,7 +14,7 @@ export interface HopConfig {
   password?: string
   key_content?: string // 密钥文本内容（PEM 格式）
   passphrase?: string
-  host_key?: string // 主机密钥指纹（SHA256:...，连接时必填）
+  host_key?: string // 主机密钥指纹（可选，SHA256:...，填写后严格校验以防中间人）
 }
 
 export interface LocalForward {

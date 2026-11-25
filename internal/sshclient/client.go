@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -101,7 +102,7 @@ func dialChain(ctx context.Context, hops []Hop, timeout time.Duration) (*Client,
 		expected, err := NormalizeHostKey(hop.HostKey)
 		if err != nil {
 			closeClients(client, intermediates)
-			return nil, fmt.Errorf("第 %d 跳 %s 需要可信的主机密钥: %w", i+1, addr, err)
+			return nil, fmt.Errorf("第 %d 跳 %s 主机密钥配置无效: %w", i+1, addr, err)
 		}
 		auth, err := buildAuth(hop)
 		if err != nil {
@@ -211,8 +212,16 @@ func authHint(err error) string {
 	return ""
 }
 
-// hostKeyCallback 严格校验跳板主机密钥。
+// hostKeyCallback 返回主机密钥校验回调。
+// expected 为空表示未配置：跳过校验（沿用历史行为）并输出一次安全提示；
+// 配置后严格比对 SHA256 指纹，防止中间人攻击。
 func hostKeyCallback(expected string) ssh.HostKeyCallback {
+	if expected == "" {
+		insecureHostKeyWarn.Do(func() {
+			log.Printf("[WARN] 未配置主机密钥指纹（host_key），不校验服务器主机密钥，存在中间人风险；建议在跳板配置中填写 SHA256 指纹")
+		})
+		return ssh.InsecureIgnoreHostKey()
+	}
 	return func(hostname string, _ net.Addr, key ssh.PublicKey) error {
 		if got := fingerprintKey(key); got != expected {
 			return fmt.Errorf("主机密钥校验失败 %s: 期望 %s，实际 %s（服务器密钥已更换或存在中间人攻击）",
@@ -222,6 +231,9 @@ func hostKeyCallback(expected string) ssh.HostKeyCallback {
 	}
 }
 
+// insecureHostKeyWarn 保证未配置 host_key 的提示每进程只输出一次，避免每次拨号刷屏
+var insecureHostKeyWarn sync.Once
+
 // fingerprintKey 计算 SSH 公钥的 SHA256 指纹（与 ssh-keygen 输出一致：SHA256:base64 无 padding）
 func fingerprintKey(key ssh.PublicKey) string {
 	sum := sha256.Sum256(key.Marshal())
@@ -229,14 +241,14 @@ func fingerprintKey(key ssh.PublicKey) string {
 }
 
 // NormalizeHostKey 将用户输入的主机密钥规范化为 SHA256 指纹（SHA256:base64 无 padding）。
-// 支持三种输入：
+// 空输入返回空串（表示未配置，不校验主机密钥）。支持三种输入：
 //   - OpenSSH 指纹：SHA256:xxxx（允许带 padding，统一去除）
 //   - base64 公钥裸串：xxxx（如 ssh-keygen -lf 输出的第二列）
 //   - authorized_keys 行：ssh-ed25519 xxxx comment（取第二列）
 func NormalizeHostKey(input string) (string, error) {
 	s := strings.TrimSpace(input)
 	if s == "" {
-		return "", fmt.Errorf("host_key 为空")
+		return "", nil
 	}
 	fields := strings.Fields(s)
 	if strings.HasPrefix(fields[0], "SHA256:") {
