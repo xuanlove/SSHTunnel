@@ -4,8 +4,8 @@
 #
 # 功能：
 #   1. 自动检测系统架构（amd64 / arm64）
-#   2. 从 GitHub Release 获取最新版本号
-#   3. 下载对应平台的二进制资产
+#   2. 从 GitHub Release 获取最新版本号（多源重试）
+#   3. 多镜像测速后从最快的源下载二进制，失败自动切换下一个源
 #   4. 安装到 /usr/local/bin（需要 root 或 sudo）
 #   5. 默认安装为 systemd 服务，以 WEB 模式运行（可用 --no-service 跳过）
 #   6. 安装后调用 --version 与 --check-update 验证
@@ -24,6 +24,11 @@
 #   -u, --upgrade           升级模式：保留现有配置，仅替换二进制
 #   -h, --help              显示帮助
 #
+# 镜像相关环境变量：
+#   SSHTUNNEL_MIRRORS       追加 GitHub 代理（空格分隔，如 "https://ghfast.top https://ghproxy.net"）
+#   SSHTUNNEL_DIRECT=0      不使用 GitHub 直连，只用镜像
+#   SSHTUNNEL_MIRROR_TEST=0 跳过测速，按内置顺序尝试
+#
 # 服务参数（非交互模式 / 管道安装时生效，交互终端下会询问）：
 #   WEB_HOST   监听地址（默认 0.0.0.0）
 #   WEB_PORT   监听端口（默认 8080）
@@ -38,6 +43,37 @@ BINARY_NAME="sshtunnel"
 INSTALL_SERVICE=true   # 默认安装为 systemd 服务（WEB 模式）
 UPGRADE_MODE=false
 TARGET_VERSION=""
+
+# ==================== 下载镜像 ====================
+# GitHub 代理根（空串表示直连）。实际 URL = ${proxy:+$proxy/}https://github.com/...
+MIRROR_PROXIES=(
+    ""
+    "https://ghfast.top"
+    "https://ghproxy.net"
+    "https://gh-proxy.com"
+    "https://github.moeyy.xyz"
+)
+# 不在默认列表中展示直连（如纯内网只能走自建镜像）
+if [[ "${SSHTUNNEL_DIRECT:-1}" == "0" ]]; then
+    MIRROR_PROXIES=("${MIRROR_PROXIES[@]:1}")
+fi
+# 追加用户自定义镜像（去掉尾部斜杠，避免拼出双斜杠 URL）
+if [[ -n "${SSHTUNNEL_MIRRORS:-}" ]]; then
+    read -r -a _extra_mirrors <<<"${SSHTUNNEL_MIRRORS}"
+    if [[ ${#_extra_mirrors[@]} -gt 0 ]]; then
+        for _m in "${_extra_mirrors[@]}"; do
+            [[ -z "$_m" ]] && continue
+            MIRROR_PROXIES+=("${_m%/}")
+        done
+        unset _m
+    fi
+    unset _extra_mirrors
+fi
+# 关闭测速：不测速，按上面的列表顺序依次尝试
+SKIP_MIRROR_TEST=false
+if [[ "${SSHTUNNEL_MIRROR_TEST:-1}" == "0" ]]; then
+    SKIP_MIRROR_TEST=true
+fi
 
 # ==================== 颜色输出 ====================
 if [[ -t 1 ]]; then
@@ -72,6 +108,14 @@ ${BOLD}选项:${NC}
   -n, --no-service         仅安装二进制，不安装 systemd 服务
   -u, --upgrade            升级模式：保留现有配置，仅替换二进制
   -h, --help               显示此帮助
+
+${BOLD}镜像相关环境变量:${NC}
+  SSHTUNNEL_MIRRORS        追加 GitHub 代理根（空格分隔）
+                           例: SSHTUNNEL_MIRRORS="https://ghfast.top https://ghproxy.net"
+  SSHTUNNEL_DIRECT=0       不使用 GitHub 直连，只用镜像
+  SSHTUNNEL_MIRROR_TEST=0  跳过测速，按内置顺序尝试
+
+默认会对直连与内置镜像并行测速，从最快的源下载，失败自动切换下一个源。
 
 ${BOLD}服务参数${NC}（非交互模式生效，交互终端下会询问）:
   WEB_HOST   监听地址（默认 0.0.0.0）
@@ -170,26 +214,138 @@ detect_platform() {
     ASSET_NAME="${BINARY_NAME}-${PLATFORM}"
 }
 
+# ==================== 镜像 URL ====================
+# release_url 拼出资产下载地址；proxy 为空表示 GitHub 直连
+release_url() {
+    local proxy="$1" version="$2" file="$3"
+    local base="https://github.com/${REPO}/releases/download/${version}/${file}"
+    if [[ -n "$proxy" ]]; then
+        echo "${proxy}/${base}"
+    else
+        echo "$base"
+    fi
+}
+
+# latest_url 拼出「最新版本」重定向地址
+latest_url() {
+    local proxy="$1"
+    local base="https://github.com/${REPO}/releases/latest"
+    if [[ -n "$proxy" ]]; then
+        echo "${proxy}/${base}"
+    else
+        echo "$base"
+    fi
+}
+
+# 镜像可读名称（用于日志）
+mirror_label() {
+    local proxy="$1"
+    if [[ -z "$proxy" ]]; then
+        echo "GitHub 直连"
+    else
+        echo "${proxy#*://}"
+    fi
+}
+
+# 字节/秒转可读速度
+human_speed() {
+    awk -v s="${1:-0}" 'BEGIN {
+        if (s <= 0) { print "未知"; exit }
+        if (s >= 1048576) printf "%.1f MB/s", s / 1048576
+        else if (s >= 1024) printf "%.0f KB/s", s / 1024
+        else printf "%.0f B/s", s
+    }'
+}
+
+# bench_mirrors 并行测速，按推荐顺序在 stdout 输出代理根（每行一个，空行=直连）。
+# 策略：对每个镜像 Range 取前 512KB 实测吞吐（--max-filesize 防止不支持 Range
+# 的镜像下载整个文件），按吞吐降序；吞吐未知时用 TTFB 升序兜底。
+bench_mirrors() {
+    local version="$1"
+    local dir
+    dir="$(mktemp -d)"
+    local i proxy
+
+    for i in "${!MIRROR_PROXIES[@]}"; do
+        proxy="${MIRROR_PROXIES[$i]}"
+        (
+            local url out
+            url="$(release_url "$proxy" "$version" "$ASSET_NAME")"
+            out="$(curl -sS -o /dev/null --connect-timeout 4 --max-time 10 \
+                --max-filesize 3145728 -r 0-524287 \
+                -w '%{http_code} %{time_total} %{speed_download}' \
+                "$url" 2>/dev/null || true)"
+            printf '%s\n' "${out:-000 99 0}" >"$dir/probe.$i"
+        ) &
+    done
+    wait 2>/dev/null || true
+
+    # 汇总可用镜像：code<TAB>ttfb<TAB>speed<TAB>index
+    : >"$dir/all"
+    for i in "${!MIRROR_PROXIES[@]}"; do
+        local line code ttfb speed
+        line="$(cat "$dir/probe.$i" 2>/dev/null || true)"
+        code="000"; ttfb="99"; speed="0"
+        read -r code ttfb speed _ <<<"${line:-000 99 0}" || true
+        [[ "$code" == "200" || "$code" == "206" ]] || continue
+        printf '%s\t%s\t%s\t%s\n' "$code" "$ttfb" "$speed" "$i" >>"$dir/all"
+    done
+
+    if [[ ! -s "$dir/all" ]]; then
+        rm -rf "$dir"
+        return 0
+    fi
+
+    local ranked
+    ranked="$(
+        {
+            awk -F'\t' '$3+0 > 0' "$dir/all" | sort -t$'\t' -k3,3nr -k2,2g | cut -f4
+            awk -F'\t' '$3+0 == 0' "$dir/all" | sort -t$'\t' -k2,2g | cut -f4
+        }
+    )"
+
+    info "镜像测速结果（按下载速度排序）："
+    local idx n=0
+    while IFS= read -r idx; do
+        [[ -z "$idx" ]] && continue
+        n=$((n + 1))
+        local spd
+        spd="$(awk -F'\t' -v k="$idx" '$4==k {print $3}' "$dir/all" | head -1)"
+        info "  ${n}. $(mirror_label "${MIRROR_PROXIES[$idx]}") · $(human_speed "$spd")"
+    done <<<"$ranked"
+
+    while IFS= read -r idx; do
+        [[ -z "$idx" ]] && continue
+        printf '%s\n' "${MIRROR_PROXIES[$idx]}"
+    done <<<"$ranked"
+
+    rm -rf "$dir"
+}
+
 # ==================== 获取最新版本 ====================
 # 利用 GitHub /releases/latest 的 302 重定向解析最新 tag，无需 jq。
 # 相比 api.github.com 不受未认证请求限流影响。
+# 直连与各镜像依次尝试，任一成功即返回。
 get_latest_version() {
-    local url="https://github.com/${REPO}/releases/latest"
-    local final_url
-    # -I 仅取头，-o 输出到文件，-w 输出最终 URL
-    final_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$url" 2>/dev/null || true)"
-    if [[ -z "$final_url" ]]; then
-        error "无法获取最新版本（网络问题或仓库 ${REPO} 无 Release）"
-        exit 1
-    fi
-    # 最终 URL 形如 https://github.com/owner/repo/releases/tag/v1.0.0
-    local tag="${final_url##*/tag/}"
-    if [[ -z "$tag" || "$tag" == "$final_url" ]]; then
-        error "解析版本号失败: ${final_url}"
-        error "可能原因：仓库 ${REPO} 不存在，或尚无任何 Release"
-        exit 1
-    fi
-    echo "$tag"
+    local proxy url final_url tag
+    for proxy in "${MIRROR_PROXIES[@]}"; do
+        url="$(latest_url "$proxy")"
+        # -I 仅取头，-o 输出到文件，-w 输出最终 URL
+        final_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+            --connect-timeout 5 --max-time 15 "$url" 2>/dev/null || true)"
+        if [[ -z "$final_url" ]]; then
+            continue
+        fi
+        # 最终 URL 形如 https://github.com/owner/repo/releases/tag/v1.0.0
+        tag="${final_url##*/tag/}"
+        if [[ -n "$tag" && "$tag" != "$final_url" ]]; then
+            echo "$tag"
+            return 0
+        fi
+    done
+    error "无法获取最新版本（网络问题或仓库 ${REPO} 无 Release）"
+    error "可检查网络，或用 -v 指定版本、通过 SSHTUNNEL_MIRRORS 追加可用镜像"
+    exit 1
 }
 
 # 规范化版本标签：GitHub Release 标签约定为 vX.Y.Z。
@@ -205,17 +361,50 @@ normalize_version() {
 # ==================== 下载二进制 ====================
 download_binary() {
     local version="$1"
-    local download_url="https://github.com/${REPO}/releases/download/${version}/${ASSET_NAME}"
     # 使用私有临时目录，避免可预测路径被本地用户预建符号链接利用
     local tmp_dir
     tmp_dir="$(mktemp -d)"
     local tmp_file="${tmp_dir}/${ASSET_NAME}"
 
-    step "下载 ${ASSET_NAME} (版本 ${version})"
-    info "URL: ${download_url}"
+    # 多镜像测速，得到按速度排序的下载源列表（SSHTUNNEL_MIRROR_TEST=0 时按配置顺序）
+    local -a order=()
+    if $SKIP_MIRROR_TEST; then
+        step "使用配置顺序试下载（已跳过测速）"
+        order=("${MIRROR_PROXIES[@]}")
+    else
+        step "测速选择下载源"
+        mapfile -t order < <(bench_mirrors "$version")
+    fi
+    if [[ ${#order[@]} -eq 0 ]]; then
+        error "所有下载源均不可用（已尝试 ${#MIRROR_PROXIES[@]} 个源）"
+        error "请检查网络，或通过 SSHTUNNEL_MIRRORS 追加可用镜像后重试"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
 
-    if ! curl -fSL --progress-bar -o "$tmp_file" "$download_url"; then
-        error "下载失败。可能该版本未提供 ${PLATFORM} 二进制。"
+    step "下载 ${ASSET_NAME} (版本 ${version})"
+    local downloaded=false chosen_url="" i proxy url
+    for i in "${!order[@]}"; do
+        proxy="${order[$i]}"
+        url="$(release_url "$proxy" "$version" "$ASSET_NAME")"
+        info "[$((i + 1))/${#order[@]}] $(mirror_label "$proxy")"
+        info "URL: ${url}"
+        if curl -fSL --progress-bar --connect-timeout 10 --max-time 900 \
+            -o "$tmp_file" "$url"; then
+            # 有些代理会用 200 返回 HTML 错误页，需排除
+            if head -c 512 "$tmp_file" 2>/dev/null | grep -qi '<html'; then
+                warn "下载内容是 HTML 错误页，切换下一个源"
+                continue
+            fi
+            downloaded=true
+            chosen_url="$url"
+            break
+        fi
+        warn "该源下载失败，切换下一个源"
+    done
+
+    if ! $downloaded; then
+        error "下载失败：所有源均未成功"
         error "请确认标签存在（如 v1.1.0），或访问 https://github.com/${REPO}/releases 查看可用资产"
         rm -rf "$tmp_dir"
         exit 1
@@ -238,22 +427,30 @@ download_binary() {
     command -v shasum >/dev/null 2>&1 && sum_ok=true
     if ! $sum_ok; then
         warn "未找到 sha256sum/shasum，跳过完整性校验"
-    elif curl -fsSL -o "$checksum_file" "${download_url}.sha256" 2>/dev/null; then
-        local expected actual
-        expected="$(awk '{print $1}' "$checksum_file" | head -1)"
-        if command -v sha256sum >/dev/null 2>&1; then
-            actual="$(sha256sum "$tmp_file" | awk '{print $1}')"
-        else
-            actual="$(shasum -a 256 "$tmp_file" | awk '{print $1}')"
-        fi
-        if [[ -z "$expected" || "$expected" != "$actual" ]]; then
-            error "sha256 校验失败，二进制可能被篡改或下载不完整"
-            rm -rf "$tmp_dir"
-            exit 1
-        fi
-        info "sha256 校验通过"
     else
-        warn "未提供 sha256 校验和，跳过完整性校验"
+        # 先走当前下载源，失败再回退直连
+        if ! curl -fsSL --connect-timeout 8 --max-time 30 -o "$checksum_file" \
+            "${chosen_url}.sha256" 2>/dev/null; then
+            curl -fsSL --connect-timeout 8 --max-time 30 -o "$checksum_file" \
+                "$(release_url "" "$version" "${ASSET_NAME}.sha256")" 2>/dev/null || true
+        fi
+        if [[ -s "$checksum_file" ]]; then
+            local expected actual
+            expected="$(awk '{print $1}' "$checksum_file" | head -1)"
+            if command -v sha256sum >/dev/null 2>&1; then
+                actual="$(sha256sum "$tmp_file" | awk '{print $1}')"
+            else
+                actual="$(shasum -a 256 "$tmp_file" | awk '{print $1}')"
+            fi
+            if [[ -z "$expected" || "$expected" != "$actual" ]]; then
+                error "sha256 校验失败，二进制可能被篡改或下载不完整"
+                rm -rf "$tmp_dir"
+                exit 1
+            fi
+            info "sha256 校验通过"
+        else
+            warn "未提供 sha256 校验和，跳过完整性校验"
+        fi
     fi
 
     echo "$tmp_file"

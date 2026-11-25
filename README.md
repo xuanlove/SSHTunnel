@@ -176,6 +176,22 @@ sudo bash scripts/install.sh -u
 | `WEB_PORT` | `8080` | WEB 监听端口 |
 | `WEB_AUTH` | 空（自动生成随机密码） | 访问密码 `user:password`；留空时生成 24 位随机密码并写入 `/etc/sshtunnel/sshtunnel.env`（0600） |
 
+下载镜像（脚本会并行测速，从最快的源下载，失败自动切换下一个源）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `SSHTUNNEL_MIRRORS` | 空 | 追加 GitHub 代理根（空格分隔），如 `"https://ghfast.top https://ghproxy.net"` |
+| `SSHTUNNEL_DIRECT` | `1` | 设为 `0` 时不使用 GitHub 直连，只走镜像（内网/自建镜像场景） |
+| `SSHTUNNEL_MIRROR_TEST` | `1` | 设为 `0` 时跳过测速，按配置顺序依次尝试 |
+
+```bash
+# 指定镜像并跳过测速（按列表顺序尝试）
+curl -fsSL https://raw.githubusercontent.com/xuanlove/SSHTunnel/main/scripts/install.sh | \
+  sudo SSHTUNNEL_MIRRORS="https://ghfast.top" SSHTUNNEL_MIRROR_TEST=0 bash
+```
+
+内置镜像：GitHub 直连、`ghfast.top`、`ghproxy.net`、`gh-proxy.com`、`github.moeyy.xyz`。测速方式为对每个源做 512KB Range 采样，按实测吞吐排序（不支持 Range 的源以首字节延迟兜底）。
+
 ### 方式二：systemd 服务部署（根目录脚本）
 
 根目录的 [`install.sh`](install.sh) 面向生产环境部署，从本地预编译二进制安装为加固的 systemd 服务：
