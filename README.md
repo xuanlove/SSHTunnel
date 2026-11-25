@@ -165,7 +165,7 @@ sudo bash scripts/install.sh -u
 | `-d, --dir PATH` | 安装目录（默认 `/usr/local/bin`） |
 | `-s, --service` | 安装为 systemd 服务（默认启用，保留兼容） |
 | `-n, --no-service` | 仅安装二进制，不安装 systemd 服务 |
-| `-u, --upgrade` | 升级模式：保留配置，仅替换二进制 |
+| `-u, --upgrade` | 升级模式：保留配置，仅替换二进制；已安装的 systemd 服务会自动重启（未运行也会拉起），并输出重启结果 |
 | `-h, --help` | 显示帮助 |
 
 服务参数环境变量（交互终端下会逐项询问；管道/非交互安装时读取这些变量）：

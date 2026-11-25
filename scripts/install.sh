@@ -456,6 +456,25 @@ download_binary() {
     echo "$tmp_file"
 }
 
+# 读取已安装二进制的版本号。
+# 不使用管道（--version 多行输出 + head 提前退出在 pipefail 下会产生非零状态），
+# 先完整捕获输出再解析首行第二个字段（形如 "SSHTunnel v1.9.4"）。
+installed_version_of() {
+    local bin="$1" out first
+    [[ -x "$bin" ]] || return 0
+    out="$("$bin" --version 2>/dev/null)" || return 0
+    first="${out%%$'\n'*}"
+    first="${first%$'\r'}"
+    local -a fields=()
+    read -r -a fields <<<"$first" || true
+    if [[ ${#fields[@]} -ge 2 && -n "${fields[1]}" ]]; then
+        printf '%s' "${fields[1]}"
+    elif [[ -n "$first" ]]; then
+        # 输出格式不认识时回退原始首行，避免只显示「未知」
+        printf '%s' "$first"
+    fi
+}
+
 # ==================== 安装二进制 ====================
 install_binary() {
     local tmp_file="$1"
@@ -464,7 +483,7 @@ install_binary() {
 
     # 升级模式：记录旧版本
     if [[ -x "$target" ]]; then
-        old_version="$("$target" --version 2>/dev/null | head -1 | awk '{print $2}')" || old_version=""
+        old_version="$(installed_version_of "$target")" || old_version=""
     fi
 
     step "安装到 ${target}"
@@ -611,6 +630,33 @@ EOF
     info "实时日志: journalctl -u ${BINARY_NAME} -f"
 }
 
+# ==================== 升级后重启服务 ====================
+# 升级模式：二进制已替换，重启已安装的 systemd 服务使新版本生效。
+# 用 restart 而非 try-restart：服务当前未运行时也会拉起。
+restart_service_after_upgrade() {
+    local service="${BINARY_NAME}.service"
+    local load_state
+    load_state="$(systemctl show --property=LoadState --value "$service" 2>/dev/null || true)"
+    if [[ "$load_state" != "loaded" ]]; then
+        warn "未发现已安装的 ${service}，跳过服务重启"
+        return 0
+    fi
+
+    step "重启服务 ${service}"
+    # unit 内容未变，但二进制替换后刷新缓存更稳妥
+    systemctl daemon-reload 2>/dev/null || true
+    if ! systemctl restart "$service"; then
+        warn "服务重启失败，请查看日志: journalctl -u ${BINARY_NAME} -e"
+        return 0
+    fi
+    sleep 1
+    if systemctl is-active --quiet "$service"; then
+        info "服务已重启，新版本 ${INSTALLED_VERSION} 已生效"
+    else
+        warn "服务未处于运行状态，请检查日志: journalctl -u ${BINARY_NAME} -e"
+    fi
+}
+
 # ==================== 主流程 ====================
 main() {
     echo "${BOLD}================ sshtunnel 安装程序 ================${NC}"
@@ -638,8 +684,12 @@ main() {
     # 升级模式提示
     if $UPGRADE_MODE && [[ -x "${INSTALL_DIR}/${BINARY_NAME}" ]]; then
         local current
-        current="$("${INSTALL_DIR}/${BINARY_NAME}" --version 2>/dev/null | head -1 | awk '{print $2}')" || current="未知"
-        info "升级模式：当前已安装 ${current}"
+        current="$(installed_version_of "${INSTALL_DIR}/${BINARY_NAME}")" || current=""
+        if [[ -n "$current" ]]; then
+            info "升级模式：当前已安装 ${current}"
+        else
+            warn "升级模式：无法读取当前版本（${INSTALL_DIR}/${BINARY_NAME} --version 无有效输出），继续升级"
+        fi
     fi
 
     # 下载
@@ -654,10 +704,7 @@ main() {
 
     if $INSTALL_SERVICE; then
         if $UPGRADE_MODE; then
-            local service="${BINARY_NAME}.service"
-            if [[ "$(systemctl show --property=LoadState --value "$service")" == "loaded" ]]; then
-                systemctl try-restart "$service"
-            fi
+            restart_service_after_upgrade
         else
             install_service
         fi
