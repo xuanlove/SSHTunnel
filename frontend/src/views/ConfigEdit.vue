@@ -88,6 +88,10 @@ async function handleSave() {
     ElMessage.warning('请配置至少一跳')
     return
   }
+  if (form.hop_chain.some(hop => !hop.host_key?.trim())) {
+    ElMessage.warning('请为每一跳填写可信的 SSH 主机密钥指纹')
+    return
+  }
   try {
     await store.save({ ...form })
     ElMessage.success('保存成功')

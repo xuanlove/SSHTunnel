@@ -309,7 +309,11 @@ install_service() {
     local generated_pass=""
     if [[ -z "$auth" ]]; then
         # 未提供凭据时生成随机强密码，避免面板无密码暴露
-        generated_pass="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)"
+        generated_pass="$(LC_ALL=C od -An -N12 -tx1 /dev/urandom | tr -d '[:space:]')"
+        if [[ ${#generated_pass} -ne 24 ]]; then
+            error "生成随机访问密码失败"
+            exit 1
+        fi
         auth="admin:${generated_pass}"
     fi
     local start_now="Y"
@@ -321,7 +325,7 @@ install_service() {
         local input
         read -rp "WEB 监听地址 [${web_host}]: " input; web_host="${input:-$web_host}"
         read -rp "WEB 监听端口 [${web_port}]: " input; web_port="${input:-$web_port}"
-        read -rp "访问密码（user:password，留空无密码）: " input; auth="${input:-$auth}"
+        read -rsp "访问密码（user:password，留空使用默认密码）: " input; echo >&2; auth="${input:-$auth}"
         read -rp "立即启动服务？[Y/n]: " input; start_now="${input:-Y}"
     fi
 
@@ -451,9 +455,15 @@ main() {
     # 验证
     verify_install
 
-    # 默认安装 systemd 服务（WEB 模式）；--no-service 跳过
     if $INSTALL_SERVICE; then
-        install_service
+        if $UPGRADE_MODE; then
+            local service="${BINARY_NAME}.service"
+            if [[ "$(systemctl show --property=LoadState --value "$service")" == "loaded" ]]; then
+                systemctl try-restart "$service"
+            fi
+        else
+            install_service
+        fi
     fi
 
     echo ""

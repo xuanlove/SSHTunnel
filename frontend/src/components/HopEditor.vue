@@ -343,7 +343,7 @@ async function copyAccountCommands() {
       </div>
 
       <div class="hostkey-field">
-        <div class="field-label">主机密钥指纹（可选，用于防中间人）</div>
+        <div class="field-label">主机密钥指纹（连接时必填）</div>
         <el-input
           :model-value="hop.host_key ?? ''"
           placeholder="SHA256:..."

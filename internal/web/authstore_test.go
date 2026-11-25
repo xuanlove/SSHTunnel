@@ -86,7 +86,7 @@ func TestAuthStoreDisable(t *testing.T) {
 	if err := s.Set("admin", "pass123"); err != nil {
 		t.Fatalf("开启失败: %v", err)
 	}
-	if err := s.Disable(); err != nil {
+	if err := s.disable(nil); err != nil {
 		t.Fatalf("关闭失败: %v", err)
 	}
 	if s.Enabled() {
@@ -151,7 +151,7 @@ func TestAuthStoreSecretPersistence(t *testing.T) {
 	}
 }
 
-// TestAuthStoreCorruptSettings 验证 settings.json 损坏时：输出 warning、按未启用处理且不 panic；
+// TestAuthStoreCorruptSettings 验证 settings.json 损坏时拒绝启动并允许本地修复。
 // 重新保存后文件被原子写恢复（无残留临时文件、权限 0600）
 func TestAuthStoreCorruptSettings(t *testing.T) {
 	dir := t.TempDir()
@@ -168,8 +168,8 @@ func TestAuthStoreCorruptSettings(t *testing.T) {
 	defer log.SetOutput(prev)
 
 	s := NewAuthStore(path)
-	if s.Enabled() {
-		t.Errorf("损坏的配置应按未启用处理")
+	if err := s.InitSecret(); err == nil {
+		t.Fatal("损坏的配置必须拒绝开启 WEB 服务")
 	}
 	log.SetOutput(prev) // 先恢复，避免后续持久化日志混入
 	if !strings.Contains(buf.String(), "加载 WEB 访问密码设置失败") {

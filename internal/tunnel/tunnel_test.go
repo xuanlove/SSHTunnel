@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -72,7 +73,7 @@ type mockDialer struct {
 	keepAliveFail time.Duration
 }
 
-func (d *mockDialer) Dial(hops []sshclient.Hop) (tunnelClient, error) {
+func (d *mockDialer) Dial(_ context.Context, hops []sshclient.Hop) (tunnelClient, error) {
 	d.mu.Lock()
 	d.calls++
 	idx := d.calls - 1

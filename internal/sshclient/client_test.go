@@ -1,12 +1,15 @@
 package sshclient
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -192,14 +195,18 @@ func TestHostKeyCallback(t *testing.T) {
 
 	// 匹配：指纹一致放行（authorized_keys 行形式同样应通过）
 	for _, hostKey := range []string{fp, pub.Type() + " " + base64.RawStdEncoding.EncodeToString(pub.Marshal()) + " c"} {
-		cb := hostKeyCallback(Hop{HostKey: hostKey})
+		expected, err := NormalizeHostKey(hostKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cb := hostKeyCallback(expected)
 		if err := cb("srv.example.com", addr, pub); err != nil {
 			t.Errorf("密钥匹配应放行, host_key=%q: %v", hostKey, err)
 		}
 	}
 
 	// 不匹配：另一把密钥必须拒绝，且错误信息包含期望/实际指纹
-	cb := hostKeyCallback(Hop{HostKey: fp})
+	cb := hostKeyCallback(fp)
 	err := cb("srv.example.com", addr, other)
 	if err == nil {
 		t.Fatal("密钥不匹配应拒绝连接")
@@ -208,13 +215,23 @@ func TestHostKeyCallback(t *testing.T) {
 		t.Errorf("错误信息应包含明确原因: %v", err)
 	}
 
-	// host_key 配置非法：拒绝连接
-	if err := hostKeyCallback(Hop{HostKey: "!!!"})(addr.String(), addr, pub); err == nil {
-		t.Error("host_key 配置非法应拒绝连接")
+	// 缺失或非法主机密钥在发起连接前即被拒绝。
+	for _, hostKey := range []string{"", "!!!"} {
+		if _, err := Dial([]Hop{{Host: "example.com", HostKey: hostKey}}); err == nil || !strings.Contains(err.Error(), "需要可信的主机密钥") {
+			t.Fatalf("无效 host_key 应拒绝连接: %v", err)
+		}
 	}
+}
 
-	// 未配置 host_key：保持旧行为放行
-	if err := hostKeyCallback(Hop{})(addr.String(), addr, pub); err != nil {
-		t.Errorf("未配置 host_key 应放行: %v", err)
+func TestConnectHopHonorsDeadline(t *testing.T) {
+	conn, peer := net.Pipe()
+	t.Cleanup(func() { _ = conn.Close(); _ = peer.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	_, err := connectHop(ctx, conn, nil, "localhost:22", &ssh.ClientConfig{
+		HostKeyCallback: hostKeyCallback(fingerprintKey(genEd25519(t))),
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("取消应中断握手，实际错误为 %v", err)
 	}
 }

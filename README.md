@@ -1,9 +1,9 @@
 # SSHTunnel
 
-> 一款跨平台的 SSH 隧道管理工具，基于 Wails v2 + Go 1.25 + Vue 3 构建。
+> 一款跨平台的 SSH 隧道管理工具，基于 Wails v2 + Go 1.27.4 + Vue 3 构建。
 > 支持多跳跳板链、多协议代理（HTTP/HTTPS/SOCKS4/SOCKS5）、本地端口转发、自动重连、实时日志推送，并提供**桌面端**与 **WEB 面板**双形态管理界面。
 
-[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/Go-1.27.4+-00ADD8?logo=go)](https://go.dev)
 [![Wails](https://img.shields.io/badge/Wails-v2.12-00E5FF)](https://wails.io)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vue.js)](https://vuejs.org)
 [![Release](https://img.shields.io/github/v/release/xuanlove/SSHTunnel?include_prereleases)](https://github.com/xuanlove/SSHTunnel/releases)
@@ -59,7 +59,7 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **多跳跳板链**：支持任意层级的 SSH 跳板，逐跳串联建立 SSH 连接
 - **本地端口转发**：经典的 SSH `-L` 本地转发，支持多个转发规则
 - **多协议代理**：单条隧道可同时监听 HTTP / HTTPS / SOCKS4 / SOCKS5 多端口
-- **认证方式**：密码认证 / 密钥认证（密钥以 PEM 文本形式存储，便于跨设备同步）；可选按跳配置主机密钥指纹（`SHA256:...`，防中间人）；服务器仅保留键盘交互认证时自动回退
+- **认证方式**：密码认证 / 密钥认证（密钥以 PEM 文本形式存储，便于跨设备同步）；每跳须配置可信的主机密钥指纹（`SHA256:...`，防中间人）；服务器仅保留键盘交互认证时自动回退
 - **自动重连**：SSH 断开后指数退避重连（初始 2s，上限 60s，可配置最大次数与最大退避间隔）
 - **SSH 心跳**：可配置 KeepAlive 间隔（默认关闭，建议 60 秒），及时发现僵死连接并触发重连
 - **开机启动**：每条隧道可独立勾选「开机启动」，程序/服务启动时自动拉起（配合 systemd 服务即开机自启）
@@ -206,7 +206,7 @@ sudo ./install.sh status | restart | logs
 
 **依赖：**
 
-- Go 1.25+
+- Go 1.27.4+
 - Node.js 18+ 与 npm（构建前端）
 - 桌面模式额外依赖：
   - Windows：无
@@ -256,11 +256,9 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 
 ```bash
 ./sshtunnel --mode=web --web-port=8090
-# 监听所有网卡
-./sshtunnel --mode=web --web-host=0.0.0.0 --web-port=8090
 ```
 
-浏览器访问 `http://127.0.0.1:8090` 进入管理面板。
+浏览器访问 `http://127.0.0.1:8090` 进入管理面板。非回环地址需要有效的访问密码。
 
 ### WEB 模式（密码保护）
 
@@ -274,13 +272,13 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 
 2. **系统设置页（推荐）**：打开 WEB 面板 → 左侧「系统设置」→「WEB 访问密码」卡片，打开「启用访问密码」开关，填写用户名与密码（至少 6 位）后保存。设置持久化到 `<配置目录>/sshtunnel/settings.json`，重启后仍然生效；无需重启即可下发登录要求。
 
-首次访问将跳转至登录页，输入凭据后获取 JWT Token（24 小时有效）。
+首次访问将跳转至登录页，输入凭据后获取 JWT Token（24 小时有效）。更换凭据会撤销旧会话并关闭其 WebSocket 连接。
 
 ### 启用 HTTPS（WEB 面板）
 
 两种方式：
 
-1. **系统设置页（推荐）**：「系统设置 → WEB 面板 HTTPS（SSL）」，打开「启用 HTTPS」，直接粘贴证书与私钥 PEM 内容后「保存并应用」。保存后监听会在同一端口热重启，**改用 `https://` 重新访问即可**，无需重启进程；设置持久化到 `<配置目录>/sshtunnel/web_tls.json`，证书写入 `certs/web.crt|web.key`。
+1. **系统设置页（推荐）**：「系统设置 → WEB 面板 HTTPS（SSL）」，打开「启用 HTTPS」，直接粘贴证书与私钥 PEM 内容后「保存并应用」。保存后监听会在同一端口热重启，**改用 `https://` 重新访问即可**，无需重启进程；设置持久化到 `<配置目录>/sshtunnel/web_tls.json`，证书写入 `certs/pair-*/web.crt|web.key`。
 2. 启动参数（会写入同样的持久化配置）：
 
 ```bash
@@ -290,7 +288,7 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
   --auth=admin:password
 ```
 
-> 证书无法加载时会自动退回 HTTP 并记录告警，保证面板始终可访问以修正配置。
+> 启用了 HTTPS 的面板在证书无法加载时拒绝启动。热更新失败时保留当前监听。
 
 ### 混合模式
 
@@ -307,7 +305,7 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 | `--mode` | `desktop` | 运行模式：`desktop` / `web` / `both` |
 | `--web-host` | `127.0.0.1` | WEB 监听地址 |
 | `--web-port` | `8080` | WEB 监听端口 |
-| `--auth` | 空 | 启用密码访问，格式 `user:password`，留空则无密码 |
+| `--auth` | 空 | 启用密码访问，格式 `user:password`，非回环监听地址必须启用认证 |
 | `--tls-cert` | 空 | TLS 证书路径（启用 HTTPS 并持久化到面板设置） |
 | `--tls-key` | 空 | TLS 私钥路径（启用 HTTPS 并持久化到面板设置） |
 | `--version` | - | 打印版本信息并退出 |
@@ -483,7 +481,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 
 - 下载地址（多镜像）：直连 GitHub Releases 与多个加速镜像，下载前会**并发测速（采样 1MB），自动选择最快的可用镜像**，失败时按速度顺序依次回退
   - 直连：`https://github.com/NetworkCats/Merged-IP-Data/releases/latest/download/Merged-IP.mmdb`
-  - 也可用 `POST /api/geoip/download` 的 `url` 字段指定单一地址（此时不做测速）
+  - 也可用 `POST /api/geoip/download` 的 `url` 字段指定单一公网 HTTPS 地址（此时不做测速，单次下载上限为 256 MiB）
 - 旧版本缓存 `GeoLite2-City.mmdb` 会在启动时自动重命名为 `Merged-IP.mmdb`，无需重新下载
 - 城市规则在配置页通过**三级下拉**选取（国家 → 省/州 → 城市），选「全部（*）」表示通配；下拉数据由城市库自动生成（服务端首次扫描约需数十秒，之后使用本地缓存秒开）
 - 规则存储格式为 `国家/省/城市`（如 `CN/GD/Shenzhen`）；省可用 ISO 3166-2 代码（`GD`）或英文名（`Guangdong`），城市使用英文名（`Shenzhen`），匹配不区分大小写
@@ -587,7 +585,7 @@ curl -k -X POST https://127.0.0.1:8080/api/cert/deploy \
   -d "{\"target\":\"web\",\"cert_pem\":\"$(cat fullchain.pem | sed ':a;N;$!ba;s/\n/\\n/g')\",\"key_pem\":\"$(cat privkey.pem | sed ':a;N;$!ba;s/\n/\\n/g')\"}"
 ```
 
-> 面板证书内容写入 `<配置目录>/sshtunnel/certs/web.crt|web.key`（私钥 0600）；隧道 HTTPS 监听器的证书**直接以 PEM 文本保存在 `configs.json` 的 `tls.cert_pem / tls.key_pem` 中**，部署后可在配置页直接查看与编辑（旧版 `cert_file / key_file` 配置会在启动时自动读取文件并迁移为文本）。
+> 面板证书内容写入 `<配置目录>/sshtunnel/certs/pair-*/web.crt|web.key`（私钥 0600）；隧道 HTTPS 监听器的证书**直接以 PEM 文本保存在 `configs.json` 的 `tls.cert_pem / tls.key_pem` 中**，部署后可在配置页直接查看与编辑（启动时可迁移配置目录 `certs` 内有效的旧版证书对。其他旧配置需重新填写 PEM）。
 
 ### WebSocket 端点
 
@@ -1004,7 +1002,7 @@ npm run preview    # 预览构建产物
 
 ## 安全建议
 
-1. **WEB 面板监听公网时务必启用 `--auth`**：无密码模式监听 `0.0.0.0` 会让任何能访问本机端口的人控制隧道，启动时会在日志中输出安全警告
+1. **WEB 面板监听非回环地址时必须启用访问密码**。远程部署使用 HTTPS 或经 HTTPS 反向代理访问
 2. **生产环境推荐启用 HTTPS**：在「系统设置」中开启面板 HTTPS 或使用 `--tls-cert` / `--tls-key`，防止 Token 被中间人窃取
 3. **SSH 密钥以 PEM 文本存储于配置文件**：请妥善保护 `configs.json`，避免提交到版本控制系统
 4. **JWT 密钥持久化于 `settings.json`**：服务重启/升级后已签发的 Token 仍然有效；如需强制所有会话重新登录，删除该文件中的 `jwt_secret` 字段并重启服务
@@ -1022,7 +1020,7 @@ npm run preview    # 预览构建产物
 - **修复僵尸隧道**：未启用自动重连的隧道断线后，本地转发与代理监听器现在会正确关闭并释放端口，重启隧道不再因端口占用失败
 - **修复纯 HTTP 代理**：绝对形式请求目标省略默认端口（如 `GET http://example.com/`）时自动补 80，不再一律 502
 - **修复任意文件读取**：WEB 面板 TLS 设置接口对显式指定的证书/私钥路径做 PEM 有效性校验（无论是否启用 HTTPS），非 PEM 文件不再可被持久化并经回读泄露
-- **主机密钥校验（新增）**：每跳可选配置 `host_key`（支持 `SHA256:` 指纹、base64 公钥或 authorized_keys 行），严格比对防中间人；未配置时保持原有行为并输出一次提示
+- **主机密钥校验**。每跳连接都需要可信的 `host_key`，支持 `SHA256:` 指纹、Base64 公钥或 OpenSSH 公钥行
 - **键盘交互认证（新增）**：密码认证自动追加 keyboard-interactive 回退（以相同密码应答挑战），兼容「禁用密码认证但保留键盘交互」的服务器；认证被拒的错误信息附带排查提示
 - **后端加固**：消除 SSH 连接 context 竞态；HTTP 代理请求头 64KB 有界预读防内存放大；`/api/login` 请求体限制；面板认证设置原子写入（断电不再静默关闭访问密码）；GeoIP 下载 SSRF 防护（拒绝回环/私网地址，错误详情不回显）；SOCKS 认证常量时间比较、日志注入防护与 RFC 1929 子协商校验；拒绝日志与登录限流记录有界化；访问历史倒序读取内存有界且写入失败可观测；WEB 启动失败进程快速退出；日志不再按条派生 goroutine
 - **前端**：TLS 私钥默认不回显（`has_key`/`key_masked`，显式「查看」才拉取明文）；CSV 导出公式注入防护；开启访问密码强制非空且 ≥6 位；三处定时器卸载清理；401 重登后自动刷新列表；复制命令统一 Clipboard/execCommand 降级；端口输入防 NaN
@@ -1290,7 +1288,7 @@ npm run preview    # 预览构建产物
 
 | 层级 | 技术 | 版本 |
 |------|------|------|
-| 后端语言 | Go | 1.25+ |
+| 后端语言 | Go | 1.27.4+ |
 | SSH 协议 | `golang.org/x/crypto/ssh` | v0.53.0 |
 | 桌面框架 | Wails | v2.12.0 |
 | 前端框架 | Vue 3 | 3.5 |

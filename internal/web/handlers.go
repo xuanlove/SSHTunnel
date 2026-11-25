@@ -5,14 +5,14 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sshtunnel/internal/alert"
@@ -29,22 +29,23 @@ import (
 
 // Handler API 处理器，持有共享业务层引用
 type Handler struct {
-	cfgMgr     *config.Manager
-	tunnelMgr  *tunnel.Manager
-	log        *logger.Logger
-	jwtSecret  []byte
-	auth       *AuthStore // 运行时鉴权状态（可在系统设置中动态开启/关闭）
-	tls        *TLSStore  // WEB 面板 HTTPS 设置（可在系统设置中动态开启/关闭）
-	reloadTLS  func()     // 由 WEB Server 注入，用于热重启监听
-	hub        *Hub
-	login      *loginLimiter
-	version    string // 当前版本号（构建时注入）
-	commit     string // git commit
-	variant    string // 构建变体：web 或 desktop
-	repo       string // GitHub 仓库，用于版本检查
-	metrics    *metrics.Store
-	alerts     *alert.Engine
-	historyDir string // 访问历史分片目录（检索/导出）
+	cfgMgr       *config.Manager
+	tunnelMgr    *tunnel.Manager
+	log          *logger.Logger
+	authRequired bool
+	tlsUpdateMu  sync.Mutex
+	auth         *AuthStore // 运行时鉴权状态（可在系统设置中动态开启/关闭）
+	tls          *TLSStore  // WEB 面板 HTTPS 设置（可在系统设置中动态开启/关闭）
+	reloadTLS    func()     // 由 WEB Server 注入，用于热重启监听
+	hub          *Hub
+	login        *loginLimiter
+	version      string // 当前版本号（构建时注入）
+	commit       string // git commit
+	variant      string // 构建变体：web 或 desktop
+	repo         string // GitHub 仓库，用于版本检查
+	metrics      *metrics.Store
+	alerts       *alert.Engine
+	historyDir   string // 访问历史分片目录（检索/导出）
 }
 
 // NewHandler 创建 API 处理器。
@@ -55,14 +56,14 @@ func NewHandler(cfgMgr *config.Manager, tunnelMgr *tunnel.Manager, log *logger.L
 		cfgMgr:    cfgMgr,
 		tunnelMgr: tunnelMgr,
 		log:       log,
-		jwtSecret: jwtSecret,
 		auth:      NewAuthStore(""),
 		tls:       NewTLSStore(""),
 		hub:       hub,
 		login:     newLoginLimiter(),
 	}
+	h.auth.jwtSecret = string(jwtSecret)
 	if authUser != "" {
-		h.auth.initFromCLI(authUser, authPass)
+		h.auth.loadErr = h.auth.initFromCLI(authUser, authPass)
 	}
 	return h
 }
@@ -70,35 +71,42 @@ func NewHandler(cfgMgr *config.Manager, tunnelMgr *tunnel.Manager, log *logger.L
 // UsePersistentAuth 加载持久化的访问密码设置（settings.json）。
 // 若启动时提供了 --auth 参数，则以此覆盖（仅内存，不落盘）。
 // WEB 模式由 main.go 调用；桌面模式无 WEB 服务，不调用。
-func (h *Handler) UsePersistentAuth(cliUser, cliPass string) {
-	h.auth = NewAuthStore(DefaultAuthStorePath())
-	h.tls = NewTLSStore(DefaultWebTLSSettingsPath())
-	// 使用持久化的 JWT 密钥：服务重启/升级后已签发的 Token 仍然有效
-	h.jwtSecret = h.auth.Secret()
+func (h *Handler) UsePersistentAuth(cliUser, cliPass string) error {
+	authPath, tlsPath := DefaultAuthStorePath(), DefaultWebTLSSettingsPath()
+	if authPath == "" || tlsPath == "" {
+		return fmt.Errorf("无法确定 WEB 设置目录")
+	}
+	h.auth = NewAuthStore(authPath)
+	if err := h.auth.InitSecret(); err != nil {
+		return err
+	}
+	h.tls = NewTLSStore(tlsPath)
+	if h.tls.loadErr != nil {
+		return h.tls.loadErr
+	}
 	if cliUser != "" {
-		h.auth.initFromCLI(cliUser, cliPass)
-		h.log.Info("已通过 --auth 启动参数启用访问密码（覆盖 settings.json）")
+		if err := h.auth.initFromCLI(cliUser, cliPass); err != nil {
+			return fmt.Errorf("WEB 启动凭据无效: %w", err)
+		}
 	}
 	if h.auth.Enabled() {
 		h.log.Infof("WEB 访问密码保护已启用 (user=%s)", h.auth.Username())
 	}
-	if s := h.tls.Settings(); s.Enabled {
-		h.log.Infof("已启用 WEB 面板 HTTPS（证书 %s）", s.CertFile)
+	if h.tls.EnsureDeployToken() == "" {
+		return fmt.Errorf("无法保存证书部署令牌")
 	}
-	// 确保 certd 部署令牌已生成（首次启动时自动创建并持久化）
-	h.tls.EnsureDeployToken()
+	return nil
 }
 
-// UseCLITLS 使用启动参数 --tls-cert/--tls-key 启用 WEB 面板 HTTPS（持久化）。
-func (h *Handler) UseCLITLS(certFile, keyFile string) {
-	if certFile == "" || keyFile == "" {
-		return
+// UseCLITLS 验证并持久化启动参数指定的 TLS 证书。
+func (h *Handler) UseCLITLS(certFile, keyFile string) error {
+	if certFile == "" && keyFile == "" {
+		return nil
 	}
-	if err := h.tls.EnableWithFiles(certFile, keyFile); err != nil {
-		h.log.Warnf("保存启动参数指定的 TLS 证书失败: %v", err)
-		return
+	if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+		return fmt.Errorf("WEB 启动参数中的 TLS 证书无效: %w", err)
 	}
-	h.log.Infof("已按启动参数启用 WEB 面板 HTTPS（证书 %s）", certFile)
+	return h.tls.EnableWithFiles(certFile, keyFile)
 }
 
 // AuthEnabled 当前是否启用访问密码（供中间件动态判断）。
@@ -131,11 +139,6 @@ func (h *Handler) WithAlert(engine *alert.Engine) *Handler {
 func (h *Handler) WithHistoryDir(dir string) *Handler {
 	h.historyDir = dir
 	return h
-}
-
-// JWTSecret 返回 JWT 密钥（供 main.go 传递给 Server）
-func (h *Handler) JWTSecret() []byte {
-	return h.jwtSecret
 }
 
 // SetTLSReloader 注入 TLS 热重启回调（由 WEB Server 调用）。
@@ -249,15 +252,17 @@ func (h *Handler) handleGeoIPDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL string `json:"url"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	// SSRF 加固：仅允许 https 且拒绝指向本机/内网的目标
-	if err := validateGeoIPURL(req.URL); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	if err := proxy.ValidateGeoIPDownloadURL(req.URL); err != nil {
 		writeError(w, 400, err.Error())
 		return
 	}
 
 	h.log.Info("开始下载 GeoIP 城市数据库（Merged-IP）...")
-	src, size, err := proxy.DownloadCityDatabase(req.URL)
+	src, size, err := proxy.DownloadCityDatabase(r.Context(), req.URL)
 	if err != nil {
 		// 详情仅记录到服务端日志；响应收敛为通用描述，不回显内部细节
 		h.log.Errorf("GeoIP 城市数据库下载失败: %v", err)
@@ -266,47 +271,6 @@ func (h *Handler) handleGeoIPDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Infof("GeoIP 城市数据库下载完成: %s (%.1f MB)", src, float64(size)/1024/1024)
 	writeJSON(w, 0, "success", proxy.CurrentGeoIPStatus())
-}
-
-// validateGeoIPURL 校验 GeoIP 数据库下载地址，防止被用作 SSRF 跳板：
-//   - 仅允许 https；
-//   - 目标为 IP 字面量时，拒绝回环/私网/链路本地/未指定地址；
-//   - 目标为主机名时，解析出的 IP 全部为内网/回环也拒绝（如 localhost → 127.0.0.1）。
-//
-// 错误信息为面向用户的通用描述，不回显内部细节。
-func validateGeoIPURL(raw string) error {
-	host := ""
-	if u, err := url.Parse(strings.TrimSpace(raw)); err == nil {
-		if u.Scheme == "https" {
-			host = u.Hostname()
-		}
-	}
-	if host == "" {
-		return fmt.Errorf("仅支持 https:// 的下载地址")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if isRestrictedGeoIPTarget(ip) {
-			return fmt.Errorf("下载地址不可指向内网或本机地址")
-		}
-		return nil
-	}
-	ips, err := net.LookupIP(host)
-	if err != nil || len(ips) == 0 {
-		// 解析失败不在此处定性（避免回显 DNS 细节），交由下载阶段统一报错
-		return nil
-	}
-	for _, ip := range ips {
-		if !isRestrictedGeoIPTarget(ip) {
-			return nil // 至少一个公网地址，放行
-		}
-	}
-	return fmt.Errorf("下载地址不可指向内网或本机地址")
-}
-
-// isRestrictedGeoIPTarget 判断 IP 是否为禁止下载的内网/本机目标
-func isRestrictedGeoIPTarget(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 // handleGeoIPCities 返回指定国家的省/城市下拉选项（首次调用会在后台构建索引）
@@ -385,7 +349,8 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
-	if !h.auth.Verify(req.Username, req.Password) {
+	secret := h.auth.verifySecret(req.Username, req.Password)
+	if len(secret) == 0 {
 		h.login.fail(src)
 		h.log.Infof("登录失败: 用户名或密码错误 (user=%s)", req.Username)
 		writeError(w, 40001, "用户名或密码错误")
@@ -393,7 +358,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	h.login.reset(src)
 	h.log.Infof("用户登录成功: %s", req.Username)
-	token, expiresAt, err := generateJWT(req.Username, h.jwtSecret)
+	token, expiresAt, err := generateJWT(req.Username, secret)
 	if err != nil {
 		writeError(w, 500, "生成 Token 失败")
 		return
@@ -423,11 +388,21 @@ func (h *Handler) handleAuthSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "请求格式错误")
 			return
 		}
+		session, _ := r.Context().Value(authSessionKey{}).(authSession)
 		var err error
+		var username string
+		var secret []byte
 		if req.Enabled {
-			err = h.auth.Set(req.Username, req.Password)
+			username, secret, err = h.auth.setCredentials(session.ctx, req.Username, req.Password)
+		} else if h.authRequired {
+			writeError(w, http.StatusForbidden, "非回环地址监听时必须保留 WEB 访问密码")
+			return
 		} else {
-			err = h.auth.Disable()
+			err = h.auth.disable(session.ctx)
+		}
+		if errors.Is(err, errSessionRevoked) {
+			writeError(w, 401, err.Error())
+			return
 		}
 		if err != nil {
 			writeError(w, 400, err.Error())
@@ -439,7 +414,7 @@ func (h *Handler) handleAuthSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Enabled {
 			h.log.Infof("WEB 访问密码已开启 (user=%s)", req.Username)
-			if token, exp, err := generateJWT(req.Username, h.jwtSecret); err == nil {
+			if token, exp, err := generateJWT(username, secret); err == nil {
 				resp["token"] = token
 				resp["expires_at"] = exp
 			}
@@ -453,7 +428,7 @@ func (h *Handler) handleAuthSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWebTLS WEB 面板 HTTPS 设置：GET 查询，PUT 保存并热切换监听。
-// 支持直接填写证书/私钥 PEM 内容（写入配置目录 certs/web.crt|web.key），
+// 支持直接填写证书/私钥 PEM 内容（写入配置目录 certs 下的新证书对目录），
 // 也支持指定已有文件路径。保存后会重启监听，需改用 https:// 重新访问。
 func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -497,13 +472,31 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "请求格式错误")
 			return
 		}
+		h.tlsUpdateMu.Lock()
+		defer h.tlsUpdateMu.Unlock()
 		old := h.tls.Settings()
-		next, err := h.resolveTLSSettings(req.Enabled, req.CertPEM, req.KeyPEM, req.CertFile, req.KeyFile, old)
-		if err != nil {
-			writeError(w, 400, err.Error())
-			return
+		hasPEM := strings.TrimSpace(req.CertPEM) != "" || strings.TrimSpace(req.KeyPEM) != ""
+		var next WebTLSSettings
+		var err error
+		if hasPEM {
+			if strings.TrimSpace(req.CertPEM) == "" || strings.TrimSpace(req.KeyPEM) == "" {
+				writeError(w, 400, "证书与私钥内容必须同时填写")
+				return
+			}
+			if _, err := tls.X509KeyPair([]byte(req.CertPEM), []byte(req.KeyPEM)); err != nil {
+				writeError(w, 400, "证书或私钥内容无效")
+				return
+			}
+			next, err = h.tls.SavePEM(req.Enabled, req.CertPEM, req.KeyPEM)
+		} else {
+			next, err = resolveTLSSettings(req.Enabled, req.CertFile, req.KeyFile, old)
+			if err != nil {
+				writeError(w, 400, err.Error())
+				return
+			}
+			err = h.tls.Save(next)
 		}
-		if err := h.tls.Save(next); err != nil {
+		if err != nil {
 			writeError(w, 500, "保存设置失败: "+err.Error())
 			return
 		}
@@ -547,43 +540,22 @@ func maskKeyPEM(data string) string {
 	return fmt.Sprintf("-----BEGIN %s-----（已隐藏）", block.Type)
 }
 
-// resolveTLSSettings 根据请求解析最终设置：优先使用 PEM 内容，其次文件路径，最后沿用旧值。
-func (h *Handler) resolveTLSSettings(enabled bool, certPEM, keyPEM, certFile, keyFile string, old WebTLSSettings) (WebTLSSettings, error) {
+// resolveTLSSettings 校验从本地文件加载的证书设置。
+func resolveTLSSettings(enabled bool, certFile, keyFile string, old WebTLSSettings) (WebTLSSettings, error) {
 	next := WebTLSSettings{Enabled: enabled, CertFile: old.CertFile, KeyFile: old.KeyFile}
-
-	if strings.TrimSpace(certPEM) != "" || strings.TrimSpace(keyPEM) != "" {
-		if strings.TrimSpace(certPEM) == "" || strings.TrimSpace(keyPEM) == "" {
-			return next, fmt.Errorf("证书与私钥内容必须同时填写")
+	if f := strings.TrimSpace(certFile); f != "" {
+		data, err := os.ReadFile(f)
+		if err != nil || !validCertPEM(data) {
+			return next, fmt.Errorf("证书文件不存在或不是有效的 PEM 证书: %s", f)
 		}
-		if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
-			return next, fmt.Errorf("证书或私钥内容无效: %w", err)
+		next.CertFile = f
+	}
+	if f := strings.TrimSpace(keyFile); f != "" {
+		data, err := os.ReadFile(f)
+		if err != nil || !validKeyPEM(data) {
+			return next, fmt.Errorf("私钥文件不存在或不是有效的 PEM 私钥: %s", f)
 		}
-		if err := WritePEMFile(WebCertPath(), []byte(certPEM), 0644); err != nil {
-			return next, fmt.Errorf("保存证书失败: %w", err)
-		}
-		if err := WritePEMFile(WebKeyPath(), []byte(keyPEM), 0600); err != nil {
-			return next, fmt.Errorf("保存私钥失败: %w", err)
-		}
-		next.CertFile = WebCertPath()
-		next.KeyFile = WebKeyPath()
-	} else {
-		if f := strings.TrimSpace(certFile); f != "" {
-			// 显式指定的证书文件必须是有效 PEM 证书（无论是否启用 HTTPS）：
-			// 路径会被持久化，并在 GET /api/web/tls 时回读文件内容返回前端，
-			// 若不校验，任意路径可经此接口读取任意系统文件
-			data, err := os.ReadFile(f)
-			if err != nil || !validCertPEM(data) {
-				return next, fmt.Errorf("证书文件不存在或不是有效的 PEM 证书: %s", f)
-			}
-			next.CertFile = f
-		}
-		if f := strings.TrimSpace(keyFile); f != "" {
-			data, err := os.ReadFile(f)
-			if err != nil || !validKeyPEM(data) {
-				return next, fmt.Errorf("私钥文件不存在或不是有效的 PEM 私钥: %s", f)
-			}
-			next.KeyFile = f
-		}
+		next.KeyFile = f
 	}
 
 	if enabled {
@@ -665,6 +637,10 @@ func (h *Handler) handleConfigs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.cfgMgr.Save(&cfg); err != nil {
+			if errors.Is(err, config.ErrLegacyTLSPaths) {
+				writeError(w, 400, err.Error())
+				return
+			}
 			writeError(w, 500, err.Error())
 			return
 		}
@@ -699,6 +675,10 @@ func (h *Handler) handleConfigByID(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.ID = id
 		if err := h.cfgMgr.Save(&cfg); err != nil {
+			if errors.Is(err, config.ErrLegacyTLSPaths) {
+				writeError(w, 400, err.Error())
+				return
+			}
 			writeError(w, 500, err.Error())
 			return
 		}
@@ -1192,7 +1172,7 @@ func (h *Handler) handleTunnelTest(w http.ResponseWriter, r *http.Request) {
 			Passphrase: hop.Passphrase,
 		}
 	}
-	client, err := sshclient.Dial(hops)
+	client, err := sshclient.DialContext(r.Context(), hops)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return

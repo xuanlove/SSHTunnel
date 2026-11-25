@@ -2,11 +2,17 @@ package web
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+
+	"sshtunnel/internal/persist"
 )
 
 // WebTLSSettings WEB 面板 HTTPS 与 certd 部署配置（持久化到 web_tls.json）
@@ -36,36 +42,30 @@ func WebCertDir() string {
 	return filepath.Join(dir, "sshtunnel", "certs")
 }
 
-// WebCertPath WEB 面板证书文件路径（用户填写证书内容时写入此处）。
-func WebCertPath() string {
-	dir := WebCertDir()
-	if dir == "" {
-		return ""
-	}
-	return filepath.Join(dir, "web.crt")
-}
-
-// WebKeyPath WEB 面板私钥文件路径。
-func WebKeyPath() string {
-	dir := WebCertDir()
-	if dir == "" {
-		return ""
-	}
-	return filepath.Join(dir, "web.key")
-}
-
-// LoadWebTLSSettings 读取配置；文件不存在或解析失败时返回默认（未启用）。
-func LoadWebTLSSettings(path string) WebTLSSettings {
+func loadWebTLSSettings(path string) (WebTLSSettings, error) {
 	var s WebTLSSettings
 	if path == "" {
-		return s
+		return s, nil
 	}
 	raw, err := os.ReadFile(path)
-	if err != nil {
-		return s
+	if errors.Is(err, os.ErrNotExist) {
+		return s, nil
 	}
-	_ = json.Unmarshal(raw, &s)
-	return s
+	if err != nil {
+		return s, err
+	}
+	stored := struct {
+		*WebTLSSettings
+		Enabled *bool `json:"enabled"`
+	}{WebTLSSettings: &s}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return s, err
+	}
+	if stored.Enabled == nil {
+		return s, errors.New("缺少 WEB HTTPS 开关")
+	}
+	s.Enabled = *stored.Enabled
+	return s, nil
 }
 
 // SaveWebTLSSettings 持久化配置。
@@ -80,35 +80,7 @@ func SaveWebTLSSettings(path string, s WebTLSSettings) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0600)
-}
-
-// WritePEMFile 原子写入 PEM 文件（先写临时文件再 rename）。
-func WritePEMFile(path string, data []byte, mode os.FileMode) error {
-	if path == "" {
-		return os.ErrInvalid
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".pem-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return persist.WriteFileAtomic(path, raw)
 }
 
 // TLSStore 运行时 WEB HTTPS 设置，支持在系统设置中动态开启/关闭。
@@ -116,12 +88,17 @@ type TLSStore struct {
 	mu       sync.RWMutex
 	path     string // 持久化路径；空字符串表示仅内存
 	settings WebTLSSettings
+	loadErr  error
 	active   bool // 当前监听是否已启用 TLS
 }
 
 // NewTLSStore 创建 HTTPS 设置存储。path 非空时加载已保存配置。
 func NewTLSStore(path string) *TLSStore {
-	return &TLSStore{path: path, settings: LoadWebTLSSettings(path)}
+	settings, err := loadWebTLSSettings(path)
+	if err != nil {
+		err = fmt.Errorf("加载 WEB HTTPS 设置失败: %w", err)
+	}
+	return &TLSStore{path: path, settings: settings, loadErr: err}
 }
 
 // Settings 返回当前配置快照。
@@ -141,6 +118,22 @@ func (t *TLSStore) Effective() (cert, key string, ok bool) {
 	return t.settings.CertFile, t.settings.KeyFile, true
 }
 
+func (t *TLSStore) listenerConfig() (*tls.Config, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.loadErr != nil {
+		return nil, t.loadErr
+	}
+	if !t.settings.Enabled {
+		return nil, nil
+	}
+	cert, err := tls.LoadX509KeyPair(t.settings.CertFile, t.settings.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("WEB 面板 HTTPS 证书加载失败: %w", err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
+}
+
 // Active 当前监听是否已启用 TLS。
 func (t *TLSStore) Active() bool {
 	t.mu.RLock()
@@ -158,13 +151,73 @@ func (t *TLSStore) SetActive(active bool) {
 // Save 更新并持久化配置（保留已生成的部署 Token）。
 func (t *TLSStore) Save(s WebTLSSettings) error {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	if s.Enabled {
+		if _, err := tls.LoadX509KeyPair(s.CertFile, s.KeyFile); err != nil {
+			return err
+		}
+	}
+	return t.saveLocked(s)
+}
+
+func (t *TLSStore) saveLocked(s WebTLSSettings) error {
 	if s.DeployToken == "" {
 		s.DeployToken = t.settings.DeployToken
 	}
+	if err := SaveWebTLSSettings(t.path, s); err != nil {
+		return err
+	}
+	old := t.settings
 	t.settings = s
-	path := t.path
-	t.mu.Unlock()
-	return SaveWebTLSSettings(path, s)
+	t.loadErr = nil
+	if old.CertFile != s.CertFile && old.KeyFile != s.KeyFile {
+		removeManagedPair(old)
+	}
+	return nil
+}
+
+// SavePEM 先完整写入新证书对，再原子切换设置文件。
+func (t *TLSStore) SavePEM(enabled bool, certPEM, keyPEM string) (WebTLSSettings, error) {
+	if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
+		return WebTLSSettings{}, fmt.Errorf("证书或私钥内容无效: %w", err)
+	}
+	base := WebCertDir()
+	if base == "" {
+		return WebTLSSettings{}, os.ErrInvalid
+	}
+	if err := os.MkdirAll(base, 0700); err != nil {
+		return WebTLSSettings{}, err
+	}
+	dir, err := os.MkdirTemp(base, "pair-")
+	if err != nil {
+		return WebTLSSettings{}, err
+	}
+	s := WebTLSSettings{Enabled: enabled, CertFile: filepath.Join(dir, "web.crt"), KeyFile: filepath.Join(dir, "web.key")}
+	defer func() {
+		if err != nil {
+			removeManagedPair(s)
+		}
+	}()
+	if err = persist.WriteFileAtomic(s.CertFile, []byte(certPEM)); err != nil {
+		return WebTLSSettings{}, err
+	}
+	if err = persist.WriteFileAtomic(s.KeyFile, []byte(keyPEM)); err != nil {
+		return WebTLSSettings{}, err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	err = t.saveLocked(s)
+	return s, err
+}
+
+func removeManagedPair(s WebTLSSettings) {
+	dir := filepath.Dir(s.CertFile)
+	if filepath.Dir(dir) == WebCertDir() && strings.HasPrefix(filepath.Base(dir), "pair-") &&
+		s.CertFile == filepath.Join(dir, "web.crt") && s.KeyFile == filepath.Join(dir, "web.key") {
+		_ = os.Remove(s.CertFile)
+		_ = os.Remove(s.KeyFile)
+		_ = os.Remove(dir)
+	}
 }
 
 // DeployToken 返回 certd 部署令牌（可能为空）。
@@ -183,9 +236,10 @@ func (t *TLSStore) EnsureDeployToken() string {
 		if _, err := rand.Read(b); err != nil {
 			return ""
 		}
-		t.settings.DeployToken = hex.EncodeToString(b)
-		if t.path != "" {
-			_ = SaveWebTLSSettings(t.path, t.settings)
+		next := t.settings
+		next.DeployToken = hex.EncodeToString(b)
+		if err := t.saveLocked(next); err != nil {
+			return ""
 		}
 	}
 	return t.settings.DeployToken
@@ -199,14 +253,11 @@ func (t *TLSStore) RegenerateDeployToken() (string, error) {
 	}
 	token := hex.EncodeToString(b)
 	t.mu.Lock()
-	t.settings.DeployToken = token
-	path := t.path
-	s := t.settings
-	t.mu.Unlock()
-	if path != "" {
-		if err := SaveWebTLSSettings(path, s); err != nil {
-			return "", err
-		}
+	defer t.mu.Unlock()
+	next := t.settings
+	next.DeployToken = token
+	if err := t.saveLocked(next); err != nil {
+		return "", err
 	}
 	return token, nil
 }
@@ -214,9 +265,8 @@ func (t *TLSStore) RegenerateDeployToken() (string, error) {
 // EnableWithFiles 使用指定证书文件启用 HTTPS（--tls-cert/--tls-key 启动参数）。
 func (t *TLSStore) EnableWithFiles(certFile, keyFile string) error {
 	return t.Save(WebTLSSettings{
-		Enabled:     true,
-		CertFile:    certFile,
-		KeyFile:     keyFile,
-		DeployToken: t.DeployToken(),
+		Enabled:  true,
+		CertFile: certFile,
+		KeyFile:  keyFile,
 	})
 }

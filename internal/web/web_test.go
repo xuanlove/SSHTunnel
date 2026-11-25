@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -184,7 +185,7 @@ func TestNoAuthMiddlewarePassThrough(t *testing.T) {
 		called = true
 		w.WriteHeader(200)
 	})
-	mw := authMiddleware(func() bool { return false }, []byte("secret"))
+	mw := authMiddleware(func() (bool, []byte, context.Context) { return false, nil, context.Background() })
 	mw(next).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 	if !called {
 		t.Error("无密码模式应该直接放行")
@@ -196,7 +197,7 @@ func TestAuthMiddlewareRejectNoToken(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("不应调用下一处理器")
 	})
-	mw := authMiddleware(func() bool { return true }, []byte("secret"))
+	mw := authMiddleware(func() (bool, []byte, context.Context) { return true, []byte("secret"), context.Background() })
 	w := httptest.NewRecorder()
 	mw(next).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	if w.Code != http.StatusUnauthorized {
@@ -215,7 +216,7 @@ func TestAuthMiddlewareValidToken(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	})
-	mw := authMiddleware(func() bool { return true }, secret)
+	mw := authMiddleware(func() (bool, []byte, context.Context) { return true, secret, context.Background() })
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	mw(next).ServeHTTP(httptest.NewRecorder(), req)
@@ -229,7 +230,7 @@ func TestAuthMiddlewareInvalidToken(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("不应调用下一处理器")
 	})
-	mw := authMiddleware(func() bool { return true }, []byte("secret"))
+	mw := authMiddleware(func() (bool, []byte, context.Context) { return true, []byte("secret"), context.Background() })
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("Authorization", "Bearer invalid-token")
 	w := httptest.NewRecorder()
@@ -327,7 +328,6 @@ func TestLoginRequestBodyLimited(t *testing.T) {
 func TestGeoIPDownloadRejectsInternalURLs(t *testing.T) {
 	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
 	cases := []string{
-		"",                               // 空 URL
 		"http://example.com/geoip.mmdb",  // 非 https
 		"ftp://example.com/geoip.mmdb",   // 非 http(s)
 		"https://127.0.0.1/geoip.mmdb",   // 回环 IPv4
@@ -451,5 +451,44 @@ func TestWebTLSKeyMaskingAndReveal(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&resp)
 	if !resp.Data.HasKey || resp.Data.CertPEM == "" {
 		t.Errorf("空内容 PUT 后已保存的证书对应保持不变（has_key=true 且证书仍可回读）")
+	}
+}
+
+func TestWebStartupRequiresAuthenticationForRemoteBind(t *testing.T) {
+	for _, host := range []string{"0.0.0.0", "::", "192.0.2.10"} {
+		h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+		s := NewServer(Config{Host: host, Port: -1}, h)
+		if err := s.Start(); err == nil || !strings.Contains(err.Error(), "必须启用 WEB 访问密码") {
+			t.Fatalf("地址 %s 应因缺少认证而拒绝启动，错误为 %v", host, err)
+		}
+	}
+}
+
+func TestWebStartupRejectsInvalidAuthAndTLS(t *testing.T) {
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "admin", strings.Repeat("a", 73), nil)
+	s := NewServer(Config{Host: "127.0.0.1", Port: -1}, h)
+	if err := s.Start(); err == nil || !strings.Contains(err.Error(), "72 bytes") {
+		t.Fatalf("无效的启动凭据应拒绝启动，错误为 %v", err)
+	}
+
+	h = NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+	tlsPath := filepath.Join(t.TempDir(), "web_tls.json")
+	if err := SaveWebTLSSettings(tlsPath, WebTLSSettings{Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	h.tls = NewTLSStore(tlsPath)
+	s = NewServer(Config{Host: "127.0.0.1", Port: -1}, h)
+	if err := s.Start(); err == nil || !strings.Contains(err.Error(), "HTTPS 证书加载失败") {
+		t.Fatalf("无效的证书应拒绝启动，错误为 %v", err)
+	}
+}
+
+func TestWebCannotDisableAuthOnRemoteBind(t *testing.T) {
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "admin", "pass123", nil)
+	NewServer(Config{Host: "0.0.0.0"}, h)
+	w := httptest.NewRecorder()
+	h.handleAuthSettings(w, httptest.NewRequest("PUT", "/auth/settings", strings.NewReader(`{"enabled":false}`)))
+	if w.Code != http.StatusForbidden || !h.AuthEnabled() {
+		t.Fatalf("远程监听应拒绝关闭认证，状态码为 %d", w.Code)
 	}
 }

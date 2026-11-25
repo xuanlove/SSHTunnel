@@ -13,7 +13,7 @@ import (
 
 // startTestSSHServer 启动一个最小 SSH 服务端：
 // 心跳请求（keepalive@openssh.com）到达时主动关闭连接，用于模拟心跳失败。
-func startTestSSHServer(t *testing.T) (port int, stop func()) {
+func startTestSSHServer(t *testing.T) (port int, hostKey string, stop func()) {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -63,12 +63,12 @@ func startTestSSHServer(t *testing.T) (port int, stop func()) {
 			}(nc)
 		}
 	}()
-	return ln.Addr().(*net.TCPAddr).Port, func() { _ = ln.Close() }
+	return ln.Addr().(*net.TCPAddr).Port, fingerprintKey(signer.PublicKey()), func() { _ = ln.Close() }
 }
 
 // TestKeepAliveFailureClosesClient 心跳失败应关闭连接，使 Wait 返回以触发上层重连。
 func TestKeepAliveFailureClosesClient(t *testing.T) {
-	port, stopServer := startTestSSHServer(t)
+	port, hostKey, stopServer := startTestSSHServer(t)
 	defer stopServer()
 
 	c, err := Dial([]Hop{{
@@ -77,6 +77,7 @@ func TestKeepAliveFailureClosesClient(t *testing.T) {
 		Port:     port,
 		AuthType: "password",
 		Password: "test",
+		HostKey:  hostKey,
 	}})
 	if err != nil {
 		t.Fatalf("连接测试服务器失败: %v", err)
@@ -98,7 +99,7 @@ func TestKeepAliveFailureClosesClient(t *testing.T) {
 
 // TestKeepAliveDisabled 间隔为 0 时不启动心跳，连接应保持可用。
 func TestKeepAliveDisabled(t *testing.T) {
-	port, stopServer := startTestSSHServer(t)
+	port, hostKey, stopServer := startTestSSHServer(t)
 	defer stopServer()
 
 	c, err := Dial([]Hop{{
@@ -107,6 +108,7 @@ func TestKeepAliveDisabled(t *testing.T) {
 		Port:     port,
 		AuthType: "password",
 		Password: "test",
+		HostKey:  hostKey,
 	}})
 	if err != nil {
 		t.Fatalf("连接测试服务器失败: %v", err)

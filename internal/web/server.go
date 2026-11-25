@@ -6,7 +6,6 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"log"
 	"net"
@@ -23,9 +22,8 @@ var assetsFS embed.FS
 
 // Config WEB 服务配置
 type Config struct {
-	Host      string // 监听地址
-	Port      int    // 监听端口
-	JWTSecret []byte // JWT 签名密钥
+	Host string // 监听地址
+	Port int    // 监听端口
 }
 
 // Server WEB API 服务器
@@ -35,11 +33,17 @@ type Server struct {
 
 	mu       sync.Mutex
 	srv      *http.Server
+	closing  bool
 	reloadCh chan struct{}
 }
 
 // NewServer 创建 WEB 服务器
 func NewServer(cfg Config, handler *Handler) *Server {
+	cfg.Host = strings.TrimSuffix(strings.TrimPrefix(cfg.Host, "["), "]")
+	if strings.EqualFold(cfg.Host, "localhost") {
+		cfg.Host = "127.0.0.1"
+	}
+	handler.authRequired = !net.ParseIP(cfg.Host).IsLoopback()
 	s := &Server{
 		cfg:      cfg,
 		handler:  handler,
@@ -58,92 +62,90 @@ func NewServer(cfg Config, handler *Handler) *Server {
 // Start 启动 WEB 服务器（阻塞）。
 // TLS 设置变化时会在同一端口重启监听，无需重启进程。
 func (s *Server) Start() error {
-	mux := s.buildRoutes()
-	addr := s.cfg.Host + ":" + strconv.Itoa(s.cfg.Port)
-
-	// 安全警告
-	if !s.handler.AuthEnabled() && (s.cfg.Host == "0.0.0.0" || s.cfg.Host == "::") {
-		log.Printf("⚠️  警告：WEB 面板以无密码模式监听所有网卡 %s，任何能访问本机端口 %d 的设备均可控制隧道；可在「系统设置」中开启访问密码，或确认网络环境可信", s.cfg.Host, s.cfg.Port)
+	if err := s.handler.auth.InitSecret(); err != nil {
+		return err
 	}
+	if s.handler.authRequired && !s.handler.AuthEnabled() {
+		return errors.New("非回环地址监听时必须启用 WEB 访问密码")
+	}
+	tlsConfig, err := s.handler.tls.listenerConfig()
+	if err != nil {
+		return err
+	}
+	mux := s.buildRoutes()
+	addr := net.JoinHostPort(s.cfg.Host, strconv.Itoa(s.cfg.Port))
 
 	for {
-		ln, tlsOn, err := s.listen(addr)
+		ln, err := net.Listen("tcp", addr)
 		if err != nil {
 			return err
 		}
+		tlsOn := tlsConfig != nil
+		if tlsOn {
+			ln = tls.NewListener(ln, tlsConfig)
+		}
 		s.handler.tls.SetActive(tlsOn)
 		if tlsOn {
-			log.Printf("WEB 面板启动: https://%s", addr)
+			log.Printf("WEB 面板启动: https://%s", ln.Addr())
 		} else {
-			log.Printf("WEB 面板启动: http://%s", addr)
+			log.Printf("WEB 面板启动: http://%s", ln.Addr())
 		}
 
 		srv := &http.Server{
-			Addr:              addr,
+			Addr:              ln.Addr().String(),
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
 			// WebSocket 需要长连接，不设 ReadTimeout
 		}
 		s.mu.Lock()
+		if s.closing {
+			s.mu.Unlock()
+			_ = ln.Close()
+			s.handler.tls.SetActive(false)
+			return nil
+		}
 		s.srv = srv
 		s.mu.Unlock()
 
 		errCh := make(chan error, 1)
 		go func() { errCh <- srv.Serve(ln) }()
 
-		select {
-		case err := <-errCh:
-			if errors.Is(err, http.ErrServerClosed) {
-				return nil
+	reload:
+		for {
+			select {
+			case err := <-errCh:
+				s.handler.tls.SetActive(false)
+				if errors.Is(err, http.ErrServerClosed) {
+					return nil
+				}
+				return err
+			case <-s.reloadCh:
+				next, err := s.handler.tls.listenerConfig()
+				if err != nil {
+					log.Printf("保留当前 WEB 监听，HTTPS 设置重新加载失败: %v", err)
+					continue
+				}
+				tlsConfig = next
+				_ = srv.Close()
+				<-errCh
+				if s.handler.hub != nil {
+					s.handler.hub.disconnectAll()
+				}
+				break reload
 			}
-			return err
-		case <-s.reloadCh:
-			// 强制关闭现有连接（含 WebSocket），以便在同一端口重新监听
-			_ = srv.Close()
-			<-errCh
-			s.handler.tls.SetActive(false)
-			log.Println("WEB 面板监听已重启（TLS 设置变更）")
 		}
 	}
-}
-
-// listen 按当前 TLS 设置创建监听器。
-// 证书加载失败时：已启用访问密码则退回 HTTP 保证面板可修正配置；无密码则拒绝明文启动。
-func (s *Server) listen(addr string) (net.Listener, bool, error) {
-	certFile, keyFile, tlsEnabled := s.handler.tls.Effective()
-	var cert tls.Certificate
-	if tlsEnabled {
-		c, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			if !s.handler.AuthEnabled() {
-				return nil, false, fmt.Errorf("WEB 面板 HTTPS 证书加载失败且未启用访问密码，拒绝以明文启动: %w", err)
-			}
-			log.Printf("⚠️  WEB 面板 HTTPS 证书加载失败，已退回 HTTP（已启用访问密码）: %v", err)
-			tlsEnabled = false
-		} else {
-			cert = c
-		}
-	}
-
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, false, err
-	}
-	if !tlsEnabled {
-		return ln, false, nil
-	}
-	log.Printf("已启用 HTTPS: 证书 %s", certFile)
-	return tls.NewListener(ln, &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}), true, nil
 }
 
 // Shutdown 优雅关闭
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
+	s.closing = true
 	srv := s.srv
 	s.mu.Unlock()
+	if s.handler.hub != nil {
+		s.handler.hub.disconnectAll()
+	}
 	if srv != nil {
 		return srv.Shutdown(ctx)
 	}
@@ -162,7 +164,7 @@ func (s *Server) buildRoutes() *http.ServeMux {
 
 	// 受保护 API（未启用密码时直接放行，启用后需 Token；支持运行时切换）
 	protected := limitRequestBody(http.StripPrefix("/api", s.handler.apiRouter()))
-	authed := authMiddleware(s.handler.AuthEnabled, s.cfg.JWTSecret)(protected)
+	authed := authMiddleware(s.handler.auth.sessionState)(protected)
 	mux.Handle("/api/", authed)
 
 	// 面板内部的证书工具接口（生成 / 解析）走登录鉴权，优先于下方 certd 的 /api/cert/ 前缀

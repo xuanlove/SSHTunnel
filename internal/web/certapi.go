@@ -204,27 +204,20 @@ func (h *Handler) handleCertDeploy(w http.ResponseWriter, r *http.Request) {
 
 // deployToWeb 写入 WEB 面板证书文件并按需启用、重启监听
 func (h *Handler) deployToWeb(certPEM, keyPEM string, enable, restart bool) (map[string]interface{}, error) {
-	certFile, keyFile := WebCertPath(), WebKeyPath()
-	if certFile == "" || keyFile == "" {
-		return nil, fmt.Errorf("无法确定证书存放目录")
+	h.tlsUpdateMu.Lock()
+	defer h.tlsUpdateMu.Unlock()
+	settings, err := h.tls.SavePEM(enable, certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("保存 WEB 面板证书失败: %w", err)
 	}
-	if err := WritePEMFile(certFile, []byte(certPEM), 0644); err != nil {
-		return nil, fmt.Errorf("保存证书失败: %w", err)
-	}
-	if err := WritePEMFile(keyFile, []byte(keyPEM), 0600); err != nil {
-		return nil, fmt.Errorf("保存私钥失败: %w", err)
-	}
-	if err := h.tls.Save(WebTLSSettings{Enabled: enable, CertFile: certFile, KeyFile: keyFile}); err != nil {
-		return nil, fmt.Errorf("保存设置失败: %w", err)
-	}
-	h.log.Infof("certd 已部署 WEB 面板证书: %s", certFile)
+	h.log.Infof("certd 已部署 WEB 面板证书: %s", settings.CertFile)
 	if restart {
 		h.scheduleTLSReload()
 	}
 	return map[string]interface{}{
 		"target":    CertTargetWeb,
-		"cert_file": certFile,
-		"key_file":  keyFile,
+		"cert_file": settings.CertFile,
+		"key_file":  settings.KeyFile,
 		"enabled":   enable,
 		"restarted": restart,
 	}, nil

@@ -1,10 +1,10 @@
 package sshclient
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -23,7 +23,7 @@ type Hop struct {
 	Password   string
 	KeyContent string // 密钥文本内容（PEM 格式）
 	Passphrase string
-	HostKey    string // 主机密钥指纹/公钥（SHA256:...、base64 公钥或 authorized_keys 行；空表示跳过校验）
+	HostKey    string // 主机密钥指纹/公钥（SHA256:...、base64 公钥或 authorized_keys 行）
 }
 
 // ParseHopChain 解析简写格式，支持 , 和 -> 两种分隔符
@@ -76,85 +76,87 @@ type Client struct {
 	intermediates []*ssh.Client // 中间跳（最终跳关闭后仍需一并关闭，避免连接泄漏）
 }
 
-// Dial 建立到最终目标的 SSH 连接（串联所有跳板）
+const hopTimeout = 15 * time.Second
+
+// Dial 建立到最终目标的 SSH 连接（串联所有跳板）。
 func Dial(hops []Hop) (*Client, error) {
+	return DialContext(context.Background(), hops)
+}
+
+// DialContext 为每跳的 TCP 拨号和 SSH 握手提供期限，并在取消时关闭底层连接。
+func DialContext(ctx context.Context, hops []Hop) (*Client, error) {
+	return dialChain(ctx, hops, hopTimeout)
+}
+
+func dialChain(ctx context.Context, hops []Hop, timeout time.Duration) (*Client, error) {
 	if len(hops) == 0 {
 		return nil, fmt.Errorf("跳板链为空")
 	}
 
-	// 第一跳直接连接
-	first := hops[0]
-	auth, err := buildAuth(first)
-	if err != nil {
-		return nil, fmt.Errorf("第一跳认证配置失败: %w", err)
-	}
-	cfg := &ssh.ClientConfig{
-		User:            first.User,
-		Auth:            auth,
-		HostKeyCallback: hostKeyCallback(first),
-		Timeout:         15 * time.Second,
-	}
-	addr := net.JoinHostPort(first.Host, strconv.Itoa(first.Port))
-	client, err := ssh.Dial("tcp", addr, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("第一跳连接失败 %s: %w%s", addr, err, authHint(err))
-	}
-
-	// 后续跳板通过前一跳 Dial 串联
+	var root net.Conn
+	var client *ssh.Client
 	var intermediates []*ssh.Client
-	for i := 1; i < len(hops); i++ {
-		hop := hops[i]
-		nextAuth, err := buildAuth(hop)
+	for i, hop := range hops {
+		addr := net.JoinHostPort(hop.Host, strconv.Itoa(hop.Port))
+		expected, err := NormalizeHostKey(hop.HostKey)
+		if err != nil {
+			closeClients(client, intermediates)
+			return nil, fmt.Errorf("第 %d 跳 %s 需要可信的主机密钥: %w", i+1, addr, err)
+		}
+		auth, err := buildAuth(hop)
 		if err != nil {
 			closeClients(client, intermediates)
 			return nil, fmt.Errorf("第 %d 跳认证配置失败: %w", i+1, err)
 		}
-		nextAddr := net.JoinHostPort(hop.Host, strconv.Itoa(hop.Port))
-		conn, err := dialWithTimeout(client, nextAddr, 15*time.Second)
+		hopCtx, cancel := context.WithTimeout(ctx, timeout)
+		if root == nil {
+			root, err = (&net.Dialer{}).DialContext(hopCtx, "tcp", addr)
+			if err != nil {
+				cancel()
+				return nil, fmt.Errorf("第 %d 跳连接失败 %s: %w", i+1, addr, err)
+			}
+		}
+		next, err := connectHop(hopCtx, root, client, addr, &ssh.ClientConfig{
+			User: hop.User, Auth: auth, HostKeyCallback: hostKeyCallback(expected),
+		})
+		cancel()
 		if err != nil {
+			_ = root.Close()
 			closeClients(client, intermediates)
-			return nil, fmt.Errorf("第 %d 跳连接失败 %s: %w", i+1, nextAddr, err)
+			return nil, fmt.Errorf("第 %d 跳连接失败 %s: %w%s", i+1, addr, err, authHint(err))
 		}
-		nextCfg := &ssh.ClientConfig{
-			User:            hop.User,
-			Auth:            nextAuth,
-			HostKeyCallback: hostKeyCallback(hop),
-			Timeout:         15 * time.Second,
+		if client != nil {
+			intermediates = append(intermediates, client)
 		}
-		_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-		ncc, chans, reqs, err := ssh.NewClientConn(conn, nextAddr, nextCfg)
-		_ = conn.SetDeadline(time.Time{})
-		if err != nil {
-			_ = conn.Close()
-			closeClients(client, intermediates)
-			return nil, fmt.Errorf("第 %d 跳握手失败: %w%s", i+1, err, authHint(err))
-		}
-		intermediates = append(intermediates, client)
-		client = ssh.NewClient(ncc, chans, reqs)
+		client = next
 	}
-
 	return &Client{client: client, intermediates: intermediates}, nil
 }
 
-// dialWithTimeout 在指定超时内通过当前 SSH 连接拨号；超时后关闭当前连接以中断阻塞
-func dialWithTimeout(c *ssh.Client, addr string, timeout time.Duration) (net.Conn, error) {
-	type result struct {
-		conn net.Conn
-		err  error
+func connectHop(ctx context.Context, root net.Conn, previous *ssh.Client, addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+	// SSH 转发通道无法设置 deadline。取消时关闭承载整个跳板链的 TCP 连接。
+	stop := context.AfterFunc(ctx, func() { _ = root.Close() })
+	connect := func() (*ssh.Client, error) {
+		conn := root
+		if previous != nil {
+			var err error
+			conn, err = previous.DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+		}
+		sshConn, channels, requests, err := ssh.NewClientConn(conn, addr, cfg)
+		if err != nil {
+			return nil, err
+		}
+		return ssh.NewClient(sshConn, channels, requests), nil
 	}
-	ch := make(chan result, 1)
-	go func() {
-		conn, err := c.Dial("tcp", addr)
-		ch <- result{conn: conn, err: err}
-	}()
-	select {
-	case r := <-ch:
-		return r.conn, r.err
-	case <-time.After(timeout):
-		// 本次多跳已失败：关闭当前跳使阻塞中的 Dial 退出
-		_ = c.Close()
-		return nil, fmt.Errorf("连接 %s 超时", addr)
+	client, err := connect()
+	if !stop() || ctx.Err() != nil {
+		_ = root.Close()
+		return nil, ctx.Err()
 	}
+	return client, err
 }
 
 // closeClients 逆序关闭当前与中间跳
@@ -209,26 +211,9 @@ func authHint(err error) string {
 	return ""
 }
 
-// insecureKeyWarnOnce 保证「未配置 host_key」的安全提示每进程只输出一次，避免每次拨号刷屏
-var insecureKeyWarnOnce sync.Once
-
-// hostKeyCallback 返回该跳的主机密钥回调：
-//   - 配置了 host_key：按 sha256(公钥 blob) 指纹严格校验，不匹配则拒绝连接
-//   - 未配置：保持旧行为跳过校验，并输出一次可配置 host_key 的安全提示
-func hostKeyCallback(hop Hop) ssh.HostKeyCallback {
-	if hop.HostKey == "" {
-		return func(string, net.Addr, ssh.PublicKey) error {
-			insecureKeyWarnOnce.Do(func() {
-				log.Println("[warn] SSH 主机密钥未校验（存在中间人风险）：可在跳板配置中填写 host_key 主机密钥指纹（SHA256:...）启用校验")
-			})
-			return nil
-		}
-	}
-	expected, cfgErr := NormalizeHostKey(hop.HostKey)
+// hostKeyCallback 严格校验跳板主机密钥。
+func hostKeyCallback(expected string) ssh.HostKeyCallback {
 	return func(hostname string, _ net.Addr, key ssh.PublicKey) error {
-		if cfgErr != nil {
-			return fmt.Errorf("host_key 配置无效: %w", cfgErr)
-		}
 		if got := fingerprintKey(key); got != expected {
 			return fmt.Errorf("主机密钥校验失败 %s: 期望 %s，实际 %s（服务器密钥已更换或存在中间人攻击）",
 				hostname, expected, got)

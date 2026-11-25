@@ -120,6 +120,14 @@ func (h *Hub) removeClient(c *wsClient) {
 	h.mu.Unlock()
 }
 
+func (h *Hub) disconnectAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for client := range h.clients {
+		h.removeLocked(client)
+	}
+}
+
 // removeLocked 移除连接（调用方需持有锁）
 func (h *Hub) removeLocked(c *wsClient) {
 	if c.closed {
@@ -161,6 +169,15 @@ func (h *Handler) handleLogStream(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	if session, ok := r.Context().Value(authSessionKey{}).(authSession); ok {
+		stop := context.AfterFunc(session.ctx, cancel)
+		defer stop()
+		if !session.expiresAt.IsZero() {
+			var stopExpiry context.CancelFunc
+			ctx, stopExpiry = context.WithDeadline(ctx, session.expiresAt)
+			defer stopExpiry()
+		}
+	}
 
 	var once sync.Once
 	cleanup := func() {

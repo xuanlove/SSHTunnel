@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,7 @@ func TestDownloadCityDatabaseInvalid(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, _, err := DownloadCityDatabase(srv.URL); err == nil {
+	if _, _, err := downloadCityDatabase(context.Background(), srv.Client(), srv.URL); err == nil {
 		t.Fatalf("非法内容应导致下载失败")
 	}
 	if _, err := os.Stat(CityDatabasePath()); err == nil {
@@ -42,7 +43,7 @@ func TestDownloadCityDatabaseWrongType(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, _, err := DownloadCityDatabase(srv.URL); err == nil {
+	if _, _, err := downloadCityDatabase(context.Background(), srv.Client(), srv.URL); err == nil {
 		t.Fatalf("Country 库应被拒绝")
 	}
 	if _, err := os.Stat(CityDatabasePath()); err == nil {
@@ -59,7 +60,7 @@ func TestDownloadCityDatabaseHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, _, err := DownloadCityDatabase(srv.URL); err == nil {
+	if _, _, err := downloadCityDatabase(context.Background(), srv.Client(), srv.URL); err == nil {
 		t.Fatalf("HTTP 500 应导致下载失败")
 	}
 }
@@ -107,7 +108,7 @@ func TestDownloadCityDatabaseCityServer(t *testing.T) {
 		}
 	}()
 
-	_, size, err := DownloadCityDatabase(srv.URL)
+	_, size, err := downloadCityDatabase(context.Background(), srv.Client(), srv.URL)
 	if err != nil {
 		t.Fatalf("下载失败: %v", err)
 	}
@@ -204,7 +205,7 @@ func TestRankMirrorsBySpeed(t *testing.T) {
 	defer slow.Close()
 
 	dead := "http://127.0.0.1:1/dead.mmdb"
-	ranked := rankMirrorsBySpeed([]string{slow.URL, dead, fast.URL})
+	ranked := rankMirrorsBySpeed(context.Background(), http.DefaultClient, []string{slow.URL, dead, fast.URL})
 	if len(ranked) != 3 {
 		t.Fatalf("排序结果数量 = %d, want 3", len(ranked))
 	}
@@ -228,7 +229,7 @@ func TestProbeMirrorRangeHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n, elapsed, err := probeMirror(srv.URL, mirrorProbeBytes)
+	n, elapsed, err := probeMirror(context.Background(), srv.Client(), srv.URL, mirrorProbeBytes)
 	if err != nil {
 		t.Fatalf("测速失败: %v", err)
 	}
@@ -269,7 +270,7 @@ func TestDownloadCityDatabaseMultiMirrorFallback(t *testing.T) {
 		}
 	}()
 
-	src, size, err := DownloadCityDatabase("")
+	src, size, err := downloadCityDatabase(context.Background(), srv.Client(), "")
 	if err != nil {
 		t.Fatalf("多镜像下载应回退成功: %v", err)
 	}
@@ -281,5 +282,17 @@ func TestDownloadCityDatabaseMultiMirrorFallback(t *testing.T) {
 	}
 	if st := CurrentGeoIPStatus(); !st.CityReady {
 		t.Errorf("下载后应加载 City 库")
+	}
+}
+
+func TestGeoIPDownloadPolicy(t *testing.T) {
+	for _, url := range []string{"", "https://example.com/db.mmdb"} {
+		if err := ValidateGeoIPDownloadURL(url); err != nil {
+			t.Errorf("有效的 URL %q: %v", url, err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/db.mmdb", nil)
+	if err := geoipHTTPClient.CheckRedirect(req, nil); err == nil {
+		t.Error("下载重定向不得从 HTTPS 降级到 HTTP")
 	}
 }

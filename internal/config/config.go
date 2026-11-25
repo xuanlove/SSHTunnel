@@ -1,10 +1,14 @@
 package config
 
 import (
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -47,8 +51,8 @@ type HopConfig struct {
 	Password   string `json:"password,omitempty"`
 	KeyContent string `json:"key_content,omitempty"` // 密钥文本内容（PEM 格式）
 	Passphrase string `json:"passphrase,omitempty"`
-	// HostKey 主机密钥指纹/公钥（可选）。支持 SHA256:base64 指纹、base64 公钥
-	// 或 authorized_keys 行；配置后严格校验服务器主机密钥以防中间人，留空跳过校验
+	// HostKey 主机密钥指纹/公钥（连接时必填）。支持 SHA256:base64 指纹、base64 公钥
+	// 或 authorized_keys 行；配置后严格校验服务器主机密钥以防中间人
 	HostKey string `json:"host_key,omitempty"`
 }
 
@@ -77,27 +81,70 @@ type TLSConfig struct {
 	KeyFile  string `json:"key_file,omitempty"`
 }
 
-// migrateTLSFromFiles 将旧版文件路径配置迁移为 PEM 文本（读取成功后清空路径字段）
-func migrateTLSFromFiles(listeners []ProxyListener) {
+// migrateTLSFromFiles 仅迁移配置目录下 certs 内的有效证书对。
+func migrateTLSFromFiles(listeners []ProxyListener, configDir string) {
 	for i := range listeners {
 		t := listeners[i].TLS
-		if t == nil {
+		if t == nil || t.CertFile == "" && t.KeyFile == "" {
 			continue
 		}
-		if t.CertPEM == "" && t.CertFile != "" {
-			if data, err := os.ReadFile(t.CertFile); err == nil {
-				t.CertPEM = string(data)
-			}
-		}
-		if t.KeyPEM == "" && t.KeyFile != "" {
-			if data, err := os.ReadFile(t.KeyFile); err == nil {
-				t.KeyPEM = string(data)
-			}
-		}
+		certFile, keyFile := t.CertFile, t.KeyFile
+		t.CertFile, t.KeyFile = "", ""
 		if t.CertPEM != "" && t.KeyPEM != "" {
-			t.CertFile, t.KeyFile = "", ""
+			continue
+		}
+		certDir := filepath.Join(configDir, "certs")
+		info, err := os.Lstat(certDir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		root, err := os.OpenRoot(certDir)
+		if err != nil {
+			continue
+		}
+		certPEM, keyPEM := t.CertPEM, t.KeyPEM
+		if certPEM == "" {
+			certPEM = readLegacyPEM(root, certDir, certFile)
+		}
+		if keyPEM == "" {
+			keyPEM = readLegacyPEM(root, certDir, keyFile)
+		}
+		_ = root.Close()
+		if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err == nil {
+			t.CertPEM, t.KeyPEM = certPEM, keyPEM
 		}
 	}
+}
+
+func readLegacyPEM(root *os.Root, configDir, path string) string {
+	if filepath.IsAbs(path) {
+		relative, err := filepath.Rel(configDir, path)
+		if err != nil {
+			return ""
+		}
+		path = relative
+	}
+	if relative, ok := strings.CutPrefix(filepath.Clean(path), "certs"+string(filepath.Separator)); ok && !filepath.IsAbs(path) {
+		path = relative
+	}
+	if !filepath.IsLocal(path) {
+		return ""
+	}
+	info, err := root.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	f, err := root.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	const maxPEMSize = 4 << 20
+	data, err := io.ReadAll(io.LimitReader(f, maxPEMSize+1))
+	if err != nil || len(data) > maxPEMSize {
+		return ""
+	}
+	return string(data)
 }
 
 // FirewallMode 防火墙模式
@@ -228,7 +275,7 @@ func (m *Manager) load() error {
 	for i := range list {
 		list[i].Status = StatusStopped
 		// 兼容旧版：把 cert_file/key_file 文件内容读入 cert_pem/key_pem
-		migrateTLSFromFiles(list[i].ProxyListeners)
+		migrateTLSFromFiles(list[i].ProxyListeners, filepath.Dir(m.path))
 		m.configs[list[i].ID] = &list[i]
 	}
 	return nil
@@ -258,7 +305,15 @@ func (m *Manager) Get(id string) (*TunnelConfig, bool) {
 }
 
 // Save 保存配置（新建或更新），ID 会回填到传入的 cfg
+// ErrLegacyTLSPaths 表示写入请求仍携带弃用的本地证书路径。
+var ErrLegacyTLSPaths = errors.New("HTTPS 代理证书必须以 PEM 内容提供")
+
 func (m *Manager) Save(cfg *TunnelConfig) error {
+	for _, listener := range cfg.ProxyListeners {
+		if t := listener.TLS; t != nil && (t.CertFile != "" || t.KeyFile != "") {
+			return ErrLegacyTLSPaths
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if cfg.ID == "" {

@@ -10,12 +10,17 @@ import (
 )
 
 // authMiddleware 可选鉴权中间件（支持运行时动态开关）
-// enabled() 返回 false 时直接放行；true 时校验 JWT Token
-func authMiddleware(enabled func() bool, jwtSecret []byte) func(http.Handler) http.Handler {
+// 使用当前认证状态和签名密钥校验请求，并附加会话生命周期。
+func authMiddleware(state func() (bool, []byte, context.Context)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !enabled() {
-				next.ServeHTTP(w, r)
+			enabled, jwtSecret, session := state()
+			if session.Err() != nil {
+				writeError(w, 401, "会话已失效")
+				return
+			}
+			if !enabled {
+				next.ServeHTTP(w, withAuthSession(r, session, time.Time{}))
 				return
 			}
 
@@ -28,13 +33,12 @@ func authMiddleware(enabled func() bool, jwtSecret []byte) func(http.Handler) ht
 
 			// 校验 JWT
 			claims, err := validateJWT(token, jwtSecret)
-			if err != nil {
+			if err != nil || session.Err() != nil {
 				writeError(w, 401, "Token 无效或已过期")
 				return
 			}
-			_ = claims
-
-			next.ServeHTTP(w, r)
+			expiresAt, _ := claims.GetExpirationTime()
+			next.ServeHTTP(w, withAuthSession(r, session, expiresAt.Time))
 		})
 	}
 }
@@ -60,6 +64,7 @@ func generateJWT(username string, secret []byte) (string, int64, error) {
 		"username": username,
 		"exp":      expiresAt,
 		"iat":      time.Now().Unix(),
+		"session":  "v2",
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(secret)
@@ -72,15 +77,27 @@ func generateJWT(username string, secret []byte) (string, int64, error) {
 // validateJWT 校验 JWT Token
 func validateJWT(tokenString string, secret []byte) (jwt.Claims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrTokenSignatureInvalid
-		}
 		return secret, nil
-	})
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithExpirationRequired())
 	if err != nil {
 		return nil, err
 	}
-	return token.Claims, nil
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || claims["session"] != "v2" {
+		return nil, jwt.ErrTokenInvalidClaims
+	}
+	return claims, nil
+}
+
+type authSessionKey struct{}
+
+type authSession struct {
+	ctx       context.Context
+	expiresAt time.Time
+}
+
+func withAuthSession(r *http.Request, session context.Context, expiresAt time.Time) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), authSessionKey{}, authSession{session, expiresAt}))
 }
 
 // ctxKey 上下文键类型，避免冲突

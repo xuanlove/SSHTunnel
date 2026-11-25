@@ -587,7 +587,7 @@ func (a *App) CityCatalog(country string) proxy.CityCatalogResponse {
 
 // DownloadGeoIPDatabase 下载/更新城市级数据库（桌面端）
 func (a *App) DownloadGeoIPDatabase(url string) (proxy.GeoIPStatus, error) {
-	if _, _, err := proxy.DownloadCityDatabase(url); err != nil {
+	if _, _, err := proxy.DownloadCityDatabase(context.Background(), url); err != nil {
 		return proxy.CurrentGeoIPStatus(), err
 	}
 	return proxy.CurrentGeoIPStatus(), nil

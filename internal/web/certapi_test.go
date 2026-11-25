@@ -2,9 +2,11 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -74,17 +76,20 @@ func TestTLSStorePersistence(t *testing.T) {
 	if token == "" {
 		t.Fatalf("应自动生成部署令牌")
 	}
-	if err := st.Save(WebTLSSettings{Enabled: true, CertFile: "/tmp/a.crt", KeyFile: "/tmp/a.key"}); err != nil {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	certPEM, keyPEM := generateTestCertPEM(t)
+	saved, err := st.SavePEM(true, certPEM, keyPEM)
+	if err != nil {
 		t.Fatalf("保存失败: %v", err)
 	}
 	reloaded := NewTLSStore(path)
-	if got := reloaded.Settings(); !got.Enabled || got.CertFile != "/tmp/a.crt" || got.KeyFile != "/tmp/a.key" {
+	if got := reloaded.Settings(); !got.Enabled || got.CertFile != saved.CertFile || got.KeyFile != saved.KeyFile {
 		t.Errorf("重新加载设置不符: %+v", got)
 	}
 	if got := reloaded.DeployToken(); got != token {
 		t.Errorf("令牌应保留: got %q want %q", got, token)
 	}
-	if c, k, ok := reloaded.Effective(); !ok || c != "/tmp/a.crt" || k != "/tmp/a.key" {
+	if c, k, ok := reloaded.Effective(); !ok || c != saved.CertFile || k != saved.KeyFile {
 		t.Errorf("Effective 应返回启用状态的文件路径")
 	}
 
@@ -156,10 +161,10 @@ func TestWebTLSContentSave(t *testing.T) {
 	}
 
 	s := h.tls.Settings()
-	if !s.Enabled || s.CertFile != WebCertPath() || s.KeyFile != WebKeyPath() {
+	if !s.Enabled || filepath.Dir(filepath.Dir(s.CertFile)) != WebCertDir() || filepath.Dir(s.CertFile) != filepath.Dir(s.KeyFile) {
 		t.Errorf("设置不符: %+v", s)
 	}
-	for _, p := range []string{WebCertPath(), WebKeyPath()} {
+	for _, p := range []string{s.CertFile, s.KeyFile} {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("证书文件未写入 %s: %v", p, err)
 		}
@@ -217,7 +222,7 @@ func TestCertDeployWeb(t *testing.T) {
 	if !s.Enabled {
 		t.Errorf("部署后应启用 HTTPS")
 	}
-	if _, err := os.Stat(WebCertPath()); err != nil {
+	if _, err := os.Stat(s.CertFile); err != nil {
 		t.Errorf("证书文件未写入: %v", err)
 	}
 
@@ -407,5 +412,68 @@ func TestCertTargets(t *testing.T) {
 	}
 	if targets[1].Target != CertTargetTunnel || targets[1].ListenerID != "h1" {
 		t.Errorf("第二项应为 HTTPS 监听器: %+v", targets[1])
+	}
+}
+
+func TestTLSReloadRetainsLastGoodListener(t *testing.T) {
+	h := newCertTestHandler(t)
+	certPEM, keyPEM := generateTestCertPEM(t)
+	settings, err := h.tls.SavePEM(true, certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(Config{Host: "127.0.0.1"}, h)
+	done := make(chan error, 1)
+	go func() { done <- s.Start() }()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	defer s.Shutdown(context.Background())
+
+	var addr string
+	for addr == "" && ctx.Err() == nil {
+		s.mu.Lock()
+		if s.srv != nil {
+			addr = s.srv.Addr
+		}
+		s.mu.Unlock()
+		if addr == "" {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if addr == "" {
+		t.Fatal("HTTPS 监听未启动")
+	}
+	if err := os.Remove(settings.KeyFile); err != nil {
+		t.Fatal(err)
+	}
+	h.reloadTLS()
+	for len(s.reloadCh) != 0 && ctx.Err() == nil {
+		time.Sleep(time.Millisecond)
+	}
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM([]byte(certPEM)) {
+		t.Fatal("无法加载测试证书")
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		ServerName: "test.local", RootCAs: roots, MinVersion: tls.VersionTLS12,
+	}}}
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/api/auth/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("无效热更新后应继续提供 HTTPS: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !h.TLSActive() {
+		t.Fatalf("原 HTTPS 监听应继续服务，状态码为 %d", resp.StatusCode)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("热更新失败不应结束监听: %v", err)
+	default:
 	}
 }

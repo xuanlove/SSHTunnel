@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sshtunnel/internal/logger"
 	"strings"
 	"testing"
 	"time"
@@ -90,5 +91,45 @@ func TestHubSlowClientDoesNotBlock(t *testing.T) {
 	case <-received:
 	case <-time.After(5 * time.Second):
 		t.Errorf("正常客户端未收到任何广播")
+	}
+}
+
+func TestPasswordChangeRevokesJWTAndWebSocket(t *testing.T) {
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "admin", "pass123", NewHub())
+	router := NewServer(Config{Host: "127.0.0.1"}, h).buildRoutes()
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+	oldToken, _, err := generateJWT("admin", h.auth.Secret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	headers := http.Header{"Authorization": {"Bearer " + oldToken}}
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/logs/stream",
+		&websocket.DialOptions{HTTPHeader: headers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	req := httptest.NewRequest(http.MethodPut, "/api/auth/settings",
+		strings.NewReader(`{"enabled":true,"username":"admin","password":"new-password"}`))
+	req.Header = headers
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("修改密码失败: %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/auth/settings", nil)
+	req.Header = headers
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("旧令牌应被拒绝，状态码为 %d", w.Code)
+	}
+	if _, _, err := conn.Read(ctx); err == nil || ctx.Err() != nil {
+		t.Fatalf("旧 WebSocket 应在改密后关闭: %v", err)
 	}
 }

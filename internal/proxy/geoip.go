@@ -9,6 +9,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -181,8 +183,102 @@ const (
 	mirrorProbeTimeout = 8 * time.Second
 )
 
-// geoipHTTPClient 下载客户端（超时较长，尊重环境变量代理）
-var geoipHTTPClient = &http.Client{Timeout: 15 * time.Minute}
+const maxGeoIPDownloadBytes = 256 << 20
+
+var geoipHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext:           dialGeoIP,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     true,
+	},
+	Timeout: 15 * time.Minute,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("GeoIP 下载重定向次数过多")
+		}
+		return ValidateGeoIPDownloadURL(req.URL.String())
+	},
+}
+
+// ValidateGeoIPDownloadURL 校验初始地址和重定向地址。实际 DNS 结果由拨号器检查。
+func ValidateGeoIPDownloadURL(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil // 空地址使用内置镜像列表
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Opaque != "" {
+		return errors.New("仅支持不含凭据的 HTTPS 下载地址")
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return errors.New("下载地址不可指向内网或本机地址")
+	}
+	if ip, err := netip.ParseAddr(host); err == nil && !publicGeoIPAddr(ip) {
+		return errors.New("下载地址不可指向内网或本机地址")
+	}
+	return nil
+}
+
+// 常见非公网地址范围，包括共享地址、保留地址和 IPv6 转换地址。
+var restrictedGeoIPRanges = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+}
+
+func publicGeoIPAddr(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.Zone() != "" {
+		return false
+	}
+	for _, blocked := range restrictedGeoIPRanges {
+		if blocked.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+func dialGeoIP(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, errors.New("GeoIP 下载地址未解析出 IP")
+	}
+	for _, ip := range ips {
+		if !publicGeoIPAddr(ip) {
+			return nil, errors.New("下载地址不可指向内网或本机地址")
+		}
+	}
+	var lastErr error
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	for _, ip := range ips {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
 
 // mirrorSpeed 镜像测速结果
 type mirrorSpeed struct {
@@ -193,8 +289,8 @@ type mirrorSpeed struct {
 
 // probeMirror 对镜像做一次限速采样：请求前 1MB 并测量耗时。
 // 即使中途超时，也会用已读取的字节数估算速度。
-func probeMirror(url string, probeBytes int) (int64, time.Duration, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), mirrorProbeTimeout)
+func probeMirror(ctx context.Context, client *http.Client, url string, probeBytes int) (int64, time.Duration, error) {
+	ctx, cancel := context.WithTimeout(ctx, mirrorProbeTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -205,7 +301,7 @@ func probeMirror(url string, probeBytes int) (int64, time.Duration, error) {
 	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", probeBytes-1))
 
 	start := time.Now()
-	resp, err := geoipHTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, time.Since(start), err
 	}
@@ -236,7 +332,7 @@ func probeMirror(url string, probeBytes int) (int64, time.Duration, error) {
 
 // rankMirrorsBySpeed 并发测速并返回按速度降序排列的镜像地址。
 // 测速失败的镜像排在最后，仍会作为兜底尝试。
-func rankMirrorsBySpeed(urls []string) []string {
+func rankMirrorsBySpeed(ctx context.Context, client *http.Client, urls []string) []string {
 	if len(urls) <= 1 {
 		return append([]string(nil), urls...)
 	}
@@ -247,7 +343,7 @@ func rankMirrorsBySpeed(urls []string) []string {
 		wg.Add(1)
 		go func(i int, u string) {
 			defer wg.Done()
-			n, elapsed, err := probeMirror(u, mirrorProbeBytes)
+			n, elapsed, err := probeMirror(ctx, client, u, mirrorProbeBytes)
 			if err != nil {
 				log.Printf("GeoIP 镜像测速失败 %s: %v", u, err)
 				results[i] = mirrorSpeed{URL: u}
@@ -274,7 +370,17 @@ func rankMirrorsBySpeed(urls []string) []string {
 // DownloadCityDatabase 下载城市级数据库（Merged-IP）到缓存路径并热加载。
 // urlOverride 非空时仅使用该地址；否则先并发测速，优先使用最快的镜像。
 // 返回实际使用的下载地址与文件大小。
-func DownloadCityDatabase(urlOverride string) (string, int64, error) {
+func DownloadCityDatabase(ctx context.Context, urlOverride string) (string, int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+	urlOverride = strings.TrimSpace(urlOverride)
+	if err := ValidateGeoIPDownloadURL(urlOverride); err != nil {
+		return "", 0, err
+	}
+	return downloadCityDatabase(ctx, geoipHTTPClient, urlOverride)
+}
+
+func downloadCityDatabase(ctx context.Context, client *http.Client, urlOverride string) (string, int64, error) {
 	dest := CityDatabasePath()
 	if dest == "" {
 		return "", 0, errors.New("无法确定配置目录")
@@ -288,7 +394,7 @@ func DownloadCityDatabase(urlOverride string) (string, int64, error) {
 		urls = []string{urlOverride}
 	} else if len(urls) > 1 {
 		// 多镜像：先测速，按速度从快到慢依次尝试
-		urls = rankMirrorsBySpeed(urls)
+		urls = rankMirrorsBySpeed(ctx, client, urls)
 		if len(urls) > 0 {
 			log.Printf("GeoIP 城市库将优先使用镜像: %s", urls[0])
 		}
@@ -296,7 +402,7 @@ func DownloadCityDatabase(urlOverride string) (string, int64, error) {
 
 	var lastErr error
 	for _, u := range urls {
-		size, err := downloadTo(u, dest)
+		size, err := downloadTo(ctx, client, u, dest)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", u, err)
 			continue
@@ -313,13 +419,13 @@ func DownloadCityDatabase(urlOverride string) (string, int64, error) {
 }
 
 // downloadTo 下载到目标路径（先写临时文件），并校验可被解析为 City 库
-func downloadTo(url, dest string) (int64, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func downloadTo(ctx context.Context, client *http.Client, url, dest string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("User-Agent", "sshtunnel-geoip")
-	resp, err := geoipHTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -328,6 +434,9 @@ func downloadTo(url, dest string) (int64, error) {
 		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
+	if resp.ContentLength > maxGeoIPDownloadBytes {
+		return 0, errors.New("GeoIP 数据库超过 256 MiB 上限")
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(dest), "geoip-*.tmp")
 	if err != nil {
 		return 0, err
@@ -338,9 +447,12 @@ func downloadTo(url, dest string) (int64, error) {
 		_ = os.Remove(tmpPath)
 	}()
 
-	size, err := io.Copy(tmp, resp.Body)
+	size, err := io.Copy(tmp, io.LimitReader(resp.Body, maxGeoIPDownloadBytes+1))
 	if err != nil {
 		return 0, err
+	}
+	if size > maxGeoIPDownloadBytes {
+		return 0, errors.New("GeoIP 数据库超过 256 MiB 上限")
 	}
 	if err := tmp.Close(); err != nil {
 		return 0, err

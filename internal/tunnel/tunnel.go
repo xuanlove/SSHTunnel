@@ -33,14 +33,14 @@ type tunnelClient interface {
 
 // sshDialer 抽象 SSH 连接的建立，测试可注入返回 mock 客户端的实现。
 type sshDialer interface {
-	Dial(hops []sshclient.Hop) (tunnelClient, error)
+	Dial(ctx context.Context, hops []sshclient.Hop) (tunnelClient, error)
 }
 
 // defaultDialer 委托给真实的 sshclient.Dial。
 type defaultDialer struct{}
 
-func (defaultDialer) Dial(hops []sshclient.Hop) (tunnelClient, error) {
-	return sshclient.Dial(hops)
+func (defaultDialer) Dial(ctx context.Context, hops []sshclient.Hop) (tunnelClient, error) {
+	return sshclient.DialContext(ctx, hops)
 }
 
 // dialer 是包级 SSH 拨号器，测试可通过 setDialer 替换。
@@ -489,7 +489,7 @@ func (t *Tunnel) connectAndServe() error {
 			HostKey:    h.HostKey,
 		}
 	}
-	client, err := dialer.Dial(hops)
+	client, err := dialer.Dial(t.ctx, hops)
 	if err != nil {
 		t.log.TunnelError(t.cfg.ID, "SSH 连接失败: "+err.Error())
 		return err

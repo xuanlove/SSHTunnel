@@ -16,9 +16,9 @@ const isWeb = typeof window !== 'undefined' && !(window as any).go
 // ===== 请求超时 =====
 // 避免网络异常/服务无响应时请求永久挂起，导致页面 loading 无法结束
 const REQUEST_TIMEOUT_MS = 15000
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(input, { ...init, signal: controller.signal })
   } finally {
@@ -53,16 +53,8 @@ function authHeaders(): Record<string, string> {
 let redirectingToLogin = false
 
 function handleUnauthorized(sentToken: string | null) {
-  // 请求发出时未携带 Token，但此后用户已登录获得新 Token：
-  // 这是一条迟到的 401，直接忽略，不能清掉刚登录的 Token 或把用户踢回登录页。
-  if (!sentToken && authToken) {
-    return
-  }
-  // 仅当当前 Token 仍是本次请求发送的那个（或本就没带）时才清除，
-  // 避免迟到的 401 清掉用户刚登录获得的新 Token，从而反复被踢回登录页。
-  if (!sentToken || authToken === sentToken) {
-    setToken(null)
-  }
+  if (sentToken !== authToken) return
+  setToken(null)
   if (!isWeb || redirectingToLogin) return
   redirectingToLogin = true
   if (!location.hash.startsWith('#/login')) {
@@ -112,13 +104,13 @@ async function httpGet<T>(path: string): Promise<T> {
   return json.data as T
 }
 
-async function httpPost<T>(path: string, body?: any): Promise<T> {
+async function httpPost<T>(path: string, body?: any, timeoutMs?: number): Promise<T> {
   const sent = authToken
   const res = await fetchWithTimeout(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body ? JSON.stringify(body) : undefined,
-  })
+  }, timeoutMs)
   if (res.status === 401) {
     handleUnauthorized(sent)
     throw new Error('未授权')
@@ -281,7 +273,7 @@ export async function testTunnelConfig(cfg: TunnelConfig): Promise<void> {
     await App.TestTunnelConfig(cfg as any)
     return
   }
-  await httpPost('/api/tunnel/test', cfg)
+  await httpPost('/api/tunnel/test', cfg, (cfg.hop_chain.length * 15 + 5) * 1000)
 }
 
 // ===== 代理监听端口连通性测试 =====
@@ -509,7 +501,7 @@ export async function downloadGeoIPDatabase(url = ''): Promise<GeoIPStatus> {
   if (!isWeb) {
     return App.DownloadGeoIPDatabase(url) as unknown as Promise<GeoIPStatus>
   }
-  return httpPost<GeoIPStatus>('/api/geoip/download', { url })
+  return httpPost<GeoIPStatus>('/api/geoip/download', { url }, 16 * 60 * 1000)
 }
 
 // 启用 / 关闭城市级数据库（立即热加载，无需重启）

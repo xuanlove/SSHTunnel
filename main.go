@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -115,7 +113,12 @@ func main() {
 
 	// WEB 模式或混合模式：启动 WEB 服务
 	if mode == ModeWeb || mode == ModeBoth {
-		startWebServer(app, authUser, authPass)
+		if err := startWebServer(app, authUser, authPass); err != nil {
+			if mode == ModeWeb {
+				log.Fatal(err)
+			}
+			log.Printf("WEB 服务器启动失败: %v", err)
+		}
 	}
 
 	// 桌面模式或混合模式：启动 Wails
@@ -149,15 +152,8 @@ func parseAuth(s string) (enabled bool, user, pass string) {
 	return true, parts[0], parts[1]
 }
 
-// generateJWTSecret 生成随机 JWT 密钥
-func generateJWTSecret() []byte {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return []byte(hex.EncodeToString(b))
-}
-
 // startWebServer 启动 WEB 服务器
-func startWebServer(app *App, authUser, authPass string) {
+func startWebServer(app *App, authUser, authPass string) error {
 	// 初始化业务层
 	if err := app.Init(); err != nil {
 		log.Fatalf("业务层初始化失败: %v", err)
@@ -184,7 +180,7 @@ func startWebServer(app *App, authUser, authPass string) {
 
 	// 创建 API Handler
 	handler := web.NewHandler(app.cfgMgr, app.tunnelMgr, app.logger,
-		generateJWTSecret(), "", "", hub).
+		nil, "", "", hub).
 		WithVersion(version, commit, buildVariant, *flagRepo).
 		WithMetrics(app.metrics).
 		WithAlert(app.alerts).
@@ -198,15 +194,18 @@ func startWebServer(app *App, authUser, authPass string) {
 	}
 
 	// 加载持久化的访问密码设置；--auth 启动参数覆盖（仅内存）
-	handler.UsePersistentAuth(authUser, authPass)
+	if err := handler.UsePersistentAuth(authUser, authPass); err != nil {
+		return err
+	}
 	// --tls-cert/--tls-key 启动参数：启用并持久化 WEB 面板 HTTPS
-	handler.UseCLITLS(*flagTLSCert, *flagTLSKey)
+	if err := handler.UseCLITLS(*flagTLSCert, *flagTLSKey); err != nil {
+		return err
+	}
 
 	// 创建并启动服务器
 	srv := web.NewServer(web.Config{
-		Host:      *flagWebHost,
-		Port:      *flagWebPort,
-		JWTSecret: handler.JWTSecret(),
+		Host: *flagWebHost,
+		Port: *flagWebPort,
 	}, handler)
 
 	go func() {
@@ -216,6 +215,7 @@ func startWebServer(app *App, authUser, authPass string) {
 			os.Exit(1)
 		}
 	}()
+	return nil
 }
 
 // startDesktop 启动 Wails 桌面应用

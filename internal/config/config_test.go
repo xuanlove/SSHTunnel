@@ -1,7 +1,10 @@
 package config
 
 import (
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -163,13 +166,34 @@ func TestManagerSetStatus(t *testing.T) {
 // TestTLSFileMigration 旧版 cert_file/key_file 配置应自动迁移为 PEM 文本
 func TestTLSFileMigration(t *testing.T) {
 	dir := t.TempDir()
-	certPath := filepath.Join(dir, "c.pem")
-	keyPath := filepath.Join(dir, "k.pem")
-	if err := os.WriteFile(certPath, []byte("CERT-PEM"), 0644); err != nil {
-		t.Fatalf("写入证书失败: %v", err)
+	certDir := filepath.Join(dir, "certs")
+	if err := os.Mkdir(certDir, 0700); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(keyPath, []byte("KEY-PEM"), 0600); err != nil {
-		t.Fatalf("写入私钥失败: %v", err)
+	certPath, keyPath := filepath.Join(certDir, "c.pem"), filepath.Join(certDir, "k.pem")
+	server := httptest.NewTLSServer(nil)
+	t.Cleanup(server.Close)
+	pair := server.TLS.Certificates[0]
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: pair.Certificate[0]})
+	keyDER, err := x509.MarshalPKCS8PrivateKey(pair.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(dir, "outside.pem")
+	if err := os.WriteFile(outsidePath, keyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	outside := []ProxyListener{{TLS: &TLSConfig{CertFile: certPath, KeyFile: outsidePath}}}
+	migrateTLSFromFiles(outside, dir)
+	if result := outside[0].TLS; *result != (TLSConfig{}) {
+		t.Fatal("迁移不得返回证书目录以外的文件")
 	}
 	cfgPath := filepath.Join(dir, "configs.json")
 
@@ -199,12 +223,18 @@ func TestTLSFileMigration(t *testing.T) {
 		t.Fatalf("配置结构异常: %+v", cfg)
 	}
 	tlsCfg := cfg.ProxyListeners[0].TLS
-	if tlsCfg.CertPEM != "CERT-PEM" || tlsCfg.KeyPEM != "KEY-PEM" {
+	if tlsCfg.CertPEM != string(certPEM) || tlsCfg.KeyPEM != string(keyPEM) {
 		t.Errorf("未迁移为 PEM 文本: %+v", tlsCfg)
 	}
 	if tlsCfg.CertFile != "" || tlsCfg.KeyFile != "" {
 		t.Errorf("迁移后应清空旧路径字段: %+v", tlsCfg)
 	}
+
+	cfg.ProxyListeners[0].TLS = &TLSConfig{CertFile: certPath, KeyFile: keyPath}
+	if err := m.Save(cfg); err != ErrLegacyTLSPaths {
+		t.Fatalf("拒绝旧路径字段，实际错误为 %v", err)
+	}
+	cfg.ProxyListeners[0].TLS = tlsCfg
 
 	// 新保存的配置不应再写 cert_file/key_file
 	if err := m.Save(cfg); err != nil {
@@ -218,7 +248,7 @@ func TestTLSFileMigration(t *testing.T) {
 	if err := json.Unmarshal(saved, &list); err != nil {
 		t.Fatalf("解析保存结果失败: %v", err)
 	}
-	if len(list) != 1 || list[0].ProxyListeners[0].TLS.CertPEM != "CERT-PEM" {
+	if len(list) != 1 || list[0].ProxyListeners[0].TLS.CertPEM != string(certPEM) {
 		t.Errorf("保存结果未包含 PEM: %s", string(saved))
 	}
 	if string(saved) != "" && json.Valid(saved) {

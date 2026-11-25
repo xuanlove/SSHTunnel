@@ -37,9 +37,13 @@ DEFAULT_USER="admin"
 
 # 生成随机强密码（避免使用固定默认口令）
 generate_password() {
-    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24
+    LC_ALL=C od -An -N12 -tx1 /dev/urandom | tr -d '[:space:]'
 }
 DEFAULT_PASS="$(generate_password)"
+if [[ ${#DEFAULT_PASS} -ne 24 ]]; then
+    printf '%s\n' '生成随机访问密码失败' >&2
+    exit 1
+fi
 
 # 运行时变量（由交互输入或环境变量填充）
 LISTEN_HOST="${LISTEN_HOST:-$DEFAULT_HOST}"
