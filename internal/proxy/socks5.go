@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
-	"strconv"
 	"time"
 
 	"sshtunnel/internal/config"
@@ -190,7 +189,7 @@ func (s *socks5Server) handleConn(conn net.Conn) {
 	}
 	port = binary.BigEndian.Uint16(portBuf)
 
-	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	target := joinTarget(host, int(port))
 
 	// 握手完成，清除读超时（后续桥接可能长时间空闲）
 	_ = conn.SetReadDeadline(time.Time{})

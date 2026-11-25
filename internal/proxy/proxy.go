@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -203,6 +204,17 @@ func (b *BaseServer) addAccessRecord(conn net.Conn, target string, start time.Ti
 		DurationMs: time.Since(start).Milliseconds(),
 		Denied:     denied,
 	})
+}
+
+// joinTarget 将目标主机与端口拼成 host:port。
+// 部分客户端会把 IPv6 目标以「带方括号的域名」下发（SOCKS5 ATYP=0x03 / SOCKS4a），
+// 若直接交给 JoinHostPort 会再套一层括号，得到 [[2600::1]]:443 这类无法解析的地址
+// （拨号时报 missing port in address）。这里先剥掉一层包裹方括号再拼接。
+func joinTarget(host string, port int) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // logAccess 记录一条代理访问日志（仅当监听器开启访问日志时）。

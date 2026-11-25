@@ -537,6 +537,164 @@ func TestCheckPortConflict(t *testing.T) {
 
 // ============== 工具函数 ==============
 
+// recordingDialer 记录实际拨号地址，并把连接重定向到本地 echo 服务器。
+// 通过带缓冲 channel 回传地址，避免测试 goroutine 与代理 goroutine 的数据竞态。
+type recordingDialer struct {
+	target string
+	addrs  chan string
+}
+
+func (d *recordingDialer) Dial(network, address string) (net.Conn, error) {
+	select {
+	case d.addrs <- address:
+	default:
+	}
+	return net.Dial("tcp", d.target)
+}
+
+// dialAddr 等待并返回一次拨号地址
+func (d *recordingDialer) dialAddr(t *testing.T) string {
+	t.Helper()
+	select {
+	case a := <-d.addrs:
+		return a
+	case <-time.After(2 * time.Second):
+		t.Fatalf("代理未发起拨号")
+		return ""
+	}
+}
+
+// socks5ConnectRaw 完成 SOCKS5 无认证握手并按原始请求字节发送 CONNECT，返回客户端连接与响应码
+func socks5ConnectRaw(t *testing.T, proxyPort int, req []byte) (net.Conn, byte) {
+	t.Helper()
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", proxyPort))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatalf("发送握手失败: %v", err)
+	}
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		t.Fatalf("读取握手响应失败: %v", err)
+	}
+	if _, err := conn.Write(req); err != nil {
+		t.Fatalf("发送请求失败: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	reply := make([]byte, 10) // 本实现成功/失败均以 IPv4 形式回复
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatalf("读取响应失败: %v", err)
+	}
+	return conn, reply[1]
+}
+
+// TestSOCKS5DomainIPv6BracketedTarget 部分客户端把 IPv6 目标以带方括号的域名下发，
+// 若直接 JoinHostPort 会得到 [[2600::1]]:443（Go 报 missing port in address）。
+// 修复后应剥掉一层方括号，拨号地址为合法的 [2600::1]:443。
+func TestSOCKS5DomainIPv6BracketedTarget(t *testing.T) {
+	echoAddr, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	dialer := &recordingDialer{target: echoAddr, addrs: make(chan string, 4)}
+	lc := config.ProxyListener{ID: "test-socks5-v6-domain", Protocol: config.ProxySOCKS5}
+	port, handle, err := startProxyServer(t, lc, dialer)
+	if err != nil {
+		t.Fatalf("启动 SOCKS5 代理失败: %v", err)
+	}
+	defer handle.Stop()
+
+	domain := "[2600:1f18:2da1:d401:3bc4:1b7d:6e3d:8acb]"
+	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(domain))}
+	req = append(req, domain...)
+	req = append(req, 0x01, 0xBB) // 端口 443
+	conn, rep := socks5ConnectRaw(t, port, req)
+	defer conn.Close()
+
+	if rep != 0x00 {
+		t.Fatalf("CONNECT 应成功, rep=%d", rep)
+	}
+	addr := dialer.dialAddr(t)
+	const want = "[2600:1f18:2da1:d401:3bc4:1b7d:6e3d:8acb]:443"
+	if addr != want {
+		t.Errorf("拨号地址错误: got %q, want %q", addr, want)
+	}
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		t.Errorf("拨号地址应可解析: %v", err)
+	}
+}
+
+// TestSOCKS5IPv6ATYPTarget ATYP=0x04 的 IPv6 目标不应被加双重括号
+func TestSOCKS5IPv6ATYPTarget(t *testing.T) {
+	echoAddr, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	dialer := &recordingDialer{target: echoAddr, addrs: make(chan string, 4)}
+	lc := config.ProxyListener{ID: "test-socks5-v6-atyp", Protocol: config.ProxySOCKS5}
+	port, handle, err := startProxyServer(t, lc, dialer)
+	if err != nil {
+		t.Fatalf("启动 SOCKS5 代理失败: %v", err)
+	}
+	defer handle.Stop()
+
+	ip := net.ParseIP("2600:1f18::10").To16()
+	req := []byte{0x05, 0x01, 0x00, 0x04}
+	req = append(req, ip...)
+	req = append(req, 0x01, 0xBB)
+	conn, rep := socks5ConnectRaw(t, port, req)
+	defer conn.Close()
+
+	if rep != 0x00 {
+		t.Fatalf("CONNECT 应成功, rep=%d", rep)
+	}
+	addr := dialer.dialAddr(t)
+	const want = "[2600:1f18::10]:443"
+	if addr != want {
+		t.Errorf("拨号地址错误: got %q, want %q", addr, want)
+	}
+}
+
+// TestSOCKS4aDomainIPv6BracketedTarget SOCKS4a 域名同样需要处理带方括号的 IPv6 字面量
+func TestSOCKS4aDomainIPv6BracketedTarget(t *testing.T) {
+	echoAddr, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	dialer := &recordingDialer{target: echoAddr, addrs: make(chan string, 4)}
+	lc := config.ProxyListener{ID: "test-socks4a-v6", Protocol: config.ProxySOCKS4}
+	port, handle, err := startProxyServer(t, lc, dialer)
+	if err != nil {
+		t.Fatalf("启动 SOCKS4 代理失败: %v", err)
+	}
+	defer handle.Stop()
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("连接代理失败: %v", err)
+	}
+	defer conn.Close()
+
+	// VN=4 CD=1 DSTPORT=443 DSTIP=0.0.0.1(表示 SOCKS4a) USERID\0 DOMAIN\0
+	req := []byte{0x04, 0x01, 0x01, 0xBB, 0, 0, 0, 1}
+	req = append(req, []byte("u")...)
+	req = append(req, 0)
+	req = append(req, []byte("[2600::1]")...)
+	req = append(req, 0)
+	if _, err := conn.Write(req); err != nil {
+		t.Fatalf("发送请求失败: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	reply := make([]byte, 8)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatalf("读取响应失败: %v", err)
+	}
+	if reply[1] != 0x5A {
+		t.Fatalf("CONNECT 应成功, CD=%#x", reply[1])
+	}
+	if addr := dialer.dialAddr(t); addr != "[2600::1]:443" {
+		t.Errorf("拨号地址错误: got %q, want %q", addr, "[2600::1]:443")
+	}
+}
+
 func echoPortNum(addr string) int {
 	_, portStr, _ := net.SplitHostPort(addr)
 	var port int

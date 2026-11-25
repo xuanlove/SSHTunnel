@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"time"
 
 	"sshtunnel/internal/config"
@@ -137,7 +136,7 @@ func (s *socks4Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	target := joinTarget(host, int(port))
 
 	// 握手完成，清除读超时（后续桥接可能长时间空闲）
 	_ = conn.SetReadDeadline(time.Time{})
