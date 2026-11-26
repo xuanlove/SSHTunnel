@@ -232,7 +232,7 @@ func (s *httpServer) handleConnect(conn net.Conn, req *http.Request, start time.
 	if err != nil {
 		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		s.log("warn", "CONNECT 连接失败 "+target+": "+err.Error())
-		s.logAccess(conn, target, start, "失败: 连接目标失败")
+		s.logAccess(conn, target, start, "失败: 连接目标失败（"+sanitizeLog(err.Error())+"）")
 		return
 	}
 	defer targetConn.Close()
@@ -257,7 +257,7 @@ func (s *httpServer) handleHTTP(conn net.Conn, req *http.Request, start time.Tim
 	if err != nil {
 		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		s.log("warn", "HTTP 连接失败 "+target+": "+err.Error())
-		s.logAccess(conn, target, start, "失败: 连接目标失败")
+		s.logAccess(conn, target, start, "失败: 连接目标失败（"+sanitizeLog(err.Error())+"）")
 		return
 	}
 	defer targetConn.Close()

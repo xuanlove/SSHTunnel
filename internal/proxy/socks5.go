@@ -204,7 +204,7 @@ func (s *socks5Server) handleConn(conn net.Conn) {
 	targetConn, err := s.dialer.Dial("tcp", target)
 	if err != nil {
 		s.log("warn", "连接目标失败 "+target+": "+err.Error())
-		s.logAccess(conn, target, start, "失败: 连接目标失败")
+		s.logAccess(conn, target, start, "失败: 连接目标失败（"+sanitizeLog(err.Error())+"）")
 		s.reply(conn, 0x05, nil, 0) // 连接失败
 		return
 	}

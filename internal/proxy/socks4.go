@@ -145,7 +145,7 @@ func (s *socks4Server) handleConn(conn net.Conn) {
 	targetConn, err := s.dialer.Dial("tcp", target)
 	if err != nil {
 		s.log("warn", "连接目标失败 "+target+": "+err.Error())
-		s.logAccess(conn, target, start, "失败: 连接目标失败")
+		s.logAccess(conn, target, start, "失败: 连接目标失败（"+sanitizeLog(err.Error())+"）")
 		s.reply(conn, 0x5B) // 失败
 		return
 	}

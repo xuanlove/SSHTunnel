@@ -147,6 +147,9 @@ describe('HopEditor', () => {
     expect(code).toContain('# >>> ssh-tunnel tunnelx')
     expect(code).toContain('tmp=$(mktemp)')
     expect(code).toContain('sudo cat "$tmp" > /etc/ssh/sshd_config')
+    // 生效校验：全局 AllowTcpForwarding no 会覆盖文末 Match 块
+    expect(code).toContain('sshd -T -C user=tunnelx,host=localhost,addr=127.0.0.1')
+    expect(code).toContain('TCP 转发未生效')
     expect(code).not.toContain('sshtunnel')
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining('Match User tunnelx'))
   })
@@ -170,6 +173,7 @@ describe('HopEditor', () => {
     expect(code).toContain('# >>> ssh-tunnel tunnelpw')
     expect(code).toContain('PasswordAuthentication yes')
     expect(code).toContain('PubkeyAuthentication no')
+    expect(code).toContain('sshd -T -C user=tunnelpw,host=localhost,addr=127.0.0.1')
     expect(code).not.toContain('authorized_keys')
     expect(code).not.toContain('公钥')
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining('sudo passwd tunnelpw'))

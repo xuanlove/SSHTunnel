@@ -73,6 +73,21 @@ function updateHopHostKey(idx: number, v: string) {
   updateHop(idx, { host_key: val === '' ? undefined : val })
 }
 
+// 第 4 步：校验实际生效的转发配置。
+// sshd 对同一参数取「第一个匹配值」：若全局（更早出现）设置了
+// AllowTcpForwarding no 或 DisableForwarding yes，文末的 Match 块不会生效，
+// 表现为隧道能连上但 SOCKS/转发全部失败。这里主动检测并给出修复指引。
+function buildVerifyStep(user: string): string {
+  return `# 4) 校验实际生效的转发配置（sshd 以第一个匹配值为准）
+#    若全局更早设置了 AllowTcpForwarding no 或 DisableForwarding yes，本块不会生效
+eff=$(sudo sshd -T -C user=${user},host=localhost,addr=127.0.0.1 2>/dev/null | awk '/^allowtcpforwarding /{a=$2} /^disableforwarding /{d=$2} END{if (d=="yes") print "disabled"; else if (a=="yes" || a=="all") print "ok"; else print (a=="" ? "" : a)}')
+if [ -n "$eff" ] && [ "$eff" != "ok" ]; then
+    echo "警告：${user} 的 TCP 转发未生效（allowtcpforwarding/disableforwarding = $eff）" >&2
+    echo "      原因：/etc/ssh/sshd_config 中更早出现的全局设置优先于文末的 Match 块" >&2
+    echo "      处理：将全局 AllowTcpForwarding 改为 yes 并移除 DisableForwarding yes，然后重新执行本配置" >&2
+fi`
+}
+
 // 最小权限 SSH 账户配置（在跳板机执行）：无登录 Shell、仅允许 TCP 转发
 // 公钥模式：仅密钥登录；密码模式：仅密码登录，密码在服务器上交互设置
 function buildKeyCommands(user: string, pubKey: string): string {
@@ -102,7 +117,9 @@ Match User ${user}
     PermitTunnel no
 # <<< ssh-tunnel ${user}
 EOF
-sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }`
+sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }
+
+${buildVerifyStep(user)}`
 }
 
 function buildPasswordCommands(user: string): string {
@@ -129,7 +146,9 @@ Match User ${user}
     PermitTunnel no
 # <<< ssh-tunnel ${user}
 EOF
-sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }`
+sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }
+
+${buildVerifyStep(user)}`
 }
 
 type AccountAuth = 'key' | 'password'
