@@ -1029,6 +1029,12 @@ npm run preview    # 预览构建产物
 
 ## 版本更新说明
 
+### v1.9.7
+
+- **账户配置生成器新增「生效校验」**：写入 sshd 配置并 reload 后，自动执行 `sshd -T -C user=<账户>,host=...,addr=...` 检查实际生效的转发配置。sshd 对同一参数以第一个匹配值为准，若全局更早设置了 `AllowTcpForwarding no` 或 `DisableForwarding yes`，文末的 `Match` 块会被静默忽略——此前表现为隧道能连上但 SOCKS/转发全部失败（浏览器常见 `ERR_CONNECTION_RESET`），现在会直接打印原因与修复指引
+- **失败原因进入访问历史**：SOCKS4/SOCKS5、HTTP/HTTPS 代理连接目标失败时，访问历史记录会附带底层错误（如 `ssh: rejected: administratively prohibited`），便于在「节点状态 → 访问历史」直接定位问题
+- **测试**：校验片段覆盖 `yes/no`、`no`、`disableforwarding=yes`、`local`、无输出五类分支；前端 93 用例、`vue-tsc`、Go 代理包 `-race` 通过
+
 ### v1.9.6
 
 - **修复隧道卡片随机排序**：隧道配置此前保存在 Go map 中，`List()` 与持久化均遍历 map，导致仪表盘「隧道管理」与「节点状态」的节点卡片每次刷新顺序都可能变化。现改为维护显式创建顺序：新建追加到末尾、编辑保持位置、删除仅移除自身，`configs.json` 也按同一顺序写入，重启后位置固定
