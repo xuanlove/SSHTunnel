@@ -92,6 +92,73 @@ func TestManagerList(t *testing.T) {
 	}
 }
 
+func TestManagerListKeepsCreationOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "configs.json")
+	m, err := newManagerWithPath(cfgPath)
+	if err != nil {
+		t.Fatalf("创建 Manager 失败: %v", err)
+	}
+
+	// 依次创建 5 条，记录 ID 顺序
+	var ids []string
+	for i := 0; i < 5; i++ {
+		c := &TunnelConfig{Name: "t" + string(rune('1'+i))}
+		if err := m.Save(c); err != nil {
+			t.Fatalf("保存失败: %v", err)
+		}
+		ids = append(ids, c.ID)
+	}
+
+	// 多次读取顺序必须完全一致（map 遍历无序，此前每次可能不同）
+	for round := 0; round < 20; round++ {
+		list := m.List()
+		if len(list) != len(ids) {
+			t.Fatalf("List 长度应为 %d, got %d", len(ids), len(list))
+		}
+		for i, c := range list {
+			if c.ID != ids[i] {
+				t.Fatalf("第 %d 轮顺序不一致: 位置 %d 期望 %s, got %s", round, i, ids[i], c.ID)
+			}
+		}
+	}
+
+	// 编辑不应改变位置
+	if err := m.Save(&TunnelConfig{ID: ids[2], Name: "renamed"}); err != nil {
+		t.Fatalf("编辑失败: %v", err)
+	}
+	list := m.List()
+	for i, c := range list {
+		if c.ID != ids[i] {
+			t.Fatalf("编辑后顺序变化: 位置 %d 期望 %s, got %s", i, ids[i], c.ID)
+		}
+	}
+
+	// 删除中间一条后，其余保持相对顺序
+	if err := m.Delete(ids[1]); err != nil {
+		t.Fatalf("删除失败: %v", err)
+	}
+	want := []string{ids[0], ids[2], ids[3], ids[4]}
+	list = m.List()
+	for i, c := range list {
+		if c.ID != want[i] {
+			t.Fatalf("删除后顺序错误: 位置 %d 期望 %s, got %s", i, want[i], c.ID)
+		}
+	}
+
+	// 重新加载后顺序保持一致（持久化顺序稳定）
+	m2, err := newManagerWithPath(cfgPath)
+	if err != nil {
+		t.Fatalf("重新加载失败: %v", err)
+	}
+	list = m2.List()
+	for i, c := range list {
+		if c.ID != want[i] {
+			t.Fatalf("重启后顺序错误: 位置 %d 期望 %s, got %s", i, want[i], c.ID)
+		}
+	}
+}
+
 func TestManagerDelete(t *testing.T) {
 	m := newTestManager(t)
 	_ = m.Save(&TunnelConfig{Name: "t1"})

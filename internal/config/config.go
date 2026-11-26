@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -230,6 +231,9 @@ type Manager struct {
 	mu      sync.RWMutex
 	path    string
 	configs map[string]*TunnelConfig
+	// order 记录隧道的创建顺序，保证列表与持久化顺序稳定（map 遍历本身无序）。
+	// 新建追加到末尾，删除移除；编辑不改变位置。
+	order []string
 }
 
 // NewManager 创建配置管理器，配置文件保存到用户配置目录
@@ -272,24 +276,51 @@ func (m *Manager) load() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.order = m.order[:0]
 	for i := range list {
 		list[i].Status = StatusStopped
 		// 兼容旧版：把 cert_file/key_file 文件内容读入 cert_pem/key_pem
 		migrateTLSFromFiles(list[i].ProxyListeners, filepath.Dir(m.path))
+		// 以配置文件中的数组顺序作为稳定顺序（重复 ID 以首个位置为准）
+		if _, dup := m.configs[list[i].ID]; !dup {
+			m.order = append(m.order, list[i].ID)
+		}
 		m.configs[list[i].ID] = &list[i]
 	}
 	return nil
 }
 
-// List 返回所有配置
+// orderedLocked 按稳定顺序返回配置副本（调用方需持有读锁或写锁）。
+// 顺序优先取创建顺序；历史数据若缺少顺序记录，按 ID 排序追加，保证每次输出一致。
+func (m *Manager) orderedLocked() []TunnelConfig {
+	out := make([]TunnelConfig, 0, len(m.configs))
+	seen := make(map[string]bool, len(m.configs))
+	for _, id := range m.order {
+		if c, ok := m.configs[id]; ok && !seen[id] {
+			out = append(out, *c)
+			seen[id] = true
+		}
+	}
+	if len(out) != len(m.configs) {
+		missing := make([]string, 0, len(m.configs)-len(out))
+		for id := range m.configs {
+			if !seen[id] {
+				missing = append(missing, id)
+			}
+		}
+		sort.Strings(missing)
+		for _, id := range missing {
+			out = append(out, *m.configs[id])
+		}
+	}
+	return out
+}
+
+// List 返回所有配置（按创建顺序）
 func (m *Manager) List() []TunnelConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]TunnelConfig, 0, len(m.configs))
-	for _, c := range m.configs {
-		out = append(out, *c)
-	}
-	return out
+	return m.orderedLocked()
 }
 
 // Get 获取单个配置副本（避免调用方持有内部指针导致并发读写）
@@ -325,10 +356,15 @@ func (m *Manager) Save(cfg *TunnelConfig) error {
 	// 存储副本，避免外部修改影响内部状态
 	copied := *cfg
 	// 运行状态由 SetStatus 管理：保存配置不应把运行中的隧道覆盖为停止
-	if prev, ok := m.configs[cfg.ID]; ok && prev.Status != StatusStopped {
+	prev, exists := m.configs[cfg.ID]
+	if exists && prev.Status != StatusStopped {
 		copied.Status = prev.Status
 	}
 	m.configs[cfg.ID] = &copied
+	if !exists {
+		// 新建追加到末尾，保证列表位置稳定且符合创建顺序
+		m.order = append(m.order, cfg.ID)
+	}
 	return m.saveLocked()
 }
 
@@ -340,15 +376,18 @@ func (m *Manager) Delete(id string) error {
 		return fmt.Errorf("配置不存在: %s", id)
 	}
 	delete(m.configs, id)
+	for i, oid := range m.order {
+		if oid == id {
+			m.order = append(m.order[:i], m.order[i+1:]...)
+			break
+		}
+	}
 	return m.saveLocked()
 }
 
-// saveLocked 持久化（调用方已持有写锁）
+// saveLocked 持久化（调用方已持有写锁），按创建顺序写入
 func (m *Manager) saveLocked() error {
-	list := make([]TunnelConfig, 0, len(m.configs))
-	for _, c := range m.configs {
-		list = append(list, *c)
-	}
+	list := m.orderedLocked()
 	data, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
 		return err
