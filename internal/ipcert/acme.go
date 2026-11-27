@@ -105,7 +105,10 @@ func (m *Manager) issueWithACME(ctx context.Context, s Settings, ip string) ([]b
 		return nil, nil, time.Time{}, fmt.Errorf("生成 CSR 失败: %w", err)
 	}
 
-	der, _, err := client.CreateOrderCert(ctx, order.URI, csrDER, true)
+	// 注意：必须用 CreateCertFromOrder（内部使用 order.FinalizeURL 提交 CSR）。
+	// CreateOrderCert 的首参是 finalize URL，传 order.URI 会把 CSR POST 到订单地址，
+	// CA 会按 POST-as-GET 校验并返回 "must have an empty payload"。
+	der, _, err := client.CreateCertFromOrder(ctx, order, csrDER, true)
 	if err != nil {
 		return nil, nil, time.Time{}, fmt.Errorf("提交 CSR 并获取证书失败: %w", err)
 	}
