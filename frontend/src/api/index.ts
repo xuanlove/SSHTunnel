@@ -534,6 +534,46 @@ export async function getCityCatalog(country: string): Promise<CityCatalog> {
   return httpGet<CityCatalog>(`/api/geoip/cities?country=${encodeURIComponent(country)}`)
 }
 
+// ===== IP 证书（Let's Encrypt 自动签发/续期）=====
+export interface IPCERTSettings {
+  enabled: boolean
+  email?: string
+  directory_url?: string
+  ip?: string
+  http_port?: number
+}
+
+export interface IPCERTStatus {
+  enabled: boolean
+  ip: string
+  issuing: boolean
+  issued_at: string
+  not_after: string
+  renew_at: string
+  last_error: string
+  cert_path: string
+}
+
+export interface IPCERTState {
+  settings: IPCERTSettings
+  status: IPCERTStatus
+}
+
+export async function getIPCertSettings(): Promise<IPCERTState> {
+  if (!isWeb) return App.GetIPCERTSettings() as unknown as Promise<IPCERTState>
+  return httpGet<IPCERTState>('/api/settings/ipcert')
+}
+
+export async function saveIPCertSettings(s: IPCERTSettings): Promise<IPCERTState> {
+  if (!isWeb) return App.SaveIPCERTSettings(s) as unknown as Promise<IPCERTState>
+  return httpPut<IPCERTState>('/api/settings/ipcert', s)
+}
+
+export async function issueIPCertNow(): Promise<IPCERTStatus> {
+  if (!isWeb) return App.IssueIPCERTNow() as unknown as Promise<IPCERTStatus>
+  return httpPost<IPCERTStatus>('/api/settings/ipcert/issue')
+}
+
 // ===== WEB 面板 HTTPS（SSL）设置 =====
 export interface WebTLSSettings {
   enabled: boolean

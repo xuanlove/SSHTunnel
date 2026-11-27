@@ -91,6 +91,7 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **TLS 支持**：WEB 面板与 HTTPS 代理均可使用 TLS
 - **面板 HTTPS 可在线配置**：「系统设置」中开启 HTTPS 并直接粘贴证书/私钥内容（PEM），保存后监听热重启立即生效
 - **证书自动部署**：提供 Token 鉴权的 certd 部署 API，可自动替换 WEB 面板或 HTTPS 隧道监听器的证书并重启隧道
+- **IP 证书自动签发**：「系统设置 → IP 证书」可开启 Let's Encrypt IP 地址证书（shortlived，6 天）自动签发与续期；启用后 HTTPS 代理监听器证书留空时默认使用该证书，续期后动态生效、无需重启隧道
 - **最小权限账户引导**：新建/编辑隧道的跳板链下方内置 SSH 账户创建命令示例，支持公钥或密码认证，可按当前用户名一键生成并复制（无登录 Shell、仅开放 TCP 转发）
 
 ---
@@ -504,6 +505,29 @@ user1@host1:22, user2@host2:2222, user3@host3
 - 关闭开关即回退到内置国家库（城市规则不再生效，国家与 IP 规则不受影响）
 - 已启用但城市库文件缺失/损坏时，启动会自动回退内置国家库并记录告警
 - 也可用 `--geoip-db` 显式指定任意 Country / City 类型的 `.mmdb` 文件
+
+### IP 证书（Let's Encrypt 自动签发 / 续期）
+
+在「系统设置 → IP 证书」开启后，应用会使用 ACME `shortlived` profile 为指定公网 IP 申请 Let's Encrypt IP 地址证书，并在到期前（剩余约 1/3 时）自动续期。**启用后，HTTPS 代理监听器的证书留空时默认使用该证书**；续期后通过动态证书回调生效，无需重启隧道。
+
+前置条件：
+
+- 目标 IP 必须是**公网地址**（私网/回环地址会被拒绝）
+- 该 IP 的 **http-01 验证端口（默认 80）必须从互联网可达**；如使用 NAT/端口映射，请将公网 80 映射到本机 80
+- 端口 80 不能被其他服务占用（如 nginx）；可改为其他可被 CA 访问的端口，但 Let's Encrypt 固定访问 80，因此通常保持 80
+- systemd 安装方式已授予 `CAP_NET_BIND_SERVICE`，非 root 运行也能绑定 80
+
+配置项：
+
+| 字段 | 说明 |
+|------|------|
+| `enabled` | 是否启用 |
+| `ip` | 要签发的公网 IP；留空自动探测（`api.ip.sb` / `ifconfig.me` / `ipinfo.io`） |
+| `email` | ACME 账户邮箱（可选，用于到期提醒） |
+| `directory_url` | ACME 环境；留空为 Let's Encrypt 生产，可填 Staging 做测试 |
+| `http_port` | http-01 验证端口，默认 80 |
+
+证书与账户密钥保存在配置目录下的 `ipcert/`（`cert.pem`、`key.pem`、`account.key`，私钥权限 0600）。
 
 ### 代理端口连通性测试
 

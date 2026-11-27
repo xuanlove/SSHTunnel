@@ -11,6 +11,7 @@ import (
 
 	"sshtunnel/internal/alert"
 	"sshtunnel/internal/config"
+	"sshtunnel/internal/ipcert"
 	"sshtunnel/internal/logger"
 	"sshtunnel/internal/metrics"
 	"sshtunnel/internal/persist"
@@ -36,6 +37,7 @@ type App struct {
 	tunnelMgr   *tunnel.Manager
 	metrics     *metrics.Store
 	alerts      *alert.Engine
+	ipcert      *ipcert.Manager
 	version     string
 	runCtx      context.Context    // 后台采样上下文
 	runStop     context.CancelFunc // 停止后台采样
@@ -110,6 +112,21 @@ func (a *App) init() error {
 	if err != nil {
 		return fmt.Errorf("初始化告警引擎失败: %w", err)
 	}
+
+	// IP 证书（Let's Encrypt shortlived profile）：自动签发/续期，
+	// 启用后 HTTPS 代理监听器证书留空时默认使用该证书。
+	a.ipcert = ipcert.NewManager(filepath.Join(alertDir, "ipcert"), func(level, msg string) {
+		switch level {
+		case "error":
+			a.logger.Error(msg)
+		case "warn":
+			a.logger.Warn(msg)
+		default:
+			a.logger.Info(msg)
+		}
+	})
+	a.ipcert.Start(a.runCtx)
+	a.tunnelMgr.SetCertProvider(a.ipcert.TLSCertificate)
 
 	// 持久化：访问/告警历史 JSONL 分片（30 天保留）与指标快照
 	a.historyDir = filepath.Join(alertDir, "history")
@@ -277,6 +294,41 @@ func (a *App) DeleteAlertRule(id string) error {
 		return fmt.Errorf("告警引擎未初始化")
 	}
 	return a.alerts.DeleteRule(id)
+}
+
+// GetIPCERTSettings 返回 IP 证书设置与状态（桌面端）
+func (a *App) GetIPCERTSettings() map[string]interface{} {
+	if a.ipcert == nil {
+		return map[string]interface{}{}
+	}
+	return map[string]interface{}{
+		"settings": a.ipcert.Settings(),
+		"status":   a.ipcert.Status(),
+	}
+}
+
+// SaveIPCERTSettings 保存 IP 证书设置（桌面端）
+func (a *App) SaveIPCERTSettings(s ipcert.Settings) (map[string]interface{}, error) {
+	if a.ipcert == nil {
+		return nil, fmt.Errorf("IP 证书功能不可用")
+	}
+	if err := a.ipcert.ApplySettings(s); err != nil {
+		return nil, err
+	}
+	return a.GetIPCERTSettings(), nil
+}
+
+// IssueIPCERTNow 立即签发/续期 IP 证书（桌面端，异步）
+func (a *App) IssueIPCERTNow() ipcert.Status {
+	if a.ipcert == nil {
+		return ipcert.Status{}
+	}
+	go func() {
+		if err := a.ipcert.IssueNow(context.Background()); err != nil && a.logger != nil {
+			a.logger.Warnf("IP 证书签发失败: %v", err)
+		}
+	}()
+	return a.ipcert.Status()
 }
 
 // GetAlertHistory 返回最近的告警历史

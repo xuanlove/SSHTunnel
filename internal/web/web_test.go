@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"sshtunnel/internal/ipcert"
 	"sshtunnel/internal/logger"
 )
 
@@ -157,6 +158,52 @@ func TestWebTLSSettingsRejectsNonPEMFiles(t *testing.T) {
 	// 默认 GET 不返回私钥明文（脱敏断言见 TestWebTLSKeyMaskingAndReveal）
 	if resp.Data.KeyPEM != "" {
 		t.Errorf("默认 GET 不应返回 key_pem 明文，实际长度 %d", len(resp.Data.KeyPEM))
+	}
+}
+
+// IP 证书设置接口：GET 返回设置与状态；PUT 校验 IP 合法性
+func TestIPCertSettingsAPI(t *testing.T) {
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+	m := ipcert.NewManager(t.TempDir(), nil)
+	h.SetIPCert(m)
+
+	// GET：默认关闭
+	w := httptest.NewRecorder()
+	h.handleIPCert(w, httptest.NewRequest(http.MethodGet, "/api/settings/ipcert", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET 应返回 200, got %d", w.Code)
+	}
+	var got struct {
+		Data struct {
+			Settings ipcert.Settings `json:"settings"`
+			Status   ipcert.Status   `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if got.Data.Settings.Enabled {
+		t.Errorf("默认应为未启用")
+	}
+
+	// PUT：私网 IP 应被拒绝
+	body := `{"enabled":true,"ip":"10.0.0.1","http_port":80}`
+	w = httptest.NewRecorder()
+	h.handleIPCert(w, httptest.NewRequest(http.MethodPut, "/api/settings/ipcert", strings.NewReader(body)))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("私网 IP 应返回 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// PUT：公网 IP + 关闭状态应保存成功
+	body = `{"enabled":false,"ip":"203.0.113.10","http_port":8080,"email":"a@example.com"}`
+	w = httptest.NewRecorder()
+	h.handleIPCert(w, httptest.NewRequest(http.MethodPut, "/api/settings/ipcert", strings.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("保存合法设置应返回 200, got %d: %s", w.Code, w.Body.String())
+	}
+	s := m.Settings()
+	if s.IP != "203.0.113.10" || s.Port() != 8080 || s.Email != "a@example.com" {
+		t.Errorf("设置未正确保存: %+v", s)
 	}
 }
 

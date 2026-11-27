@@ -137,3 +137,15 @@ export function SetGeoIPEnabled(arg1) {
 export function TestProxyListener(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['TestProxyListener'](arg1, arg2, arg3, arg4);
 }
+
+export function GetIPCERTSettings() {
+  return window['go']['main']['App']['GetIPCERTSettings']();
+}
+
+export function SaveIPCERTSettings(arg1) {
+  return window['go']['main']['App']['SaveIPCERTSettings'](arg1);
+}
+
+export function IssueIPCERTNow() {
+  return window['go']['main']['App']['IssueIPCERTNow']();
+}

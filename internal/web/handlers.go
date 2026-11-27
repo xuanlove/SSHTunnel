@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 
 	"sshtunnel/internal/alert"
 	"sshtunnel/internal/config"
+	"sshtunnel/internal/ipcert"
 	"sshtunnel/internal/logger"
 	"sshtunnel/internal/metrics"
 	"sshtunnel/internal/persist"
@@ -45,7 +47,14 @@ type Handler struct {
 	repo         string // GitHub 仓库，用于版本检查
 	metrics      *metrics.Store
 	alerts       *alert.Engine
-	historyDir   string // 访问历史分片目录（检索/导出）
+	historyDir   string          // 访问历史分片目录（检索/导出）
+	ipcert       *ipcert.Manager // IP 证书（Let's Encrypt 自动签发/续期）
+}
+
+// SetIPCert 注入 IP 证书管理器
+func (h *Handler) SetIPCert(m *ipcert.Manager) *Handler {
+	h.ipcert = m
+	return h
 }
 
 // NewHandler 创建 API 处理器。
@@ -182,6 +191,8 @@ func (h *Handler) apiRouter() http.Handler {
 	mux.HandleFunc("/version", h.handleVersion)
 	mux.HandleFunc("/version/check", h.handleVersionCheck)
 	mux.HandleFunc("/auth/settings", h.handleAuthSettings)
+	mux.HandleFunc("/settings/ipcert", h.handleIPCert)
+	mux.HandleFunc("/settings/ipcert/issue", h.handleIPCertIssue)
 	mux.HandleFunc("/web/tls", h.handleWebTLS)
 	mux.HandleFunc("/web/tls/token", h.handleWebTLSToken)
 	mux.HandleFunc("/geoip/status", h.handleGeoIPStatus)
@@ -371,6 +382,56 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthSettings WEB 访问密码设置：GET 查询，PUT 开启/关闭并设置凭据。
 // 开启成功后返回 token，便于当前会话无缝续用（否则下一次请求即需登录）。
+// handleIPCert IP 证书设置与状态
+func (h *Handler) handleIPCert(w http.ResponseWriter, r *http.Request) {
+	if h.ipcert == nil {
+		writeError(w, http.StatusNotImplemented, "IP 证书功能不可用")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 0, "success", map[string]interface{}{
+			"settings": h.ipcert.Settings(),
+			"status":   h.ipcert.Status(),
+		})
+	case http.MethodPut:
+		var s ipcert.Settings
+		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
+			writeError(w, 400, "请求格式错误")
+			return
+		}
+		if err := h.ipcert.ApplySettings(s); err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		h.log.Infof("IP 证书设置已更新（启用=%v）", s.Enabled)
+		writeJSON(w, 0, "success", map[string]interface{}{
+			"settings": h.ipcert.Settings(),
+			"status":   h.ipcert.Status(),
+		})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "方法不允许")
+	}
+}
+
+// handleIPCertIssue 立即签发/续期 IP 证书（异步执行，结果看状态）
+func (h *Handler) handleIPCertIssue(w http.ResponseWriter, r *http.Request) {
+	if h.ipcert == nil {
+		writeError(w, http.StatusNotImplemented, "IP 证书功能不可用")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "方法不允许")
+		return
+	}
+	go func() {
+		if err := h.ipcert.IssueNow(context.Background()); err != nil {
+			h.log.Warnf("IP 证书签发失败: %v", err)
+		}
+	}()
+	writeJSON(w, 0, "已开始签发，请稍后刷新状态", h.ipcert.Status())
+}
+
 func (h *Handler) handleAuthSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:

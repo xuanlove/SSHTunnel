@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -63,6 +64,8 @@ type Tunnel struct {
 	keepAliveStop func() // 停止 SSH 心跳（nil 表示未启用）
 	// onFatal 致命错误回调（如重连次数耗尽），由 Manager 注入用于移除运行实例并更新状态
 	onFatal func()
+	// certProvider HTTPS 监听器证书留空时的动态证书来源（IP 证书）
+	certProvider func() (tls.Certificate, error)
 }
 
 // Manager 隧道管理器
@@ -75,6 +78,8 @@ type Manager struct {
 	log             *logger.Logger
 	startedAt       time.Time
 	statusCallbacks []func(tunnelID string, status string)
+	// certProvider HTTPS 监听器证书留空时的动态证书来源（IP 证书）
+	certProvider func() (tls.Certificate, error)
 }
 
 // accessHistoryCapacity 访问历史最大保留条数（进程内环形缓冲）
@@ -93,6 +98,14 @@ func NewManager(log *logger.Logger) *Manager {
 }
 
 // OnStatusChange 注册状态变更回调（支持多订阅者）
+// SetCertProvider 注入动态证书来源（IP 证书），HTTPS 监听器证书留空时使用。
+// 对之后启动的隧道生效；已运行的隧道在下次重连重建监听器时生效。
+func (m *Manager) SetCertProvider(p func() (tls.Certificate, error)) {
+	m.mu.Lock()
+	m.certProvider = p
+	m.mu.Unlock()
+}
+
 func (m *Manager) OnStatusChange(cb func(tunnelID string, status string)) {
 	m.mu.Lock()
 	m.statusCallbacks = append(m.statusCallbacks, cb)
@@ -105,11 +118,12 @@ var errTunnelStopped = errors.New("隧道已停止")
 // Start 启动指定隧道
 func (m *Manager) Start(cfg *config.TunnelConfig) error {
 	t := &Tunnel{
-		cfg:     cfg,
-		log:     m.log,
-		stopCh:  make(chan struct{}),
-		conns:   m.conns,
-		history: m.history,
+		cfg:          cfg,
+		log:          m.log,
+		stopCh:       make(chan struct{}),
+		conns:        m.conns,
+		history:      m.history,
+		certProvider: m.certProvider,
 	}
 	// 致命错误（如重连次数耗尽）：移除运行实例并通知状态变更，
 	// 避免隧道实际已断开却仍显示「运行中」。
@@ -519,6 +533,7 @@ func (t *Tunnel) connectAndServe() error {
 		if pm == nil {
 			pm = proxy.NewManager(client, t.log, t.cfg.ID, t.cfg.Name)
 			pm.SetTracker(t.conns, t.history)
+			pm.SetCertProvider(t.certProvider)
 			t.proxyMgr = pm
 		}
 		t.mu.Unlock()

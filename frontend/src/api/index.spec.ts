@@ -49,6 +49,26 @@ describe('api · web 模式（无 window.go，走 HTTP）', () => {
     await expect(api.getNodeStatus()).rejects.toThrow('端口被占用')
   })
 
+  it('IP 证书设置通过 /api/settings/ipcert 读写，签发走 POST', async () => {
+    const api = await loadApi()
+    const fetchMock = stubFetch((input: any, init?: RequestInit) => {
+      if (init?.method === 'PUT') return jsonRes({ code: 0, data: { settings: { enabled: true }, status: {} } })
+      if (init?.method === 'POST') return jsonRes({ code: 0, data: { issuing: true } })
+      return jsonRes({ code: 0, data: { settings: { enabled: false }, status: {} } })
+    })
+
+    await api.getIPCertSettings()
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/settings/ipcert')
+
+    await api.saveIPCertSettings({ enabled: true })
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/settings/ipcert')
+    expect(fetchMock.mock.calls[1][1]!.method).toBe('PUT')
+
+    await api.issueIPCertNow()
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/settings/ipcert/issue')
+    expect(fetchMock.mock.calls[2][1]!.method).toBe('POST')
+  })
+
   it('登录成功返回 token，setToken 后写入 localStorage 与后续请求头', async () => {
     const api = await loadApi()
     const fetchMock = stubFetch((_input, init) => {
@@ -242,6 +262,20 @@ describe('api · desktop 模式（window.go 注入，走 Wails 绑定）', () =>
     const api = await loadApi()
     await api.searchAccessHistory({ tunnel_id: 't1', result: 'denied' })
     expect(SearchAccessHistory).toHaveBeenCalledWith({ tunnel_id: 't1', result: 'denied' })
+  })
+
+  it('IP 证书设置走桌面端绑定', async () => {
+    const state = { settings: { enabled: true }, status: { not_after: '2026-12-01T00:00:00Z' } }
+    const GetIPCERTSettings = vi.fn().mockResolvedValue(state)
+    const SaveIPCERTSettings = vi.fn().mockResolvedValue(state)
+    const IssueIPCERTNow = vi.fn().mockResolvedValue(state.status)
+    stubGoApp({ GetIPCERTSettings, SaveIPCERTSettings, IssueIPCERTNow })
+    const api = await loadApi()
+
+    expect(await api.getIPCertSettings()).toEqual(state)
+    expect(await api.saveIPCertSettings({ enabled: true })).toEqual(state)
+    expect(SaveIPCERTSettings).toHaveBeenCalledWith({ enabled: true })
+    expect(await api.issueIPCertNow()).toEqual(state.status)
   })
 
   it('onLogNew 桌面端经 EventsOnMultiple 订阅 log:new', async () => {

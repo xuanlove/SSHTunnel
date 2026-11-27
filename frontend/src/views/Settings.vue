@@ -31,6 +31,7 @@ onMounted(async () => {
   }
   await loadGeoStatus()
   await loadWebTLS()
+  await loadIPCert()
   await loadAlerts()
   if (!isWebMode) return
   try {
@@ -125,6 +126,72 @@ function formatSize(bytes: number): string {
 }
 
 const geoCityDownloaded = computed(() => !!geoStatus.value?.city_db_exists)
+
+const STAGING_DIRECTORY = 'https://acme-staging-v02.api.letsencrypt.org/directory'
+
+// ===== IP 证书（Let's Encrypt 自动签发/续期）=====
+const ipCert = ref<api.IPCERTSettings>({
+  enabled: false,
+  email: '',
+  directory_url: '',
+  ip: '',
+  http_port: 80,
+})
+const ipCertStatus = ref<api.IPCERTStatus | null>(null)
+const ipCertSaving = ref(false)
+const ipCertIssuing = ref(false)
+
+async function loadIPCert() {
+  try {
+    const st = await api.getIPCertSettings()
+    ipCert.value = { ...st.settings, http_port: st.settings.http_port || 80 }
+    ipCertStatus.value = st.status
+  } catch {
+    // 旧版本后端或未启用时忽略
+  }
+}
+
+async function refreshIPCertStatus() {
+  try {
+    const st = await api.getIPCertSettings()
+    ipCertStatus.value = st.status
+  } catch {
+    // 忽略
+  }
+}
+
+async function handleSaveIPCert() {
+  ipCertSaving.value = true
+  try {
+    const st = await api.saveIPCertSettings({ ...ipCert.value })
+    ipCert.value = { ...st.settings, http_port: st.settings.http_port || 80 }
+    ipCertStatus.value = st.status
+    ElMessage.success(st.settings.enabled ? '已保存，正在自动签发（需要该 IP 的 80 端口公网可达）' : '已保存')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '保存失败')
+  } finally {
+    ipCertSaving.value = false
+  }
+}
+
+async function handleIssueIPCert() {
+  ipCertIssuing.value = true
+  try {
+    await api.issueIPCertNow()
+    ElMessage.info('已开始签发，通常 10-60 秒完成，可稍后刷新状态')
+    // 轮询几次状态，便于用户看到结果
+    for (let i = 0; i < 12; i++) {
+      await new Promise(r => setTimeout(r, 5000))
+      await refreshIPCertStatus()
+      const st = ipCertStatus.value
+      if (st && !st.issuing && (st.not_after || st.last_error)) break
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.message || '签发请求失败')
+  } finally {
+    ipCertIssuing.value = false
+  }
+}
 
 // ===== WEB 面板 HTTPS（SSL）=====
 const webTls = ref({
@@ -663,6 +730,54 @@ function tunnelName(id?: string): string {
         <code>POST /api/cert/deploy</code> 部署证书，body 示例：<br />
         <code>{"target":"tunnel","tunnel_id":"...","listener_id":"...","cert_pem":"...","key_pem":"...","restart":true}</code><br />
         <code>target=web</code> 时写入 WEB 面板证书并重启监听；<code>target=tunnel</code> 时写入 HTTPS 监听器证书并重启对应隧道。
+      </div>
+    </el-card>
+
+    <el-card class="panel">
+      <template #header><span>IP 证书（Let's Encrypt 自动签发 / 续期）</span></template>
+      <p class="desc">
+        Let's Encrypt 的 IP 证书为 6 天短期证书，到期前自动续期。签发需要该公网 IP 的
+        <b>80 端口从互联网可达</b>（http-01 验证）。启用后，HTTPS 代理监听器的证书留空时默认使用此证书。
+      </p>
+      <div class="auth-form">
+        <el-switch v-model="ipCert.enabled" active-text="启用 IP 证书" />
+        <el-tag v-if="ipCertStatus?.issuing" type="warning" size="small">签发中…</el-tag>
+        <el-tag v-else-if="ipCertStatus?.not_after" type="success" size="small">已签发</el-tag>
+      </div>
+      <el-row :gutter="12">
+        <el-col :span="12">
+          <div class="field-label">公网 IP（留空自动探测）</div>
+          <el-input v-model="ipCert.ip" placeholder="例如 203.0.113.10" />
+        </el-col>
+        <el-col :span="6">
+          <div class="field-label">http-01 端口</div>
+          <el-input-number v-model="ipCert.http_port" :min="1" :max="65535" controls-position="right" style="width: 100%" />
+        </el-col>
+        <el-col :span="6">
+          <div class="field-label">ACME 环境</div>
+          <el-select v-model="ipCert.directory_url" style="width: 100%">
+            <el-option label="生产（Let's Encrypt）" value="" />
+            <el-option label="测试（Staging，不受信任）" :value="STAGING_DIRECTORY" />
+          </el-select>
+        </el-col>
+      </el-row>
+      <div class="field-label" style="margin-top: 10px">账户邮箱（可选，用于到期提醒）</div>
+      <el-input v-model="ipCert.email" placeholder="you@example.com" style="width: 320px" />
+      <div class="info-row" v-if="ipCertStatus?.ip">
+        <span class="label">证书 IP</span><span>{{ ipCertStatus.ip }}</span>
+      </div>
+      <div class="info-row" v-if="ipCertStatus?.not_after">
+        <span class="label">有效期至</span><span>{{ formatTime(ipCertStatus.not_after) }}</span>
+      </div>
+      <div class="info-row" v-if="ipCertStatus?.renew_at">
+        <span class="label">下次续期</span><span>{{ formatTime(ipCertStatus.renew_at) }}</span>
+      </div>
+      <div class="fw-tip" v-if="ipCertStatus?.last_error" style="color: #f56c6c">
+        最近错误：{{ ipCertStatus.last_error }}
+      </div>
+      <div class="geo-actions" style="margin-top: 10px">
+        <el-button type="primary" :loading="ipCertSaving" @click="handleSaveIPCert">保存</el-button>
+        <el-button :loading="ipCertIssuing" @click="handleIssueIPCert">立即签发 / 续期</el-button>
       </div>
     </el-card>
 

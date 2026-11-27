@@ -337,7 +337,7 @@ async function handleTestProxy(pl: ProxyListener) {
         />
         <div class="tls-actions">
           <el-button size="small" @click="genCert(idx)">生成自签证书</el-button>
-          <span class="fw-hint">也可由 certd 等工具通过部署 API 自动写入证书内容</span>
+          <span class="fw-hint">留空则使用「系统设置 → IP 证书」中的证书（需已启用）；也可由 certd 等工具通过部署 API 自动写入</span>
         </div>
         <CertSummary :info="certInfos[pl.id] || null" :error="certErrors[pl.id]" />
       </div>

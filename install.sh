@@ -374,6 +374,10 @@ RestartSec=5s
 StartLimitBurst=3
 StartLimitIntervalSec=60
 
+# 允许非 root 服务绑定 80 端口（IP 证书 http-01 验证需要）
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
 # 资源与安全限制
 LimitNOFILE=65536
 NoNewPrivileges=true

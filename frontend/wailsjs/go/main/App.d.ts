@@ -70,3 +70,9 @@ export function GetNodeStatus(arg1:number):Promise<any>;
 export function SetGeoIPEnabled(arg1:boolean):Promise<any>;
 
 export function TestProxyListener(arg1:string,arg2:number,arg3:string,arg4:string):Promise<any>;
+
+export function GetIPCERTSettings():Promise<any>;
+
+export function SaveIPCERTSettings(arg1:any):Promise<any>;
+
+export function IssueIPCERTNow():Promise<any>;

@@ -50,6 +50,8 @@ type httpServer struct {
 	auth   *config.AuthConfig
 	helper authHelper
 	tlsCfg *config.TLSConfig
+	// certProvider 动态证书来源（IP 证书）：TLS 配置留空时使用，续期后无需重启监听
+	certProvider func() (tls.Certificate, error)
 }
 
 func newHTTPServer(base *BaseServer, auth *config.AuthConfig, tlsCfg *config.TLSConfig) *httpServer {
@@ -71,22 +73,37 @@ func (s *httpServer) Start(ctx context.Context) error {
 
 	// HTTPS 代理：包装 TLS 监听器（证书以 PEM 文本形式配置）
 	if s.tlsCfg != nil {
-		if strings.TrimSpace(s.tlsCfg.CertPEM) == "" || strings.TrimSpace(s.tlsCfg.KeyPEM) == "" {
-			ln.Close()
-			s.setStatus(StatusListenerError)
-			s.log("error", "未配置 HTTPS 证书内容（证书/私钥 PEM）")
-			return errMissingTLSCert
+		empty := strings.TrimSpace(s.tlsCfg.CertPEM) == "" || strings.TrimSpace(s.tlsCfg.KeyPEM) == ""
+		if empty {
+			// 证书留空：使用系统设置中的 IP 证书（动态获取，续期后自动生效）
+			if s.certProvider == nil {
+				ln.Close()
+				s.setStatus(StatusListenerError)
+				s.log("error", "未配置 HTTPS 证书内容（证书/私钥 PEM）")
+				return errMissingTLSCert
+			}
+			ln = tls.NewListener(ln, &tls.Config{
+				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+					cert, err := s.certProvider()
+					if err != nil {
+						return nil, err
+					}
+					return &cert, nil
+				},
+				MinVersion: tls.VersionTLS12,
+			})
+		} else {
+			cert, err := tls.X509KeyPair([]byte(s.tlsCfg.CertPEM), []byte(s.tlsCfg.KeyPEM))
+			if err != nil {
+				ln.Close()
+				s.setStatus(StatusListenerError)
+				s.log("error", "解析 TLS 证书失败: "+err.Error())
+				return err
+			}
+			ln = tls.NewListener(ln, &tls.Config{
+				Certificates: []tls.Certificate{cert},
+			})
 		}
-		cert, err := tls.X509KeyPair([]byte(s.tlsCfg.CertPEM), []byte(s.tlsCfg.KeyPEM))
-		if err != nil {
-			ln.Close()
-			s.setStatus(StatusListenerError)
-			s.log("error", "解析 TLS 证书失败: "+err.Error())
-			return err
-		}
-		ln = tls.NewListener(ln, &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		})
 	}
 
 	s.mu.Lock()

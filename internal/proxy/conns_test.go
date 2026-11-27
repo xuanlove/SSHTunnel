@@ -164,7 +164,7 @@ func TestSOCKS5Tracking(t *testing.T) {
 		TunnelName: "测试隧道",
 		Conns:      reg,
 		History:    hist,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("构建 SOCKS5 服务失败: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestHTTPConnectTracking(t *testing.T) {
 		TunnelName: "HTTP 隧道",
 		Conns:      reg,
 		History:    hist,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("构建 HTTP 代理失败: %v", err)
 	}

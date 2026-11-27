@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -306,13 +307,14 @@ func noopLog(level, msg string) {}
 
 // BuildServer 根据配置构建对应协议的服务器
 func BuildServer(lc config.ProxyListener, dialer Dialer, log LogFunc) (Server, error) {
-	return buildServerWithStats(lc, dialer, log, &TrafficStats{}, nil)
+	return buildServerWithStats(lc, dialer, log, &TrafficStats{}, nil, nil)
 }
 
 // buildServerWithStats 使用指定统计对象构建服务器。
 // Manager 在同一监听器 ID 重建时传入原对象，使「累计」数据跨重连保留；
-// tracker 为连接与访问历史采集上下文，nil 表示不采集。
-func buildServerWithStats(lc config.ProxyListener, dialer Dialer, log LogFunc, stats *TrafficStats, tracker *Tracker) (Server, error) {
+// tracker 为连接与访问历史采集上下文，nil 表示不采集；
+// certProvider 为 HTTPS 监听器证书留空时的动态证书来源（IP 证书），nil 表示不可用。
+func buildServerWithStats(lc config.ProxyListener, dialer Dialer, log LogFunc, stats *TrafficStats, tracker *Tracker, certProvider func() (tls.Certificate, error)) (Server, error) {
 	if log == nil {
 		log = noopLog
 	}
@@ -359,7 +361,9 @@ func buildServerWithStats(lc config.ProxyListener, dialer Dialer, log LogFunc, s
 		if lc.TLS == nil {
 			return nil, fmt.Errorf("HTTPS 代理需要 TLS 证书配置")
 		}
-		return newHTTPServer(base, lc.Auth, lc.TLS), nil
+		srv := newHTTPServer(base, lc.Auth, lc.TLS)
+		srv.certProvider = certProvider
+		return srv, nil
 	case config.ProxySOCKS4:
 		return newSOCKS4Server(base, lc.Auth), nil
 	case config.ProxySOCKS5:

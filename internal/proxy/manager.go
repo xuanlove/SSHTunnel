@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"sort"
 	"sync"
@@ -22,6 +23,8 @@ type Manager struct {
 	tunnelName string
 	conns      *ConnRegistry  // 活动连接注册表（可跨隧道共享）
 	history    *AccessHistory // 结构化访问历史（可跨隧道共享）
+	// certProvider HTTPS 监听器证书留空时的动态证书来源（IP 证书）
+	certProvider func() (tls.Certificate, error)
 }
 
 // NewManager 创建代理管理器
@@ -49,6 +52,13 @@ func (m *Manager) SetTracker(conns *ConnRegistry, history *AccessHistory) {
 func (m *Manager) SetDialer(d Dialer) {
 	m.mu.Lock()
 	m.dialer = d
+	m.mu.Unlock()
+}
+
+// SetCertProvider 注入动态证书来源（IP 证书）；HTTPS 监听器证书留空时使用
+func (m *Manager) SetCertProvider(p func() (tls.Certificate, error)) {
+	m.mu.Lock()
+	m.certProvider = p
 	m.mu.Unlock()
 }
 
@@ -93,7 +103,7 @@ func (m *Manager) StartOne(ctx context.Context, lc config.ProxyListener) error {
 		default:
 			m.log.TunnelInfo(m.tunnelID, "["+string(lc.Protocol)+":"+fmt.Sprintf("%d", lc.ListenPort)+"] "+msg)
 		}
-	}, st, tracker)
+	}, st, tracker, m.certProvider)
 	if err != nil {
 		return err
 	}

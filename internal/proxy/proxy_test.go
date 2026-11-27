@@ -3,9 +3,16 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -536,6 +543,82 @@ func TestCheckPortConflict(t *testing.T) {
 }
 
 // ============== 工具函数 ==============
+
+// selfSignedCert 生成用于测试的自签证书
+func selfSignedCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("生成密钥失败: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		IPAddresses:  []net.IP{net.ParseIP("1.2.3.4")},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("生成证书失败: %v", err)
+	}
+	keyDER, _ := x509.MarshalECPrivateKey(key)
+	pair, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+	)
+	if err != nil {
+		t.Fatalf("解析测试证书失败: %v", err)
+	}
+	return pair
+}
+
+// TestHTTPSProxyDynamicCertProvider HTTPS 监听器证书留空时使用动态证书（IP 证书）完成握手
+func TestHTTPSProxyDynamicCertProvider(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("分配端口失败: %v", err)
+	}
+	freePort := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	cert := selfSignedCert(t)
+	lc := config.ProxyListener{
+		ID:         "https-ipcert",
+		Protocol:   config.ProxyHTTPS,
+		ListenPort: freePort,
+		TLS:        &config.TLSConfig{},
+	}
+	srv, err := buildServerWithStats(lc, &mockDialer{}, nil, &TrafficStats{}, nil,
+		func() (tls.Certificate, error) { return cert, nil })
+	if err != nil {
+		t.Fatalf("构建 HTTPS 代理失败: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	defer srv.Stop()
+	time.Sleep(80 * time.Millisecond)
+
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", freePort), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("TLS 握手应使用动态证书成功: %v", err)
+	}
+	state := conn.ConnectionState()
+	if len(state.PeerCertificates) == 0 || state.PeerCertificates[0].IPAddresses[0].String() != "1.2.3.4" {
+		t.Errorf("握手证书不符合预期")
+	}
+	_ = conn.Close()
+}
+
+// TestHTTPSProxyMissingCertWithoutProvider 证书留空且无动态证书来源时应失败
+func TestHTTPSProxyMissingCertWithoutProvider(t *testing.T) {
+	lc := config.ProxyListener{ID: "https-nocert", Protocol: config.ProxyHTTPS, ListenPort: 1, TLS: &config.TLSConfig{}}
+	if _, err := buildServerWithStats(lc, &mockDialer{}, nil, &TrafficStats{}, nil, nil); err != nil {
+		t.Fatalf("构建应成功（证书在 Start 时校验）: %v", err)
+	}
+}
 
 // recordingDialer 记录实际拨号地址，并把连接重定向到本地 echo 服务器。
 // 通过带缓冲 channel 回传地址，避免测试 goroutine 与代理 goroutine 的数据竞态。

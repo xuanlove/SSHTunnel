@@ -185,6 +185,7 @@ func startWebServer(app *App, authUser, authPass string) error {
 		WithMetrics(app.metrics).
 		WithAlert(app.alerts).
 		WithHistoryDir(app.historyDir)
+	handler.SetIPCert(app.ipcert)
 
 	// 告警事件实时广播到 WEB 客户端
 	if app.alerts != nil {

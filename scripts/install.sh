@@ -597,6 +597,9 @@ Environment=XDG_DATA_HOME=/var/lib/sshtunnel/data
 ExecStart=${target} ${exec_args} --auth=\${SSHTUNNEL_AUTH}
 Restart=on-failure
 RestartSec=5
+# 允许非 root 服务绑定 80 端口（IP 证书 http-01 验证需要）
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
