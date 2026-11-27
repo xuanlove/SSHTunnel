@@ -127,13 +127,15 @@ function formatSize(bytes: number): string {
 
 const geoCityDownloaded = computed(() => !!geoStatus.value?.city_db_exists)
 
+const PRODUCTION_DIRECTORY = 'https://acme-v02.api.letsencrypt.org/directory'
 const STAGING_DIRECTORY = 'https://acme-staging-v02.api.letsencrypt.org/directory'
 
 // ===== IP 证书（Let's Encrypt 自动签发/续期）=====
 const ipCert = ref<api.IPCERTSettings>({
   enabled: false,
   email: '',
-  directory_url: '',
+  // 使用显式生产地址：el-option 的 value 不能为空字符串，否则会被当作占位而无法选中
+  directory_url: PRODUCTION_DIRECTORY,
   ip: '',
   http_port: 80,
 })
@@ -144,7 +146,12 @@ const ipCertIssuing = ref(false)
 async function loadIPCert() {
   try {
     const st = await api.getIPCertSettings()
-    ipCert.value = { ...st.settings, http_port: st.settings.http_port || 80 }
+    ipCert.value = {
+      ...st.settings,
+      // 后端留空表示生产环境；界面用显式地址，避免空值选项无法选中
+      directory_url: st.settings.directory_url || PRODUCTION_DIRECTORY,
+      http_port: st.settings.http_port || 80,
+    }
     ipCertStatus.value = st.status
   } catch {
     // 旧版本后端或未启用时忽略
@@ -756,7 +763,7 @@ function tunnelName(id?: string): string {
         <el-col :span="6">
           <div class="field-label">ACME 环境</div>
           <el-select v-model="ipCert.directory_url" style="width: 100%">
-            <el-option label="生产（Let's Encrypt）" value="" />
+            <el-option label="生产（Let's Encrypt）" :value="PRODUCTION_DIRECTORY" />
             <el-option label="测试（Staging，不受信任）" :value="STAGING_DIRECTORY" />
           </el-select>
         </el-col>
