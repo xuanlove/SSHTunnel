@@ -36,13 +36,17 @@ const (
 	DefaultHTTPPort = 80
 
 	renewCheckInterval = 30 * time.Minute
-	issueTimeout       = 5 * time.Minute
+	// defaultIssueTimeout 单次签发的最长耗时
+	defaultIssueTimeout = 5 * time.Minute
 	// renewRatio 剩余有效期低于 1/3 时续期（6 天证书约提前 2 天）
 	renewRatio = 2.0 / 3.0
 )
 
 // ErrDisabled IP 证书功能未启用
 var ErrDisabled = errors.New("IP 证书未启用")
+
+// errIssuing 已有签发任务正在进行
+var errIssuing = errors.New("正在签发中，请稍候")
 
 // Settings IP 证书设置
 type Settings struct {
@@ -99,6 +103,8 @@ type Manager struct {
 	// 便于测试注入
 	detectIP func(ctx context.Context) (string, error)
 	issueFn  func(ctx context.Context, s Settings, ip string) (certPEM, keyPEM []byte, notAfter time.Time, err error)
+	// issueTimeout 单次签发的最长耗时（测试可调整）
+	issueTimeout time.Duration
 }
 
 // NewManager 创建管理器并加载已保存的设置与证书
@@ -106,7 +112,7 @@ func NewManager(dir string, log func(level, msg string)) *Manager {
 	if log == nil {
 		log = func(string, string) {}
 	}
-	m := &Manager{dir: dir, log: log}
+	m := &Manager{dir: dir, log: log, issueTimeout: defaultIssueTimeout}
 	m.detectIP = detectPublicIP
 	m.issueFn = m.issueWithACME
 	m.loadSettings()
@@ -218,11 +224,13 @@ func (m *Manager) ApplySettings(s Settings) error {
 	if err != nil {
 		return err
 	}
+	// 写入文件与更新内存状态放在同一把锁内：与 IssueNow 的 IP 回写串行，
+	// 避免设置文件被较旧的内容覆盖
+	m.mu.Lock()
 	if err := persist.WriteFileAtomic(m.settingsPath(), data); err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("保存 IP 证书设置失败: %w", err)
 	}
-
-	m.mu.Lock()
 	m.settings = s
 	m.lastErr = ""
 	needIssue := m.shouldIssueLocked(s)
@@ -235,12 +243,16 @@ func (m *Manager) ApplySettings(s Settings) error {
 }
 
 // shouldIssueLocked 判断是否需要签发（调用方需持有锁）：
-// 未启用不签发；无证书或证书 IP 与设置不一致时需要（重新）签发
+// 未启用不签发；无证书、已到续期时间点、或证书 IP 与设置不一致时需要（重新）签发
 func (m *Manager) shouldIssueLocked(s Settings) bool {
 	if !s.Enabled {
 		return false
 	}
 	if m.cert == nil || m.cert.Leaf == nil {
+		return true
+	}
+	// 已到续期时间点（含停机期间已过期）：立即续期，不等下一个检查周期
+	if !time.Now().Before(m.renewAt) {
 		return true
 	}
 	if s.IP == "" {
@@ -258,7 +270,8 @@ func (m *Manager) shouldIssueLocked(s Settings) bool {
 	return true
 }
 
-// Start 启动续期检查循环（幂等）
+// Start 启动续期检查循环（幂等）。循环开始时会立即检查一次，
+// 停机期间已到续期时间点（甚至已过期）的证书会被立即续期
 func (m *Manager) Start(parent context.Context) {
 	m.mu.Lock()
 	if m.started {
@@ -268,13 +281,9 @@ func (m *Manager) Start(parent context.Context) {
 	m.started = true
 	ctx, cancel := context.WithCancel(parent)
 	m.cancel = cancel
-	needIssue := m.shouldIssueLocked(m.settings)
 	m.mu.Unlock()
 
-	if needIssue {
-		go m.issueAsync()
-	}
-	go m.loop(ctx)
+	go m.loop(ctx, renewCheckInterval)
 }
 
 // Stop 停止续期循环
@@ -289,43 +298,40 @@ func (m *Manager) Stop() {
 	}
 }
 
-func (m *Manager) loop(ctx context.Context) {
-	t := time.NewTicker(renewCheckInterval)
+// loop 周期检查是否需要续期；开始时先立即检查一次，不等首个 tick
+func (m *Manager) loop(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
+		if m.renewNeeded() {
+			m.issueAsync()
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if m.renewNeeded() {
-				m.issueAsync()
-			}
 		}
 	}
 }
 
-// renewNeeded 判断是否需要（重新）签发
+// renewNeeded 判断是否需要（重新）签发；与启动、保存设置时的判断使用同一套规则
 func (m *Manager) renewNeeded() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if !m.settings.Enabled {
-		return false
-	}
-	if m.cert == nil {
-		return true
-	}
-	return !time.Now().Before(m.renewAt)
+	return m.shouldIssueLocked(m.settings)
 }
 
 func (m *Manager) issueAsync() {
-	ctx, cancel := context.WithTimeout(context.Background(), issueTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), m.issueTimeout)
 	defer cancel()
-	if err := m.IssueNow(ctx); err != nil {
+	// 「正在签发中」不算失败：进行中的签发完成后会按最新设置决定是否再签发
+	if err := m.IssueNow(ctx); err != nil && !errors.Is(err, errIssuing) {
 		m.log("error", "IP 证书签发失败: "+err.Error())
 	}
 }
 
-// IssueNow 立即签发/续期（同步）
+// IssueNow 立即签发/续期（同步）。ctx 未设置超时（如界面「立即签发」）时使用默认超时，
+// 避免 ACME 请求卡住导致「签发中」标记一直不释放、后续续期全部被拒绝
 func (m *Manager) IssueNow(ctx context.Context) error {
 	m.mu.Lock()
 	if !m.settings.Enabled {
@@ -334,18 +340,36 @@ func (m *Manager) IssueNow(ctx context.Context) error {
 	}
 	if m.issuing {
 		m.mu.Unlock()
-		return errors.New("正在签发中，请稍候")
+		return errIssuing
 	}
 	m.issuing = true
 	s := m.settings
 	m.mu.Unlock()
 
-	defer func() {
-		m.mu.Lock()
-		m.issuing = false
-		m.mu.Unlock()
-	}()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.issueTimeout)
+		defer cancel()
+	}
 
+	ip, err := m.doIssue(ctx, s)
+
+	m.mu.Lock()
+	m.issuing = false
+	// 签发期间用户把 IP 改成了别的地址：本次签发对应的 IP 已不是用户想要的，
+	// 立即按新设置再签发一次（保存设置时触发的签发会因「正在签发中」被跳过）。
+	// 这里只比较 IP、不看续期时间点，避免签发结果本身已临近过期时反复重签
+	reissue := m.settings.IP != "" && m.settings.IP != ip
+	m.mu.Unlock()
+	if reissue {
+		go m.issueAsync()
+	}
+	return err
+}
+
+// doIssue 执行一次签发：确定 IP → 调用签发函数 → 落盘并更新内存状态。
+// 返回本次签发针对的 IP（探测失败时为空）
+func (m *Manager) doIssue(ctx context.Context, s Settings) (string, error) {
 	m.setError("")
 	ip := s.IP
 	if ip == "" {
@@ -353,44 +377,44 @@ func (m *Manager) IssueNow(ctx context.Context) error {
 		ip, err = m.detectIP(ctx)
 		if err != nil {
 			m.setError(err.Error())
-			return err
+			return "", err
 		}
 	}
 	if _, err := parsePublicIP(ip); err != nil {
 		m.setError(err.Error())
-		return err
+		return ip, err
 	}
 
 	m.log("info", fmt.Sprintf("开始为 %s 签发 IP 证书（%s）", ip, s.Directory()))
 	certPEM, keyPEM, notAfter, err := m.issueFn(ctx, s, ip)
 	if err != nil {
 		m.setError(err.Error())
-		return err
+		return ip, err
 	}
 
 	if err := os.MkdirAll(m.dir, 0700); err != nil {
 		m.setError(err.Error())
-		return err
+		return ip, err
 	}
 	if err := persist.WriteFileAtomic(m.certPath(), certPEM); err != nil {
 		m.setError(err.Error())
-		return err
+		return ip, err
 	}
 	if err := persist.WriteFileAtomic(m.keyPath(), keyPEM); err != nil {
 		m.setError(err.Error())
-		return err
+		return ip, err
 	}
 	_ = os.Chmod(m.keyPath(), 0600)
 
 	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		m.setError(err.Error())
-		return err
+		return ip, err
 	}
 	leaf, err := x509.ParseCertificate(pair.Certificate[0])
 	if err != nil {
 		m.setError(err.Error())
-		return err
+		return ip, err
 	}
 	pair.Leaf = leaf
 
@@ -399,20 +423,21 @@ func (m *Manager) IssueNow(ctx context.Context) error {
 	m.issuedAt = leaf.NotBefore
 	m.notAfter = leaf.NotAfter
 	m.renewAt = renewTime(leaf.NotBefore, leaf.NotAfter)
-	m.settings.IP = ip
 	m.lastErr = ""
-	m.mu.Unlock()
-
-	// 自动探测得到的 IP 回写到设置文件，便于界面展示与实际签发保持一致
-	if s.IP != ip {
-		s.IP = ip
-		if data, err := json.MarshalIndent(s, "", "  "); err == nil {
+	// 自动探测得到的 IP 回写设置，便于界面展示与实际签发保持一致。
+	// 仅当签发期间用户没有改动 IP 时才回写，且始终写入当前设置而非开始签发时的快照，
+	// 以免覆盖用户在签发过程中保存的修改
+	if m.settings.IP == s.IP && m.settings.IP != ip {
+		m.settings.IP = ip
+		// 持锁写入：与 ApplySettings 的保存串行
+		if data, err := json.MarshalIndent(m.settings, "", "  "); err == nil {
 			_ = persist.WriteFileAtomic(m.settingsPath(), data)
 		}
 	}
+	m.mu.Unlock()
 
 	m.log("info", fmt.Sprintf("IP 证书签发成功：%s，有效期至 %s", ip, notAfter.Format(time.RFC3339)))
-	return nil
+	return ip, nil
 }
 
 func (m *Manager) setError(msg string) {

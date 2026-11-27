@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -617,6 +619,73 @@ func TestHTTPSProxyMissingCertWithoutProvider(t *testing.T) {
 	lc := config.ProxyListener{ID: "https-nocert", Protocol: config.ProxyHTTPS, ListenPort: 1, TLS: &config.TLSConfig{}}
 	if _, err := buildServerWithStats(lc, &mockDialer{}, nil, &TrafficStats{}, nil, nil); err != nil {
 		t.Fatalf("构建应成功（证书在 Start 时校验）: %v", err)
+	}
+}
+
+// TestHTTPSProxyDynamicCertUnavailable 证书来源不可用（如 IP 证书尚未签发）时：
+// 监听器照常启动并输出提示；握手失败日志限流输出，
+// 避免「监听显示运行中但连不上」无从排查
+func TestHTTPSProxyDynamicCertUnavailable(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("分配端口失败: %v", err)
+	}
+	freePort := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	var mu sync.Mutex
+	var warns int
+	log := func(level, msg string) {
+		if level != "warn" {
+			return
+		}
+		mu.Lock()
+		warns++
+		mu.Unlock()
+	}
+	warnCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return warns
+	}
+
+	lc := config.ProxyListener{
+		ID:         "https-nocert-yet",
+		Protocol:   config.ProxyHTTPS,
+		ListenPort: freePort,
+		TLS:        &config.TLSConfig{},
+	}
+	srv, err := buildServerWithStats(lc, &mockDialer{}, log, &TrafficStats{}, nil,
+		func() (tls.Certificate, error) { return tls.Certificate{}, errors.New("IP 证书尚未签发") })
+	if err != nil {
+		t.Fatalf("构建 HTTPS 代理失败: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	defer srv.Stop()
+	time.Sleep(80 * time.Millisecond)
+
+	// 启动时预检一次并提示
+	if got := warnCount(); got != 1 {
+		t.Fatalf("启动时应提示证书不可用, 实际 %d 条", got)
+	}
+
+	// 多次握手均失败；握手失败日志在窗口期内只记录一条
+	for i := 0; i < 3; i++ {
+		conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", freePort), &tls.Config{InsecureSkipVerify: true})
+		if err == nil {
+			_ = conn.Close()
+			t.Fatalf("证书不可用时握手应失败")
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for warnCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := warnCount(); got != 2 {
+		t.Errorf("握手失败日志应限流为一条, 实际共 %d 条（含启动提示 1 条）", got)
 	}
 }
 

@@ -7,10 +7,12 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"sshtunnel/internal/config"
@@ -18,6 +20,12 @@ import (
 
 // errHeaderTooLarge 请求头累计超过上限
 var errHeaderTooLarge = errors.New("请求头过大")
+
+// errTLSCertUnavailable 动态证书来源（IP 证书）不可用；握手失败日志据此识别
+var errTLSCertUnavailable = errors.New("HTTPS 证书不可用")
+
+// certErrLogInterval 「证书不可用」握手失败日志的最小间隔
+const certErrLogInterval = time.Minute
 
 // readBoundedHeader 有界读取请求头：逐段读取直到空行（CRLF CRLF），
 // 累计字节数超过 limit 立即返回 errHeaderTooLarge，
@@ -52,6 +60,8 @@ type httpServer struct {
 	tlsCfg *config.TLSConfig
 	// certProvider 动态证书来源（IP 证书）：TLS 配置留空时使用，续期后无需重启监听
 	certProvider func() (tls.Certificate, error)
+	// certErrLogAt 上次输出「证书不可用」握手失败日志的时间（限流）
+	certErrLogAt atomic.Int64
 }
 
 func newHTTPServer(base *BaseServer, auth *config.AuthConfig, tlsCfg *config.TLSConfig) *httpServer {
@@ -82,11 +92,16 @@ func (s *httpServer) Start(ctx context.Context) error {
 				s.log("error", "未配置 HTTPS 证书内容（证书/私钥 PEM）")
 				return errMissingTLSCert
 			}
+			// 启动时预检一次：证书暂不可用（如 IP 证书尚未签发）时给出明确提示；
+			// 监听器照常运行，证书就绪后新的握手即可成功
+			if _, err := s.certProvider(); err != nil {
+				s.log("warn", "HTTPS 证书暂不可用，就绪后自动生效: "+err.Error())
+			}
 			ln = tls.NewListener(ln, &tls.Config{
 				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 					cert, err := s.certProvider()
 					if err != nil {
-						return nil, err
+						return nil, fmt.Errorf("%w: %w", errTLSCertUnavailable, err)
 					}
 					return &cert, nil
 				},
@@ -148,6 +163,16 @@ func (s *httpServer) Stop() error {
 	return s.stop()
 }
 
+// logCertUnavailable 输出证书不可用导致的握手失败日志：
+// 同一监听器在 certErrLogInterval 内只记录一条，避免证书未就绪时每个失败连接都打日志
+func (s *httpServer) logCertUnavailable(msg string) {
+	now := time.Now().UnixNano()
+	last := s.certErrLogAt.Load()
+	if now-last >= int64(certErrLogInterval) && s.certErrLogAt.CompareAndSwap(last, now) {
+		s.log("warn", msg)
+	}
+}
+
 func (s *httpServer) handleConn(conn net.Conn) {
 	defer conn.Close()
 	s.stats.BeginConn()
@@ -165,6 +190,11 @@ func (s *httpServer) handleConn(conn net.Conn) {
 		err := tc.HandshakeContext(ctx)
 		cancel()
 		if err != nil {
+			// 证书来源不可用时输出日志（限流）：否则监听器显示「运行中」但连接全部失败且没有任何线索。
+			// 客户端自身导致的握手失败（端口扫描、提前断开等）保持静默
+			if errors.Is(err, errTLSCertUnavailable) {
+				s.logCertUnavailable("TLS 握手失败，" + err.Error())
+			}
 			return
 		}
 	}
