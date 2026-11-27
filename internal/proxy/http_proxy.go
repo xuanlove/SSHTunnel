@@ -84,12 +84,17 @@ func (s *httpServer) Start(ctx context.Context) error {
 	// HTTPS 代理：包装 TLS 监听器（证书以 PEM 文本形式配置）
 	if s.tlsCfg != nil {
 		empty := strings.TrimSpace(s.tlsCfg.CertPEM) == "" || strings.TrimSpace(s.tlsCfg.KeyPEM) == ""
-		if empty {
-			// 证书留空：使用系统设置中的 IP 证书（动态获取，续期后自动生效）
+		// UseIPCert：显式选择「系统设置 → IP 证书」中的证书（无需填写 PEM 内容）
+		if s.tlsCfg.UseIPCert || empty {
+			// 证书留空或显式选择 IP 证书：使用系统设置中的 IP 证书（动态获取，续期后自动生效）
 			if s.certProvider == nil {
 				ln.Close()
 				s.setStatus(StatusListenerError)
-				s.log("error", "未配置 HTTPS 证书内容（证书/私钥 PEM）")
+				if s.tlsCfg.UseIPCert {
+					s.log("error", "已选择 IP 证书但功能未就绪（需在「系统设置 → IP 证书」启用并完成签发）")
+				} else {
+					s.log("error", "未配置 HTTPS 证书内容（证书/私钥 PEM）")
+				}
 				return errMissingTLSCert
 			}
 			// 启动时预检一次：证书暂不可用（如 IP 证书尚未签发）时给出明确提示；

@@ -577,6 +577,8 @@ export async function issueIPCertNow(): Promise<IPCERTStatus> {
 // ===== WEB 面板 HTTPS（SSL）设置 =====
 export interface WebTLSSettings {
   enabled: boolean
+  // 使用「系统设置 → IP 证书」中的证书（需已启用并完成签发），无需填写证书内容
+  use_ipcert?: boolean
   cert_file: string
   key_file: string
   cert_pem?: string
@@ -595,9 +597,10 @@ export async function getWebTLSSettings(reveal = false): Promise<WebTLSSettings>
   return httpGet<WebTLSSettings>(reveal ? '/api/web/tls?reveal_key=1' : '/api/web/tls')
 }
 
-// 保存 HTTPS 设置；可直接提交证书/私钥 PEM 内容
+// 保存 HTTPS 设置；可直接提交证书/私钥 PEM 内容，或选择使用 IP 证书
 export async function updateWebTLSSettings(payload: {
   enabled: boolean
+  use_ipcert?: boolean
   cert_pem?: string
   key_pem?: string
   cert_file?: string

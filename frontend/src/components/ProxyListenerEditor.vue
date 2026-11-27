@@ -160,6 +160,19 @@ function updateTLS(idx: number, field: 'cert_pem' | 'key_pem', value: string) {
   }
 }
 
+// 切换「使用 IP 证书」：开启后 PEM 内容输入隐藏（已保存的内容保留，切回时可继续编辑）
+function onUseIPCert(idx: number, enabled: boolean) {
+  const arr = [...listeners.value]
+  const cur = arr[idx]
+  const tls = cur.tls || { cert_pem: '', key_pem: '' }
+  arr[idx] = { ...cur, tls: { ...tls, use_ipcert: enabled } }
+  listeners.value = arr
+  if (enabled) {
+    certInfos.value = { ...certInfos.value, [cur.id]: null }
+    certErrors.value = { ...certErrors.value, [cur.id]: '' }
+  }
+}
+
 async function genCert(idx: number) {
   try {
     const { certPEM, keyPEM } = await api.generateSelfSignedCert()
@@ -319,27 +332,39 @@ async function handleTestProxy(pl: ProxyListener) {
       </div>
 
       <div v-if="pl.protocol === 'https'" class="tls-row">
-        <div class="field-label">证书内容（PEM，可含完整证书链）</div>
-        <el-input
-          type="textarea"
-          :rows="4"
-          :model-value="pl.tls?.cert_pem"
-          placeholder="-----BEGIN CERTIFICATE-----"
-          @update:model-value="(v: string) => updateTLS(idx, 'cert_pem', v)"
-        />
-        <div class="field-label" style="margin-top: 8px">私钥内容（PEM）</div>
-        <el-input
-          type="textarea"
-          :rows="3"
-          :model-value="pl.tls?.key_pem"
-          placeholder="-----BEGIN PRIVATE KEY-----"
-          @update:model-value="(v: string) => updateTLS(idx, 'key_pem', v)"
-        />
-        <div class="tls-actions">
-          <el-button size="small" @click="genCert(idx)">生成自签证书</el-button>
-          <span class="fw-hint">留空则使用「系统设置 → IP 证书」中的证书（需已启用）；也可由 certd 等工具通过部署 API 自动写入</span>
+        <div class="auth-row">
+          <el-switch
+            :model-value="!!pl.tls?.use_ipcert"
+            active-text="使用 IP 证书"
+            @update:model-value="(v: string | number | boolean) => onUseIPCert(idx, v as boolean)"
+          />
+          <span class="hint" v-if="pl.tls?.use_ipcert">
+            使用「系统设置 → IP 证书」中的证书，需已启用并完成签发；续期后自动生效，无需重启隧道
+          </span>
         </div>
-        <CertSummary :info="certInfos[pl.id] || null" :error="certErrors[pl.id]" />
+        <template v-if="!pl.tls?.use_ipcert">
+          <div class="field-label">证书内容（PEM，可含完整证书链）</div>
+          <el-input
+            type="textarea"
+            :rows="4"
+            :model-value="pl.tls?.cert_pem"
+            placeholder="-----BEGIN CERTIFICATE-----"
+            @update:model-value="(v: string) => updateTLS(idx, 'cert_pem', v)"
+          />
+          <div class="field-label" style="margin-top: 8px">私钥内容（PEM）</div>
+          <el-input
+            type="textarea"
+            :rows="3"
+            :model-value="pl.tls?.key_pem"
+            placeholder="-----BEGIN PRIVATE KEY-----"
+            @update:model-value="(v: string) => updateTLS(idx, 'key_pem', v)"
+          />
+          <div class="tls-actions">
+            <el-button size="small" @click="genCert(idx)">生成自签证书</el-button>
+            <span class="fw-hint">也可由 certd 等工具通过部署 API 自动写入</span>
+          </div>
+          <CertSummary :info="certInfos[pl.id] || null" :error="certErrors[pl.id]" />
+        </template>
       </div>
 
       <div class="access-row">

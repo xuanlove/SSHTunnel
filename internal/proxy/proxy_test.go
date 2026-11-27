@@ -689,6 +689,56 @@ func TestHTTPSProxyDynamicCertUnavailable(t *testing.T) {
 	}
 }
 
+// TestHTTPSProxyIPCertOption 监听器显式选择 IP 证书（use_ipcert）：
+// 无需填写 PEM 内容，即使残留 PEM 也以 IP 证书为准；无证书来源时启动失败
+func TestHTTPSProxyIPCertOption(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("分配端口失败: %v", err)
+	}
+	freePort := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	cert := selfSignedCert(t) // IP 1.2.3.4
+	lc := config.ProxyListener{
+		ID:         "https-ipcert-opt",
+		Protocol:   config.ProxyHTTPS,
+		ListenPort: freePort,
+		// 残留无效 PEM：若误走静态证书路径，Start 时解析会失败
+		TLS: &config.TLSConfig{UseIPCert: true, CertPEM: "invalid-pem", KeyPEM: "invalid-pem"},
+	}
+	srv, err := buildServerWithStats(lc, &mockDialer{}, nil, &TrafficStats{}, nil,
+		func() (tls.Certificate, error) { return cert, nil })
+	if err != nil {
+		t.Fatalf("构建 HTTPS 代理失败: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Start(ctx) }()
+	defer srv.Stop()
+	time.Sleep(80 * time.Millisecond)
+
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", freePort), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("选择 IP 证书后握手应成功: %v", err)
+	}
+	state := conn.ConnectionState()
+	if len(state.PeerCertificates) == 0 || state.PeerCertificates[0].IPAddresses[0].String() != "1.2.3.4" {
+		t.Errorf("握手应使用 IP 证书")
+	}
+	_ = conn.Close()
+
+	// 无证书来源时应启动失败
+	srv2, err := buildServerWithStats(lc, &mockDialer{}, nil, &TrafficStats{}, nil, nil)
+	if err != nil {
+		t.Fatalf("构建应成功: %v", err)
+	}
+	if err := srv2.Start(ctx); err == nil {
+		srv2.Stop()
+		t.Fatalf("无证书来源时 Start 应失败")
+	}
+}
+
 // recordingDialer 记录实际拨号地址，并把连接重定向到本地 echo 服务器。
 // 通过带缓冲 channel 回传地址，避免测试 goroutine 与代理 goroutine 的数据竞态。
 type recordingDialer struct {

@@ -234,6 +234,18 @@ describe('api · web 模式（无 window.go，走 HTTP）', () => {
     await api.getWebTLSSettings(true)
     expect(String(fetchMock.mock.calls[1][0])).toBe('/api/web/tls?reveal_key=1')
   })
+
+  it('面板 HTTPS 可提交 use_ipcert（使用 IP 证书），后端回显', async () => {
+    const api = await loadApi()
+    const fetchMock = stubFetch(() => jsonRes({ code: 0, data: { enabled: true, use_ipcert: true, active: true } }))
+    await api.updateWebTLSSettings({ enabled: true, use_ipcert: true })
+    const [, init] = fetchMock.mock.calls[0]
+    expect(init!.method).toBe('PUT')
+    expect(JSON.parse(String(init!.body))).toEqual({ enabled: true, use_ipcert: true })
+    // 未开启时显式提交 use_ipcert: false，确保从 IP 证书模式切回 PEM 模式
+    await api.updateWebTLSSettings({ enabled: true, use_ipcert: false, cert_pem: 'X' })
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]!.body))).toEqual({ enabled: true, use_ipcert: false, cert_pem: 'X' })
+  })
 })
 
 describe('api · desktop 模式（window.go 注入，走 Wails 绑定）', () => {

@@ -31,6 +31,8 @@ export interface AuthConfig {
 }
 
 export interface TLSConfig {
+  // 使用「系统设置 → IP 证书」中的证书（需已启用并完成签发），无需填写 PEM 内容
+  use_ipcert?: boolean
   // 证书 PEM 文本（可含完整证书链）
   cert_pem?: string
   // 私钥 PEM 文本

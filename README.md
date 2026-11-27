@@ -89,9 +89,9 @@ SSHTunnel 是一个用于管理 SSH 隧道的跨平台工具。它把 SSH 跳板
 - **实时推送**：日志与隧道状态变更通过 WebSocket 实时推送到前端
 - **JWT 鉴权**：开启访问密码后，登录获取 Token（24 小时有效）
 - **TLS 支持**：WEB 面板与 HTTPS 代理均可使用 TLS
-- **面板 HTTPS 可在线配置**：「系统设置」中开启 HTTPS 并直接粘贴证书/私钥内容（PEM），保存后监听热重启立即生效
+- **面板 HTTPS 可在线配置**：「系统设置」中开启 HTTPS 并直接粘贴证书/私钥内容（PEM），或一键选用 IP 证书；保存后监听热重启立即生效
 - **证书自动部署**：提供 Token 鉴权的 certd 部署 API，可自动替换 WEB 面板或 HTTPS 隧道监听器的证书并重启隧道
-- **IP 证书自动签发**：「系统设置 → IP 证书」可开启 Let's Encrypt IP 地址证书（shortlived，6 天）自动签发与续期；启用后 HTTPS 代理监听器证书留空时默认使用该证书，续期后动态生效、无需重启隧道
+- **IP 证书自动签发**：「系统设置 → IP 证书」可开启 Let's Encrypt IP 地址证书（shortlived，6 天）自动签发与续期；WEB 面板 HTTPS 与 HTTPS 代理监听器均可选用该证书（无需填写证书内容），续期后动态生效、无需重启隧道
 - **最小权限账户引导**：新建/编辑隧道的跳板链下方内置 SSH 账户创建命令示例，支持公钥或密码认证，可按当前用户名一键生成并复制（无登录 Shell、仅开放 TCP 转发）
 
 ---
@@ -295,7 +295,9 @@ CGO_ENABLED=0 go build -o build/bin/sshtunnel-web .
 
 两种方式：
 
-1. **系统设置页（推荐）**：「系统设置 → WEB 面板 HTTPS（SSL）」，打开「启用 HTTPS」，直接粘贴证书与私钥 PEM 内容后「保存并应用」。保存后监听会在同一端口热重启，**改用 `https://` 重新访问即可**，无需重启进程；设置持久化到 `<配置目录>/sshtunnel/web_tls.json`，证书写入 `certs/pair-*/web.crt|web.key`。
+1. **系统设置页（推荐）**：「系统设置 → WEB 面板 HTTPS（SSL）」，打开「启用 HTTPS」，然后二选一：
+   - **使用 IP 证书**：打开「使用 IP 证书」开关即可，无需填写证书内容（前提：「系统设置 → IP 证书」已启用且完成签发）；证书续期后动态生效，无需重启监听
+   - **粘贴证书与私钥 PEM 内容**后「保存并应用」。保存后监听会在同一端口热重启，**改用 `https://` 重新访问即可**，无需重启进程；设置持久化到 `<配置目录>/sshtunnel/web_tls.json`，证书写入 `certs/pair-*/web.crt|web.key`。
 2. 启动参数（会写入同样的持久化配置）：
 
 ```bash
@@ -415,6 +417,7 @@ user1@host1:22, user2@host2:2222, user3@host3
           "password": "proxypass"
         },
         "tls": {                      // 仅 https 协议，证书以 PEM 文本保存
+          "use_ipcert": false,        // true 时使用「系统设置 → IP 证书」中的证书，无需填写 PEM
           "cert_pem": "-----BEGIN CERTIFICATE-----\n...",
           "key_pem": "-----BEGIN PRIVATE KEY-----\n..."
         },
@@ -508,7 +511,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 
 ### IP 证书（Let's Encrypt 自动签发 / 续期）
 
-在「系统设置 → IP 证书」开启后，应用会使用 ACME `shortlived` profile 为指定公网 IP 申请 Let's Encrypt IP 地址证书，并在到期前（剩余约 1/3 时）自动续期。**启用后，HTTPS 代理监听器的证书留空时默认使用该证书**；续期后通过动态证书回调生效，无需重启隧道。
+在「系统设置 → IP 证书」开启后，应用会使用 ACME `shortlived` profile 为指定公网 IP 申请 Let's Encrypt IP 地址证书，并在到期前（剩余约 1/3 时）自动续期。**WEB 面板 HTTPS 与 HTTPS 代理监听器均可选用该证书**（监听器勾选「使用 IP 证书」、面板打开「使用 IP 证书」开关，无需填写证书内容）；续期后通过动态证书回调生效，无需重启隧道。
 
 前置条件：
 
@@ -589,7 +592,7 @@ user1@host1:22, user2@host2:2222, user3@host3
 | POST | `/api/geoip/download` | 下载/更新城市级数据库（Merged-IP，可选 body `{"url": "..."}` 指定地址），完成后热加载 |
 | PUT | `/api/geoip/settings` | 启用/关闭城市级数据库（body `{"enabled": true}`），启用前校验文件已下载 |
 | GET | `/api/web/tls` | 查询 WEB 面板 HTTPS 设置（含当前证书/私钥内容与 certd 部署 Token） |
-| PUT | `/api/web/tls` | 保存 HTTPS 设置（body 可用 `cert_pem`/`key_pem` 直接提交证书内容），保存后热重启监听 |
+| PUT | `/api/web/tls` | 保存 HTTPS 设置（body 可用 `cert_pem`/`key_pem` 直接提交证书内容，或 `use_ipcert: true` 选用 IP 证书），保存后热重启监听 |
 | POST | `/api/web/tls/token` | 重置 certd 部署 Token（旧 Token 立即失效） |
 
 #### 证书部署 API（certd 等外部工具）
@@ -625,7 +628,7 @@ curl -k -X POST https://127.0.0.1:8080/api/cert/deploy \
   -d "{\"target\":\"web\",\"cert_pem\":\"$(cat fullchain.pem | sed ':a;N;$!ba;s/\n/\\n/g')\",\"key_pem\":\"$(cat privkey.pem | sed ':a;N;$!ba;s/\n/\\n/g')\"}"
 ```
 
-> 面板证书内容写入 `<配置目录>/sshtunnel/certs/pair-*/web.crt|web.key`（私钥 0600）；隧道 HTTPS 监听器的证书**直接以 PEM 文本保存在 `configs.json` 的 `tls.cert_pem / tls.key_pem` 中**，部署后可在配置页直接查看与编辑（启动时可迁移配置目录 `certs` 内有效的旧版证书对。其他旧配置需重新填写 PEM）。
+> 面板证书内容写入 `<配置目录>/sshtunnel/certs/pair-*/web.crt|web.key`（私钥 0600）；隧道 HTTPS 监听器的证书**直接以 PEM 文本保存在 `configs.json` 的 `tls.cert_pem / tls.key_pem` 中**（或 `tls.use_ipcert: true` 选用 IP 证书），部署后可在配置页直接查看与编辑（启动时可迁移配置目录 `certs` 内有效的旧版证书对。其他旧配置需重新填写 PEM）。
 
 ### WebSocket 端点
 

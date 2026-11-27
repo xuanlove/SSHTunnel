@@ -17,9 +17,12 @@ import (
 
 // WebTLSSettings WEB 面板 HTTPS 与 certd 部署配置（持久化到 web_tls.json）
 type WebTLSSettings struct {
-	Enabled  bool   `json:"enabled"`
-	CertFile string `json:"cert_file"`
-	KeyFile  string `json:"key_file"`
+	Enabled bool `json:"enabled"`
+	// UseIPCert 启用 HTTPS 时使用「系统设置 → IP 证书」的证书：
+	// 无需填写证书内容，前提是 IP 证书已启用且完成签发；续期后动态生效
+	UseIPCert bool   `json:"use_ipcert,omitempty"`
+	CertFile  string `json:"cert_file"`
+	KeyFile   string `json:"key_file"`
 	// DeployToken certd 等外部工具调用证书部署 API 所需的令牌
 	DeployToken string `json:"deploy_token,omitempty"`
 }
@@ -90,6 +93,8 @@ type TLSStore struct {
 	settings WebTLSSettings
 	loadErr  error
 	active   bool // 当前监听是否已启用 TLS
+	// ipcert IP 证书动态来源（UseIPCert 时使用）；续期后无需重启监听
+	ipcert func() (tls.Certificate, error)
 }
 
 // NewTLSStore 创建 HTTPS 设置存储。path 非空时加载已保存配置。
@@ -118,6 +123,13 @@ func (t *TLSStore) Effective() (cert, key string, ok bool) {
 	return t.settings.CertFile, t.settings.KeyFile, true
 }
 
+// SetIPCertProvider 注入 IP 证书动态来源（由 Handler.SetIPCert 调用）。
+func (t *TLSStore) SetIPCertProvider(p func() (tls.Certificate, error)) {
+	t.mu.Lock()
+	t.ipcert = p
+	t.mu.Unlock()
+}
+
 func (t *TLSStore) listenerConfig() (*tls.Config, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -126,6 +138,22 @@ func (t *TLSStore) listenerConfig() (*tls.Config, error) {
 	}
 	if !t.settings.Enabled {
 		return nil, nil
+	}
+	// 使用 IP 证书：动态获取，续期后无需重启监听
+	if t.settings.UseIPCert {
+		if t.ipcert == nil {
+			return nil, errors.New("IP 证书功能不可用")
+		}
+		return &tls.Config{
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				cert, err := t.ipcert()
+				if err != nil {
+					return nil, fmt.Errorf("IP 证书不可用: %w", err)
+				}
+				return &cert, nil
+			},
+			MinVersion: tls.VersionTLS12,
+		}, nil
 	}
 	cert, err := tls.LoadX509KeyPair(t.settings.CertFile, t.settings.KeyFile)
 	if err != nil {
@@ -152,7 +180,7 @@ func (t *TLSStore) SetActive(active bool) {
 func (t *TLSStore) Save(s WebTLSSettings) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if s.Enabled {
+	if s.Enabled && !s.UseIPCert {
 		if _, err := tls.LoadX509KeyPair(s.CertFile, s.KeyFile); err != nil {
 			return err
 		}

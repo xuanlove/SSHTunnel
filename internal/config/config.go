@@ -75,8 +75,11 @@ type AuthConfig struct {
 // TLSConfig TLS 证书配置（HTTPS 代理专用）。
 // 采用 PEM 文本方式存储，便于在界面中直接展示与编辑（certd 部署也写入此处）。
 type TLSConfig struct {
-	CertPEM string `json:"cert_pem,omitempty"` // 证书 PEM（可含完整证书链）
-	KeyPEM  string `json:"key_pem,omitempty"`  // 私钥 PEM
+	// UseIPCert 使用「系统设置 → IP 证书」的证书，无需填写 PEM 内容；
+	// 前提是 IP 证书已启用且完成签发，续期后动态生效、无需重启隧道
+	UseIPCert bool   `json:"use_ipcert,omitempty"`
+	CertPEM   string `json:"cert_pem,omitempty"` // 证书 PEM（可含完整证书链）
+	KeyPEM    string `json:"key_pem,omitempty"`  // 私钥 PEM
 	// CertFile / KeyFile 旧版文件路径字段：仅在加载旧配置时用于自动迁移为 PEM，之后不再写入
 	CertFile string `json:"cert_file,omitempty"`
 	KeyFile  string `json:"key_file,omitempty"`

@@ -2,14 +2,23 @@ package web
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"sshtunnel/internal/ipcert"
 	"sshtunnel/internal/logger"
@@ -537,5 +546,133 @@ func TestWebCannotDisableAuthOnRemoteBind(t *testing.T) {
 	h.handleAuthSettings(w, httptest.NewRequest("PUT", "/auth/settings", strings.NewReader(`{"enabled":false}`)))
 	if w.Code != http.StatusForbidden || !h.AuthEnabled() {
 		t.Fatalf("远程监听应拒绝关闭认证，状态码为 %d", w.Code)
+	}
+}
+
+// ipCertPairPEM 生成指定 IP 的自签证书对（模拟已签发的 IP 证书）
+func ipCertPairPEM(t *testing.T, ip string) ([]byte, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("生成密钥失败: %v", err)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(6 * 24 * time.Hour),
+		IPAddresses:  []net.IP{net.ParseIP(ip)},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}, &x509.Certificate{}, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("签发证书失败: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("序列化私钥失败: %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
+
+// TestWebTLSUseIPCert WEB 面板 HTTPS 可选用 IP 证书：
+// 未签发时拒绝启用；签发后启用成功且监听配置动态取证书；关闭 IP 证书被拦截
+func TestWebTLSUseIPCert(t *testing.T) {
+	h := newCertTestHandler(t)
+	m := ipcert.NewManager(t.TempDir(), nil)
+	h.SetIPCert(m)
+
+	// 未签发时启用 → 400
+	w := httptest.NewRecorder()
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodPut, "/api/web/tls",
+		strings.NewReader(`{"enabled":true,"use_ipcert":true}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("IP 证书未签发时启用应返回 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 已签发 → 启用成功。通过磁盘证书文件 + ApplySettings 模拟已签发状态
+	// （证书 IP 与设置一致且未到续期时间，不会触发真实签发）
+	dir := t.TempDir()
+	certPEM, keyPEM := ipCertPairPEM(t, "203.0.113.10")
+	if err := os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0600); err != nil {
+		t.Fatalf("写入证书失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0600); err != nil {
+		t.Fatalf("写入私钥失败: %v", err)
+	}
+	m = ipcert.NewManager(dir, nil)
+	h.SetIPCert(m)
+	if err := m.ApplySettings(ipcert.Settings{Enabled: true, IP: "203.0.113.10"}); err != nil {
+		t.Fatalf("启用 IP 证书失败: %v", err)
+	}
+
+	w = httptest.NewRecorder()
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodPut, "/api/web/tls",
+		strings.NewReader(`{"enabled":true,"use_ipcert":true}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("已签发后启用应返回 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// GET 回显 use_ipcert，且无需返回证书内容
+	w = httptest.NewRecorder()
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodGet, "/api/web/tls", nil))
+	var got struct {
+		Data struct {
+			Enabled   bool   `json:"enabled"`
+			UseIPCert bool   `json:"use_ipcert"`
+			CertFile  string `json:"cert_file"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if !got.Data.Enabled || !got.Data.UseIPCert || got.Data.CertFile != "" {
+		t.Errorf("GET 应回显 use_ipcert 且无证书文件: %+v", got.Data)
+	}
+
+	// 监听配置为动态证书：GetCertificate 返回已签发的 IP 证书
+	cfg, err := h.tls.listenerConfig()
+	if err != nil || cfg == nil || cfg.GetCertificate == nil {
+		t.Fatalf("listenerConfig 应返回动态证书配置: cfg=%v err=%v", cfg, err)
+	}
+	cert, err := cfg.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("GetCertificate 不应失败: %v", err)
+	}
+	if cert.Leaf == nil {
+		if cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0]); err != nil {
+			t.Fatalf("解析证书失败: %v", err)
+		}
+	}
+	if len(cert.Leaf.IPAddresses) == 0 || cert.Leaf.IPAddresses[0].String() != "203.0.113.10" {
+		t.Errorf("监听应使用 IP 证书: %v", cert.Leaf.IPAddresses)
+	}
+
+	// 面板正在使用 IP 证书时，关闭 IP 证书被拦截
+	w = httptest.NewRecorder()
+	h.handleIPCert(w, httptest.NewRequest(http.MethodPut, "/api/settings/ipcert",
+		strings.NewReader(`{"enabled":false}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("面板使用中关闭 IP 证书应返回 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 改用 PEM 证书后即可关闭 IP 证书
+	certPEM2, keyPEM2 := generateTestCertPEM(t)
+	w = httptest.NewRecorder()
+	body, _ := json.Marshal(struct {
+		Enabled bool   `json:"enabled"`
+		CertPEM string `json:"cert_pem"`
+		KeyPEM  string `json:"key_pem"`
+	}{true, string(certPEM2), string(keyPEM2)})
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodPut, "/api/web/tls", strings.NewReader(string(body))))
+	if w.Code != http.StatusOK {
+		t.Fatalf("改用 PEM 证书应返回 200, got %d: %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	h.handleIPCert(w, httptest.NewRequest(http.MethodPut, "/api/settings/ipcert",
+		strings.NewReader(`{"enabled":false}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("改用 PEM 后关闭 IP 证书应返回 200, got %d: %s", w.Code, w.Body.String())
 	}
 }

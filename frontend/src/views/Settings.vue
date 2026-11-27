@@ -203,6 +203,8 @@ async function handleIssueIPCert() {
 // ===== WEB 面板 HTTPS（SSL）=====
 const webTls = ref({
   enabled: false,
+  // 使用「系统设置 → IP 证书」中的证书：无需填写证书内容（需 IP 证书已启用并完成签发）
+  useIPCert: false,
   certPem: '',
   keyPem: '',
   certFile: '',
@@ -260,6 +262,7 @@ async function loadWebTLS() {
   try {
     const s = await api.getWebTLSSettings()
     webTls.value.enabled = s.enabled
+    webTls.value.useIPCert = !!s.use_ipcert
     webTls.value.active = s.active
     webTls.value.certFile = s.cert_file || ''
     webTls.value.keyFile = s.key_file || ''
@@ -289,8 +292,9 @@ async function handleRevealKey() {
 }
 
 async function handleSaveWebTLS() {
-  if (webTls.value.enabled && !webTls.value.certPem.trim() && !webTls.value.certFile) {
-    ElMessage.warning('请填写证书内容，或先通过 certd 部署证书')
+  const usingIPCert = webTls.value.useIPCert
+  if (webTls.value.enabled && !usingIPCert && !webTls.value.certPem.trim() && !webTls.value.certFile) {
+    ElMessage.warning('请填写证书内容，或开启「使用 IP 证书」')
     return
   }
   webTlsSaving.value = true
@@ -300,8 +304,9 @@ async function handleSaveWebTLS() {
     const keyChanged = !!keyTrim && keyTrim !== revealedKeyPem.trim()
     const res = await api.updateWebTLSSettings({
       enabled: webTls.value.enabled,
-      cert_pem: webTls.value.certPem.trim() || undefined,
-      key_pem: keyChanged ? keyTrim : undefined,
+      use_ipcert: usingIPCert,
+      cert_pem: usingIPCert ? undefined : (webTls.value.certPem.trim() || undefined),
+      key_pem: usingIPCert ? undefined : (keyChanged ? keyTrim : undefined),
     })
     webTls.value.active = res.active
     webTls.value.certFile = res.cert_file || ''
@@ -692,33 +697,39 @@ function tunnelName(id?: string): string {
       </p>
       <div class="auth-form">
         <el-switch v-model="webTls.enabled" active-text="启用 HTTPS" />
+        <el-switch v-model="webTls.useIPCert" active-text="使用 IP 证书" />
         <el-tag v-if="webTls.active" type="success" size="small">HTTPS 已生效</el-tag>
       </div>
-      <div class="field-label">证书内容（PEM，含完整证书链）</div>
-      <el-input
-        v-model="webTls.certPem"
-        type="textarea"
-        :rows="5"
-        placeholder="-----BEGIN CERTIFICATE-----"
-      />
-      <CertSummary :info="webCertMeta" :error="webCertError" />
-      <div class="field-label" style="margin-top: 10px">私钥内容（PEM）</div>
-      <el-input
-        v-model="webTls.keyPem"
-        type="textarea"
-        :rows="4"
-        :placeholder="keyPlaceholder"
-      />
-      <div class="key-actions" v-if="webTls.hasKey">
-        <el-button size="small" :loading="keyRevealing" @click="handleRevealKey">查看私钥</el-button>
-        <span class="key-hint">私钥已保存在服务器，默认不显示；仅当修改后保存才会重新提交</span>
+      <div class="fw-tip" v-if="webTls.useIPCert">
+        使用「系统设置 → IP 证书」中的证书，需已启用并完成签发；续期后自动生效，无需重启监听。
       </div>
-      <div class="info-row" v-if="webTls.certFile">
-        <span class="label">证书文件</span><span>{{ webTls.certFile }}</span>
-      </div>
-      <div class="info-row" v-if="webTls.keyFile">
-        <span class="label">私钥文件</span><span>{{ webTls.keyFile }}</span>
-      </div>
+      <template v-if="!webTls.useIPCert">
+        <div class="field-label">证书内容（PEM，含完整证书链）</div>
+        <el-input
+          v-model="webTls.certPem"
+          type="textarea"
+          :rows="5"
+          placeholder="-----BEGIN CERTIFICATE-----"
+        />
+        <CertSummary :info="webCertMeta" :error="webCertError" />
+        <div class="field-label" style="margin-top: 10px">私钥内容（PEM）</div>
+        <el-input
+          v-model="webTls.keyPem"
+          type="textarea"
+          :rows="4"
+          :placeholder="keyPlaceholder"
+        />
+        <div class="key-actions" v-if="webTls.hasKey">
+          <el-button size="small" :loading="keyRevealing" @click="handleRevealKey">查看私钥</el-button>
+          <span class="key-hint">私钥已保存在服务器，默认不显示；仅当修改后保存才会重新提交</span>
+        </div>
+        <div class="info-row" v-if="webTls.certFile">
+          <span class="label">证书文件</span><span>{{ webTls.certFile }}</span>
+        </div>
+        <div class="info-row" v-if="webTls.keyFile">
+          <span class="label">私钥文件</span><span>{{ webTls.keyFile }}</span>
+        </div>
+      </template>
       <div class="geo-actions">
         <el-button type="primary" :loading="webTlsSaving" @click="handleSaveWebTLS">保存并应用</el-button>
       </div>

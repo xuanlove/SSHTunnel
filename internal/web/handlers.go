@@ -51,10 +51,19 @@ type Handler struct {
 	ipcert       *ipcert.Manager // IP 证书（Let's Encrypt 自动签发/续期）
 }
 
-// SetIPCert 注入 IP 证书管理器
+// SetIPCert 注入 IP 证书管理器；同时作为 WEB 面板 HTTPS「使用 IP 证书」的动态证书来源
 func (h *Handler) SetIPCert(m *ipcert.Manager) *Handler {
 	h.ipcert = m
+	if m != nil {
+		h.tls.SetIPCertProvider(m.TLSCertificate)
+	}
 	return h
+}
+
+// ipCertInUseByWebTLS WEB 面板 HTTPS 是否正在使用 IP 证书
+func (h *Handler) ipCertInUseByWebTLS() bool {
+	s := h.tls.Settings()
+	return s.Enabled && s.UseIPCert
 }
 
 // NewHandler 创建 API 处理器。
@@ -380,8 +389,6 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAuthSettings WEB 访问密码设置：GET 查询，PUT 开启/关闭并设置凭据。
-// 开启成功后返回 token，便于当前会话无缝续用（否则下一次请求即需登录）。
 // handleIPCert IP 证书设置与状态
 func (h *Handler) handleIPCert(w http.ResponseWriter, r *http.Request) {
 	if h.ipcert == nil {
@@ -398,6 +405,12 @@ func (h *Handler) handleIPCert(w http.ResponseWriter, r *http.Request) {
 		var s ipcert.Settings
 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
 			writeError(w, 400, "请求格式错误")
+			return
+		}
+		// 关闭 IP 证书前检查 WEB 面板 HTTPS 是否正在使用它：
+		// 否则面板 HTTPS 握手会全部失败，用户无法再通过面板改回
+		if !s.Enabled && h.ipCertInUseByWebTLS() {
+			writeError(w, 400, "WEB 面板 HTTPS 正在使用 IP 证书，请先在「WEB 面板 HTTPS」中改用其他证书或关闭后再关闭 IP 证书")
 			return
 		}
 		if err := h.ipcert.ApplySettings(s); err != nil {
@@ -432,6 +445,8 @@ func (h *Handler) handleIPCertIssue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 0, "已开始签发，请稍后刷新状态", h.ipcert.Status())
 }
 
+// handleAuthSettings WEB 访问密码设置：GET 查询，PUT 开启/关闭并设置凭据。
+// 开启成功后返回 token，便于当前会话无缝续用（否则下一次请求即需登录）。
 func (h *Handler) handleAuthSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -523,11 +538,12 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 0, "success", mergeTLSSettings(resp, s))
 	case http.MethodPut:
 		var req struct {
-			Enabled  bool   `json:"enabled"`
-			CertPEM  string `json:"cert_pem"`
-			KeyPEM   string `json:"key_pem"`
-			CertFile string `json:"cert_file"`
-			KeyFile  string `json:"key_file"`
+			Enabled   bool   `json:"enabled"`
+			UseIPCert bool   `json:"use_ipcert"`
+			CertPEM   string `json:"cert_pem"`
+			KeyPEM    string `json:"key_pem"`
+			CertFile  string `json:"cert_file"`
+			KeyFile   string `json:"key_file"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, 400, "请求格式错误")
@@ -539,7 +555,21 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 		hasPEM := strings.TrimSpace(req.CertPEM) != "" || strings.TrimSpace(req.KeyPEM) != ""
 		var next WebTLSSettings
 		var err error
-		if hasPEM {
+		if req.UseIPCert {
+			// 使用 IP 证书：无需证书内容，但启用时要求 IP 证书已启用且已签发
+			if req.Enabled {
+				if h.ipcert == nil {
+					writeError(w, 400, "IP 证书功能不可用")
+					return
+				}
+				if _, err := h.ipcert.TLSCertificate(); err != nil {
+					writeError(w, 400, "IP 证书尚未签发或未启用：请先在「系统设置 → IP 证书」启用并完成签发（"+err.Error()+"）")
+					return
+				}
+			}
+			next = WebTLSSettings{Enabled: req.Enabled, UseIPCert: true}
+			err = h.tls.Save(next)
+		} else if hasPEM {
 			if strings.TrimSpace(req.CertPEM) == "" || strings.TrimSpace(req.KeyPEM) == "" {
 				writeError(w, 400, "证书与私钥内容必须同时填写")
 				return
@@ -562,7 +592,8 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		changed := old.Enabled != next.Enabled || old.CertFile != next.CertFile || old.KeyFile != next.KeyFile ||
+		changed := old.Enabled != next.Enabled || old.UseIPCert != next.UseIPCert ||
+			old.CertFile != next.CertFile || old.KeyFile != next.KeyFile ||
 			strings.TrimSpace(req.CertPEM) != "" || strings.TrimSpace(req.KeyPEM) != ""
 		resp := map[string]interface{}{
 			"active":     h.tls.Active(),
@@ -586,6 +617,7 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 // mergeTLSSettings 合并设置字段到响应
 func mergeTLSSettings(resp map[string]interface{}, s WebTLSSettings) map[string]interface{} {
 	resp["enabled"] = s.Enabled
+	resp["use_ipcert"] = s.UseIPCert
 	resp["cert_file"] = s.CertFile
 	resp["key_file"] = s.KeyFile
 	return resp
