@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -451,8 +452,36 @@ func TestIssueNowWritesBackDetectedIP(t *testing.T) {
 	}
 }
 
-// ----- 签发超时 -----
+// TestManagerPEM 证书 PEM 导出可用于 certd 读取：证书与私钥成对且含目标 IP
+func TestManagerPEM(t *testing.T) {
+	m := NewManager(t.TempDir(), nil)
+	if _, _, err := m.PEM(); err == nil {
+		t.Fatalf("未签发时应返回错误")
+	}
+	m.mu.Lock()
+	m.settings = Settings{Enabled: true, IP: "1.2.3.4"}
+	m.mu.Unlock()
+	issueFn, _ := freshIssuer(t)
+	m.issueFn = issueFn
+	if err := m.IssueNow(context.Background()); err != nil {
+		t.Fatalf("签发失败: %v", err)
+	}
 
+	certPEM, keyPEM, err := m.PEM()
+	if err != nil {
+		t.Fatalf("导出 PEM 失败: %v", err)
+	}
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("导出的证书与私钥不匹配: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil || len(leaf.IPAddresses) == 0 || leaf.IPAddresses[0].String() != "1.2.3.4" {
+		t.Fatalf("导出的证书内容异常: %v %+v", err, leaf)
+	}
+}
+
+// ----- 签发超时 -----
 // TestIssueNowAppliesDefaultTimeout 调用方未设置超时时使用默认超时：
 // ACME 请求卡住不会让「签发中」标记一直占着
 func TestIssueNowAppliesDefaultTimeout(t *testing.T) {

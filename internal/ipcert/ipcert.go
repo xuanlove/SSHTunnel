@@ -7,10 +7,12 @@
 package ipcert
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -457,6 +459,27 @@ func (m *Manager) TLSCertificate() (tls.Certificate, error) {
 		return tls.Certificate{}, errors.New("IP 证书尚未签发，请在系统设置中点击「立即签发」或稍候重试")
 	}
 	return *m.cert, nil
+}
+
+// PEM 返回当前生效的 IP 证书与私钥 PEM 内容（供 certd 读取实际使用的证书）。
+// 直接从内存中的证书编码，避免与落盘过程产生不一致的证书/私钥对
+func (m *Manager) PEM() (certPEM, keyPEM []byte, err error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cert == nil {
+		return nil, nil, errors.New("IP 证书尚未签发")
+	}
+	var buf bytes.Buffer
+	for _, der := range m.cert.Certificate {
+		if err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+			return nil, nil, err
+		}
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(m.cert.PrivateKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	return buf.Bytes(), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
 }
 
 // parsePublicIP 解析并校验公网 IP（拒绝私网/回环/链路本地/未指定/组播）

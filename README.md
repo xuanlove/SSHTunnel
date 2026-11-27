@@ -532,6 +532,12 @@ user1@host1:22, user2@host2:2222, user3@host3
 
 证书与账户密钥保存在配置目录下的 `ipcert/`（`cert.pem`、`key.pem`、`account.key`，私钥权限 0600）。
 
+注意事项：
+
+- **关闭保护**：若 WEB 面板 HTTPS 或任一隧道 HTTPS 监听器正在使用 IP 证书，关闭「启用 IP 证书」会被拒绝并列出使用方；请先改用 PEM 证书或关闭这些 HTTPS 服务，避免握手全部失败。
+- **certd 部署会切回 PEM**：通过部署 API 为面板或监听器写入证书后，对应「使用 IP 证书」开关会自动关闭（以部署的证书为准）；面板部署的响应含 `switched_from_ipcert: true`，日志也有明确提示。
+- **启动提示**：面板 HTTPS 使用 IP 证书但证书尚在签发时，服务仍可启动，启动日志会提示「证书暂不可用」，签发完成后新的握手即可成功。
+
 ### 代理端口连通性测试
 
 配置页每个代理监听器下方有「测试代理端口」按钮：点击后后端会**经该监听端口**（`127.0.0.1:<监听端口>`）访问 `https://api.ip.sb/ip`，并在按钮旁显示出口 IP 与耗时；失败时显示具体原因（如端口未监听、认证失败、隧道不通）。
@@ -603,9 +609,9 @@ user1@host1:22, user2@host2:2222, user3@host3
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/cert/targets` | 列出可部署目标：WEB 面板与所有 HTTPS 代理监听器（含是否已配置证书、隧道运行状态） |
-| GET | `/api/cert/read?target=web` | 读取 WEB 面板证书与私钥 PEM 内容 |
-| GET | `/api/cert/read?target=tunnel&tunnel_id=X&listener_id=Y` | 读取指定 HTTPS 监听器的证书与私钥 PEM 内容 |
-| POST | `/api/cert/deploy` | 部署证书内容；`target=web` 写面板证书并热重启监听，`target=tunnel` 将 PEM 文本写入监听器配置并按需重启隧道 |
+| GET | `/api/cert/read?target=web` | 读取 WEB 面板证书与私钥 PEM 内容（若启用「使用 IP 证书」，返回当前实际生效的 IP 证书） |
+| GET | `/api/cert/read?target=tunnel&tunnel_id=X&listener_id=Y` | 读取指定 HTTPS 监听器的证书与私钥 PEM 内容（同上，`use_ipcert` 时返回 IP 证书） |
+| POST | `/api/cert/deploy` | 部署证书内容；`target=web` 写面板证书并热重启监听，`target=tunnel` 将 PEM 文本写入监听器配置并按需重启隧道；部署后会关闭对应的「使用 IP 证书」开关 |
 
 `POST /api/cert/deploy` 请求示例：
 

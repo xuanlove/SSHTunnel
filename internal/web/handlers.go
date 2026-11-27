@@ -60,10 +60,23 @@ func (h *Handler) SetIPCert(m *ipcert.Manager) *Handler {
 	return h
 }
 
-// ipCertInUseByWebTLS WEB 面板 HTTPS 是否正在使用 IP 证书
-func (h *Handler) ipCertInUseByWebTLS() bool {
-	s := h.tls.Settings()
-	return s.Enabled && s.UseIPCert
+// ipCertUsers 返回正在使用 IP 证书的功能列表（WEB 面板 HTTPS 与各隧道 HTTPS 监听器）。
+// 关闭 IP 证书前据此拦截：否则这些 HTTPS 服务的握手会全部失败。
+func (h *Handler) ipCertUsers() []string {
+	var users []string
+	if s := h.tls.Settings(); s.Enabled && s.UseIPCert {
+		users = append(users, "WEB 面板 HTTPS")
+	}
+	if h.cfgMgr != nil {
+		for _, cfg := range h.cfgMgr.List() {
+			for _, pl := range cfg.ProxyListeners {
+				if pl.Protocol == config.ProxyHTTPS && pl.TLS != nil && pl.TLS.UseIPCert {
+					users = append(users, fmt.Sprintf("隧道「%s」HTTPS 监听器 :%d", cfg.Name, pl.ListenPort))
+				}
+			}
+		}
+	}
+	return users
 }
 
 // NewHandler 创建 API 处理器。
@@ -412,11 +425,13 @@ func (h *Handler) handleIPCert(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "请求格式错误")
 			return
 		}
-		// 关闭 IP 证书前检查 WEB 面板 HTTPS 是否正在使用它：
-		// 否则面板 HTTPS 握手会全部失败，用户无法再通过面板改回
-		if !s.Enabled && h.ipCertInUseByWebTLS() {
-			writeError(w, 400, "WEB 面板 HTTPS 正在使用 IP 证书，请先在「WEB 面板 HTTPS」中改用其他证书或关闭后再关闭 IP 证书")
-			return
+		// 关闭 IP 证书前检查是否仍被 WEB 面板 HTTPS 或隧道 HTTPS 监听器使用：
+		// 否则这些服务的握手会全部失败，用户无法再通过面板改回
+		if !s.Enabled {
+			if users := h.ipCertUsers(); len(users) > 0 {
+				writeError(w, 400, "IP 证书正在被使用，请先改用其他证书或关闭后再关闭 IP 证书："+strings.Join(users, "、"))
+				return
+			}
 		}
 		if err := h.ipcert.ApplySettings(s); err != nil {
 			writeError(w, 400, err.Error())

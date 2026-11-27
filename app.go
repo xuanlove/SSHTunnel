@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -312,10 +313,32 @@ func (a *App) SaveIPCERTSettings(s ipcert.Settings) (map[string]interface{}, err
 	if a.ipcert == nil {
 		return nil, fmt.Errorf("IP 证书功能不可用")
 	}
+	// 关闭 IP 证书前检查是否仍被隧道 HTTPS 监听器使用，否则这些监听器握手会全部失败
+	if !s.Enabled {
+		if users := a.ipCertListenerUsers(); len(users) > 0 {
+			return nil, fmt.Errorf("IP 证书正在被使用，请先改用其他证书或关闭后再关闭 IP 证书：%s", strings.Join(users, "、"))
+		}
+	}
 	if err := a.ipcert.ApplySettings(s); err != nil {
 		return nil, err
 	}
 	return a.GetIPCERTSettings(), nil
+}
+
+// ipCertListenerUsers 返回正在使用 IP 证书的隧道 HTTPS 监听器描述
+func (a *App) ipCertListenerUsers() []string {
+	if a.cfgMgr == nil {
+		return nil
+	}
+	var users []string
+	for _, cfg := range a.cfgMgr.List() {
+		for _, pl := range cfg.ProxyListeners {
+			if pl.Protocol == config.ProxyHTTPS && pl.TLS != nil && pl.TLS.UseIPCert {
+				users = append(users, fmt.Sprintf("隧道「%s」HTTPS 监听器 :%d", cfg.Name, pl.ListenPort))
+			}
+		}
+	}
+	return users
 }
 
 // IssueIPCERTNow 立即签发/续期 IP 证书（桌面端，异步）

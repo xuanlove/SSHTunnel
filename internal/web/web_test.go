@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"sshtunnel/internal/config"
 	"sshtunnel/internal/ipcert"
 	"sshtunnel/internal/logger"
 )
@@ -761,5 +762,159 @@ func TestWebTLSUseIPCertAfterPersistentAuth(t *testing.T) {
 	}
 	if _, err := cfg.GetCertificate(&tls.ClientHelloInfo{}); err != nil {
 		t.Fatalf("证书来源应可用: %v", err)
+	}
+}
+
+// newIssuedIPCertManager 创建已签发 IP 证书的管理器，并返回证书 PEM 以便断言
+func newIssuedIPCertManager(t *testing.T, ip string) (*ipcert.Manager, []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	certPEM, keyPEM := ipCertPairPEM(t, ip)
+	if err := os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0600); err != nil {
+		t.Fatalf("写入证书失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0600); err != nil {
+		t.Fatalf("写入私钥失败: %v", err)
+	}
+	m := ipcert.NewManager(dir, nil)
+	if err := m.ApplySettings(ipcert.Settings{Enabled: true, IP: ip}); err != nil {
+		t.Fatalf("启用 IP 证书失败: %v", err)
+	}
+	return m, certPEM
+}
+
+// TestIPCertDisableBlockedByTunnelListener 隧道 HTTPS 监听器使用 IP 证书时，
+// 关闭 IP 证书应被拦截；改用 PEM 后允许关闭
+func TestIPCertDisableBlockedByTunnelListener(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfgMgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("创建配置管理失败: %v", err)
+	}
+	cfg := config.TunnelConfig{
+		Name:       "IP 证书隧道",
+		HopChain:   []config.HopConfig{{User: "u", Host: "127.0.0.1", Port: 22, AuthType: "password"}},
+		TunnelType: config.TunnelProxy,
+		ProxyListeners: []config.ProxyListener{{
+			ID: "https-ip", Protocol: config.ProxyHTTPS, ListenPort: 18443,
+			TLS: &config.TLSConfig{UseIPCert: true},
+		}},
+	}
+	if err := cfgMgr.Save(&cfg); err != nil {
+		t.Fatalf("保存配置失败: %v", err)
+	}
+	h := NewHandler(cfgMgr, nil, logger.NewTest(), nil, "", "", nil)
+	m, _ := newIssuedIPCertManager(t, "203.0.113.10")
+	h.SetIPCert(m)
+
+	w := httptest.NewRecorder()
+	h.handleIPCert(w, httptest.NewRequest(http.MethodPut, "/api/settings/ipcert",
+		strings.NewReader(`{"enabled":false}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("监听器使用中关闭 IP 证书应返回 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "IP 证书隧道") {
+		t.Errorf("错误信息应指出使用方: %s", w.Body.String())
+	}
+
+	// 监听器改用 PEM 证书后允许关闭
+	cfg.ProxyListeners[0].TLS = &config.TLSConfig{CertPEM: "x", KeyPEM: "y"}
+	if err := cfgMgr.Save(&cfg); err != nil {
+		t.Fatalf("更新配置失败: %v", err)
+	}
+	w = httptest.NewRecorder()
+	h.handleIPCert(w, httptest.NewRequest(http.MethodPut, "/api/settings/ipcert",
+		strings.NewReader(`{"enabled":false}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("改用 PEM 后应允许关闭, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestCertReadReturnsActiveIPCert IP 证书模式下 certd 读取面板/监听器证书，
+// 应返回当前实际生效的 IP 证书，而不是保留的旧 PEM
+func TestCertReadReturnsActiveIPCert(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+	cfgMgr, err := config.NewManager()
+	if err != nil {
+		t.Fatalf("创建配置管理失败: %v", err)
+	}
+	h.cfgMgr = cfgMgr
+	m, ipPEM := newIssuedIPCertManager(t, "203.0.113.10")
+	h.SetIPCert(m)
+	h.tls = NewTLSStore(filepath.Join(t.TempDir(), "web_tls.json"))
+	h.tls.SetIPCertProvider(m.TLSCertificate)
+
+	// 面板：保留旧 PEM 文件，但处于 IP 证书模式
+	oldPEM, oldKey := generateTestCertPEM(t)
+	if _, err := h.tls.SavePEM(true, oldPEM, oldKey); err != nil {
+		t.Fatalf("保存旧证书失败: %v", err)
+	}
+	if err := h.tls.Save(WebTLSSettings{Enabled: true, UseIPCert: true}); err != nil {
+		t.Fatalf("启用 IP 证书模式失败: %v", err)
+	}
+	_, certPEM, _, err := h.resolveTargetPEM(CertTargetWeb, "", "")
+	if err != nil {
+		t.Fatalf("读取面板证书失败: %v", err)
+	}
+	if certPEM != string(ipPEM) {
+		t.Errorf("面板应返回生效的 IP 证书")
+	}
+
+	// 隧道监听器：同样返回 IP 证书
+	cfg := config.TunnelConfig{
+		Name:       "t",
+		HopChain:   []config.HopConfig{{User: "u", Host: "127.0.0.1", Port: 22, AuthType: "password"}},
+		TunnelType: config.TunnelProxy,
+		ProxyListeners: []config.ProxyListener{{
+			ID: "https-ip", Protocol: config.ProxyHTTPS, ListenPort: 18443,
+			TLS: &config.TLSConfig{UseIPCert: true},
+		}},
+	}
+	if err := cfgMgr.Save(&cfg); err != nil {
+		t.Fatalf("保存配置失败: %v", err)
+	}
+	_, certPEM, _, err = h.resolveTargetPEM(CertTargetTunnel, cfg.ID, "https-ip")
+	if err != nil {
+		t.Fatalf("读取监听器证书失败: %v", err)
+	}
+	if certPEM != string(ipPEM) {
+		t.Errorf("监听器应返回生效的 IP 证书")
+	}
+}
+
+// TestCertDeployWebReportsIPCertSwitch certd 部署面板证书后切回 PEM 模式，
+// 响应需明确告知此前处于 IP 证书模式（不再静默切换）
+func TestCertDeployWebReportsIPCertSwitch(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+	h.tls = NewTLSStore(filepath.Join(t.TempDir(), "web_tls.json"))
+	if err := h.tls.Save(WebTLSSettings{Enabled: true, UseIPCert: true}); err != nil {
+		t.Fatalf("启用 IP 证书模式失败: %v", err)
+	}
+
+	certPEM, keyPEM := generateTestCertPEM(t)
+	body, _ := json.Marshal(map[string]interface{}{
+		"target": "web", "cert_pem": certPEM, "key_pem": keyPEM, "restart": false,
+	})
+	w := httptest.NewRecorder()
+	h.handleCertDeploy(w, httptest.NewRequest(http.MethodPost, "/cert/deploy", strings.NewReader(string(body))))
+	if w.Code != http.StatusOK {
+		t.Fatalf("部署失败: %d %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			UseIPCert          bool `json:"use_ipcert"`
+			SwitchedFromIPCert bool `json:"switched_from_ipcert"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if resp.Data.UseIPCert || !resp.Data.SwitchedFromIPCert {
+		t.Errorf("应报告已从 IP 证书切换到 PEM: %+v", resp.Data)
+	}
+	if h.tls.Settings().UseIPCert {
+		t.Errorf("部署后面板应切换到 PEM 模式")
 	}
 }

@@ -207,11 +207,16 @@ func (h *Handler) handleCertDeploy(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) deployToWeb(certPEM, keyPEM string, enable, restart bool) (map[string]interface{}, error) {
 	h.tlsUpdateMu.Lock()
 	defer h.tlsUpdateMu.Unlock()
+	old := h.tls.Settings()
 	settings, err := h.tls.SavePEM(enable, certPEM, keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("保存 WEB 面板证书失败: %w", err)
 	}
 	h.log.Infof("certd 已部署 WEB 面板证书: %s", settings.CertFile)
+	if old.UseIPCert {
+		// 部署真实证书后以 PEM 为准（SavePEM 会清除 IP 证书开关），明确告知而非静默切换
+		h.log.Warnf("已部署 WEB 面板证书，同时关闭了「使用 IP 证书」（此前处于 IP 证书模式）")
+	}
 	if restart {
 		h.scheduleTLSReload()
 	}
@@ -220,7 +225,10 @@ func (h *Handler) deployToWeb(certPEM, keyPEM string, enable, restart bool) (map
 		"cert_file": settings.CertFile,
 		"key_file":  settings.KeyFile,
 		"enabled":   enable,
-		"restarted": restart,
+		// 告知调用方本次部署已切换到 PEM 模式
+		"use_ipcert":           settings.UseIPCert,
+		"switched_from_ipcert": old.UseIPCert,
+		"restarted":            restart,
 	}, nil
 }
 
@@ -250,6 +258,10 @@ func (h *Handler) deployToTunnel(certPEM, keyPEM, tunnelID, listenerID string, r
 	// 复制一份用于持久化，避免修改 Manager 内部状态后才失败
 	updated := *cfg
 	updated.ProxyListeners = append([]config.ProxyListener(nil), cfg.ProxyListeners...)
+	if old := updated.ProxyListeners[idx].TLS; old != nil && old.UseIPCert {
+		// 部署真实证书后以 PEM 为准，明确告知而非静默切换
+		h.log.Warnf("已部署证书到隧道 %s 的监听器 %s，同时关闭了「使用 IP 证书」", cfg.Name, listenerID)
+	}
 	updated.ProxyListeners[idx].TLS = &config.TLSConfig{CertPEM: certPEM, KeyPEM: keyPEM}
 	if err := h.cfgMgr.Save(&updated); err != nil {
 		return nil, fmt.Errorf("保存配置失败: %w", err)
@@ -286,6 +298,17 @@ func (h *Handler) resolveTargetPEM(target, tunnelID, listenerID string) (string,
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case CertTargetWeb:
 		s := h.tls.Settings()
+		// 使用 IP 证书时没有独立证书文件，返回当前实际生效的 IP 证书
+		if s.UseIPCert {
+			if h.ipcert == nil {
+				return "", "", "", fmt.Errorf("IP 证书功能不可用")
+			}
+			certPEM, keyPEM, err := h.ipcert.PEM()
+			if err != nil {
+				return "", "", "", fmt.Errorf("读取 IP 证书失败: %w", err)
+			}
+			return CertTargetWeb, string(certPEM), string(keyPEM), nil
+		}
 		if s.CertFile == "" || s.KeyFile == "" {
 			return "", "", "", fmt.Errorf("WEB 面板尚未配置证书")
 		}
@@ -310,8 +333,21 @@ func (h *Handler) resolveTargetPEM(target, tunnelID, listenerID string) (string,
 			if pl.ID != listenerID {
 				continue
 			}
-			if pl.Protocol != config.ProxyHTTPS || pl.TLS == nil ||
-				strings.TrimSpace(pl.TLS.CertPEM) == "" || strings.TrimSpace(pl.TLS.KeyPEM) == "" {
+			if pl.Protocol != config.ProxyHTTPS || pl.TLS == nil {
+				return "", "", "", fmt.Errorf("监听器未配置 HTTPS 证书")
+			}
+			// 使用 IP 证书时返回当前实际生效的 IP 证书
+			if pl.TLS.UseIPCert {
+				if h.ipcert == nil {
+					return "", "", "", fmt.Errorf("IP 证书功能不可用")
+				}
+				certPEM, keyPEM, err := h.ipcert.PEM()
+				if err != nil {
+					return "", "", "", fmt.Errorf("读取 IP 证书失败: %w", err)
+				}
+				return CertTargetTunnel, string(certPEM), string(keyPEM), nil
+			}
+			if strings.TrimSpace(pl.TLS.CertPEM) == "" || strings.TrimSpace(pl.TLS.KeyPEM) == "" {
 				return "", "", "", fmt.Errorf("监听器未配置 HTTPS 证书")
 			}
 			return CertTargetTunnel, pl.TLS.CertPEM, pl.TLS.KeyPEM, nil

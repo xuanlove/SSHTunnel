@@ -702,6 +702,14 @@ function tunnelName(id?: string): string {
       </div>
       <div class="fw-tip" v-if="webTls.useIPCert">
         使用「系统设置 → IP 证书」中的证书，需已启用并完成签发；续期后自动生效，无需重启监听。
+        由 certd 等工具部署证书后，此开关会自动关闭（以部署的证书为准）。
+      </div>
+      <div class="auth-form" v-if="webTls.useIPCert">
+        <el-tag v-if="ipCertStatus?.issuing" type="warning" size="small">IP 证书签发中…</el-tag>
+        <el-tag v-else-if="ipCertStatus?.not_after" type="success" size="small">IP 证书已签发</el-tag>
+        <el-tag v-else type="danger" size="small">IP 证书未签发</el-tag>
+        <span class="key-hint" v-if="ipCertStatus?.ip">IP: {{ ipCertStatus.ip }}</span>
+        <span class="key-hint" v-if="ipCertStatus?.not_after">有效期至 {{ formatTime(ipCertStatus.not_after) }}</span>
       </div>
       <template v-if="!webTls.useIPCert">
         <div class="field-label">证书内容（PEM，含完整证书链）</div>

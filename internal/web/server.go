@@ -72,6 +72,10 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
+	// 面板 HTTPS 使用 IP 证书时，证书可能尚在签发：提前提示，避免「能启动但全部握手失败」
+	if err := s.handler.tls.ProbeIPCert(); err != nil {
+		log.Printf("WEB 面板 HTTPS 使用 IP 证书，但证书暂不可用（签发完成前访问会失败）: %v", err)
+	}
 	mux := s.buildRoutes()
 	addr := net.JoinHostPort(s.cfg.Host, strconv.Itoa(s.cfg.Port))
 

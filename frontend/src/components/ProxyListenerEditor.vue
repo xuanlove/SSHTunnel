@@ -13,6 +13,10 @@ const emit = defineEmits<{ 'update:modelValue': [ProxyListener[]] }>()
 const geoReady = ref(false)
 // 当前加载的是否为城市级数据库（城市规则才生效）
 const geoCityReady = ref(false)
+// IP 证书状态：用于「使用 IP 证书」时提示是否已就绪（避免保存后才发现未签发）
+const ipCertReady = ref(false)
+const ipCertIP = ref('')
+const ipCertError = ref('')
 onMounted(async () => {
   try {
     const st = await api.getGeoIPStatus()
@@ -21,6 +25,14 @@ onMounted(async () => {
   } catch {
     geoReady.value = false
     geoCityReady.value = false
+  }
+  try {
+    const st = await api.getIPCertSettings()
+    ipCertReady.value = !!st.settings?.enabled && !!st.status?.not_after
+    ipCertIP.value = st.status?.ip || ''
+    ipCertError.value = st.status?.last_error || ''
+  } catch {
+    ipCertReady.value = false
   }
   // 解析已有 HTTPS 证书的使用者与到期时间
   for (const pl of props.modelValue) {
@@ -341,6 +353,12 @@ async function handleTestProxy(pl: ProxyListener) {
           <span class="hint" v-if="pl.tls?.use_ipcert">
             使用「系统设置 → IP 证书」中的证书，需已启用并完成签发；续期后自动生效，无需重启隧道
           </span>
+          <el-tag v-if="pl.tls?.use_ipcert" :type="ipCertReady ? 'success' : 'warning'" size="small">
+            {{ ipCertReady ? `IP 证书已签发${ipCertIP ? '（' + ipCertIP + '）' : ''}` : 'IP 证书未签发' }}
+          </el-tag>
+        </div>
+        <div class="fw-tip" v-if="pl.tls?.use_ipcert && !ipCertReady">
+          当前 IP 证书未启用或尚未签发，保存后该监听器可能无法完成 TLS 握手{{ ipCertError ? '：' + ipCertError : '' }}
         </div>
         <template v-if="!pl.tls?.use_ipcert">
           <div class="field-label">证书内容（PEM，可含完整证书链）</div>

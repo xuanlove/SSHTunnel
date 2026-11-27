@@ -130,6 +130,20 @@ func (t *TLSStore) SetIPCertProvider(p func() (tls.Certificate, error)) {
 	t.mu.Unlock()
 }
 
+// ProbeIPCert 预检「使用 IP 证书」模式下证书是否已就绪（供启动时提示）。
+// 未启用该模式时返回 nil。
+func (t *TLSStore) ProbeIPCert() error {
+	t.mu.RLock()
+	provider := t.ipcert
+	use := t.settings.Enabled && t.settings.UseIPCert
+	t.mu.RUnlock()
+	if !use || provider == nil {
+		return nil
+	}
+	_, err := provider()
+	return err
+}
+
 func (t *TLSStore) listenerConfig() (*tls.Config, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
