@@ -1053,6 +1053,15 @@ npm run preview    # 预览构建产物
 
 ## 版本更新说明
 
+### v1.10.0
+
+- **Let's Encrypt IP 证书自动签发与续期**：「系统设置 → IP 证书」可开启，使用 ACME `shortlived` profile 为公网 IP 申请 IP 地址证书（6 天有效期），剩余约 1/3 时自动续期，失败每轮重试并展示最近错误
+- **HTTPS 隧道默认使用 IP 证书**：HTTPS 代理监听器证书/私钥留空时自动使用 IP 证书；通过动态证书回调实现，**续期后无需重启隧道**
+- **公网 IP 探测与校验**：留空自动探测（`api.ip.sb` / `ifconfig.me` / `ipinfo.io`），拒绝私网/回环/链路本地地址；已签发 IP 与设置不一致时自动重新签发
+- **可配置**：ACME 环境（生产 / Staging）、http-01 验证端口（默认 80）、账户邮箱；证书与账户密钥保存于配置目录 `ipcert/`（私钥 0600）
+- **部署适配**：安装脚本的 systemd 单元新增 `CAP_NET_BIND_SERVICE`，非 root 服务可绑定 80 端口完成 http-01 验证
+- **测试**：新增 IP 证书续期计算、公网 IP 校验、http-01 挑战服务、签发与提供、重启加载、IP 变更重签、HTTPS 动态证书握手、设置接口等用例；Go 全量 12 包与前端 95 用例通过
+
 ### v1.9.7
 
 - **账户配置生成器新增「生效校验」**：写入 sshd 配置并 reload 后，自动执行 `sshd -T -C user=<账户>,host=...,addr=...` 检查实际生效的转发配置。sshd 对同一参数以第一个匹配值为准，若全局更早设置了 `AllowTcpForwarding no` 或 `DisableForwarding yes`，文末的 `Match` 块会被静默忽略——此前表现为隧道能连上但 SOCKS/转发全部失败（浏览器常见 `ERR_CONNECTION_RESET`），现在会直接打印原因与修复指引
