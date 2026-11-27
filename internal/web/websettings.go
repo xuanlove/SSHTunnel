@@ -141,12 +141,13 @@ func (t *TLSStore) listenerConfig() (*tls.Config, error) {
 	}
 	// 使用 IP 证书：动态获取，续期后无需重启监听
 	if t.settings.UseIPCert {
-		if t.ipcert == nil {
+		provider := t.ipcert // 在锁内取出，闭包持有副本，避免无锁读取字段
+		if provider == nil {
 			return nil, errors.New("IP 证书功能不可用")
 		}
 		return &tls.Config{
 			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-				cert, err := t.ipcert()
+				cert, err := provider()
 				if err != nil {
 					return nil, fmt.Errorf("IP 证书不可用: %w", err)
 				}

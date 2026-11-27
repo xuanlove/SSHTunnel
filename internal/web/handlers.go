@@ -102,6 +102,11 @@ func (h *Handler) UsePersistentAuth(cliUser, cliPass string) error {
 	if h.tls.loadErr != nil {
 		return h.tls.loadErr
 	}
+	// 这里会替换掉 NewHandler 中创建的临时 TLSStore：
+	// 若 IP 证书已注入，必须重新挂到新实例上，否则「面板 HTTPS 使用 IP 证书」不可用
+	if h.ipcert != nil {
+		h.tls.SetIPCertProvider(h.ipcert.TLSCertificate)
+	}
 	if cliUser != "" {
 		if err := h.auth.initFromCLI(cliUser, cliPass); err != nil {
 			return fmt.Errorf("WEB 启动凭据无效: %w", err)
@@ -567,7 +572,14 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			next = WebTLSSettings{Enabled: req.Enabled, UseIPCert: true}
+			// 保留已配置的 PEM 证书文件作为回退：切回 PEM 模式时无需重新填写，
+			// 也避免删除 certd 等工具部署过的证书
+			next = WebTLSSettings{
+				Enabled:   req.Enabled,
+				UseIPCert: true,
+				CertFile:  old.CertFile,
+				KeyFile:   old.KeyFile,
+			}
 			err = h.tls.Save(next)
 		} else if hasPEM {
 			if strings.TrimSpace(req.CertPEM) == "" || strings.TrimSpace(req.KeyPEM) == "" {
@@ -600,7 +612,11 @@ func (h *Handler) handleWebTLS(w http.ResponseWriter, r *http.Request) {
 			"restarting": changed,
 		}
 		if next.Enabled {
-			h.log.Infof("WEB 面板 HTTPS 已开启（证书 %s）", next.CertFile)
+			desc := next.CertFile
+			if next.UseIPCert {
+				desc = "「系统设置 → IP 证书」"
+			}
+			h.log.Infof("WEB 面板 HTTPS 已开启（证书 %s）", desc)
 		} else {
 			h.log.Info("WEB 面板 HTTPS 已关闭")
 		}

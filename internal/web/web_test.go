@@ -676,3 +676,90 @@ func TestWebTLSUseIPCert(t *testing.T) {
 		t.Fatalf("改用 PEM 后关闭 IP 证书应返回 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// TestWebTLSSwitchToIPCertKeepsPEMFiles 从 PEM 切换到 IP 证书时保留已部署证书文件，
+// 便于切回 PEM 模式时无需重新填写（也避免误删 certd 部署的证书）
+func TestWebTLSSwitchToIPCertKeepsPEMFiles(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+	h.tls = NewTLSStore(filepath.Join(t.TempDir(), "web_tls.json"))
+
+	certPEM, keyPEM := generateTestCertPEM(t)
+	saved, err := h.tls.SavePEM(true, certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("保存 PEM 证书失败: %v", err)
+	}
+
+	m := ipcert.NewManager(t.TempDir(), nil)
+	h.SetIPCert(m)
+
+	// 直接把签发结果写入 IP 证书目录（模拟已签发），再换成该管理器
+	ipPEM, ipKeyPEM := ipCertPairPEM(t, "203.0.113.10")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cert.pem"), ipPEM, 0600); err != nil {
+		t.Fatalf("写入证书失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "key.pem"), ipKeyPEM, 0600); err != nil {
+		t.Fatalf("写入私钥失败: %v", err)
+	}
+	m = ipcert.NewManager(dir, nil)
+	h.SetIPCert(m)
+	if err := m.ApplySettings(ipcert.Settings{Enabled: true, IP: "203.0.113.10"}); err != nil {
+		t.Fatalf("启用 IP 证书失败: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	h.handleWebTLS(w, httptest.NewRequest(http.MethodPut, "/api/web/tls",
+		strings.NewReader(`{"enabled":true,"use_ipcert":true}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("切换到 IP 证书应成功, got %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(saved.CertFile); err != nil {
+		t.Errorf("切换后原 PEM 证书文件应保留: %v", err)
+	}
+	if _, err := os.Stat(saved.KeyFile); err != nil {
+		t.Errorf("切换后原 PEM 私钥文件应保留: %v", err)
+	}
+	if got := h.tls.Settings(); got.CertFile != saved.CertFile || !got.UseIPCert {
+		t.Errorf("设置应保留证书文件并启用 IP 证书: %+v", got)
+	}
+}
+
+// TestWebTLSUseIPCertAfterPersistentAuth 回归：main.go 的顺序是先 SetIPCert 再 UsePersistentAuth，
+// 后者会用持久化路径重建 TLSStore；IP 证书来源必须重新挂到新实例，
+// 否则 WEB 模式下「面板 HTTPS 使用 IP 证书」会报「IP 证书功能不可用」
+func TestWebTLSUseIPCertAfterPersistentAuth(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	certPEM, keyPEM := ipCertPairPEM(t, "203.0.113.10")
+	if err := os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0600); err != nil {
+		t.Fatalf("写入证书失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0600); err != nil {
+		t.Fatalf("写入私钥失败: %v", err)
+	}
+	m := ipcert.NewManager(dir, nil)
+	if err := m.ApplySettings(ipcert.Settings{Enabled: true, IP: "203.0.113.10"}); err != nil {
+		t.Fatalf("启用 IP 证书失败: %v", err)
+	}
+
+	// 与 main.go 相同顺序：先注入 IP 证书，再加载持久化设置（会替换 TLSStore）
+	h := NewHandler(nil, nil, logger.NewTest(), nil, "", "", nil)
+	h.SetIPCert(m)
+	if err := h.UsePersistentAuth("", ""); err != nil {
+		t.Fatalf("加载持久化设置失败: %v", err)
+	}
+	if err := h.tls.Save(WebTLSSettings{Enabled: true, UseIPCert: true}); err != nil {
+		t.Fatalf("保存使用 IP 证书的面板设置失败: %v", err)
+	}
+	cfg, err := h.tls.listenerConfig()
+	if err != nil {
+		t.Fatalf("持久化后监听配置不应失败: %v", err)
+	}
+	if cfg == nil || cfg.GetCertificate == nil {
+		t.Fatalf("应返回动态证书配置: %+v", cfg)
+	}
+	if _, err := cfg.GetCertificate(&tls.ClientHelloInfo{}); err != nil {
+		t.Fatalf("证书来源应可用: %v", err)
+	}
+}

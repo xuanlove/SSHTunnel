@@ -39,9 +39,10 @@ func (h *Handler) CertTargets() []CertTargetInfo {
 
 	web := h.tls.Settings()
 	out = append(out, CertTargetInfo{
-		Target:         CertTargetWeb,
-		Label:          "WEB 面板",
-		CertConfigured: fileExistsAt(web.CertFile) && fileExistsAt(web.KeyFile),
+		Target: CertTargetWeb,
+		Label:  "WEB 面板",
+		// 使用 IP 证书时无独立证书文件，但证书来源已配置
+		CertConfigured: web.UseIPCert || (fileExistsAt(web.CertFile) && fileExistsAt(web.KeyFile)),
 		Enabled:        web.Enabled,
 		Running:        h.tls.Active(),
 	})
@@ -51,9 +52,9 @@ func (h *Handler) CertTargets() []CertTargetInfo {
 			if pl.Protocol != config.ProxyHTTPS {
 				continue
 			}
-			configured := pl.TLS != nil &&
-				strings.TrimSpace(pl.TLS.CertPEM) != "" &&
-				strings.TrimSpace(pl.TLS.KeyPEM) != ""
+			// 使用 IP 证书时 PEM 为空，但证书来源已配置
+			configured := pl.TLS != nil && (pl.TLS.UseIPCert ||
+				(strings.TrimSpace(pl.TLS.CertPEM) != "" && strings.TrimSpace(pl.TLS.KeyPEM) != ""))
 			running := h.tunnelMgr != nil && h.tunnelMgr.IsRunning(cfg.ID)
 			out = append(out, CertTargetInfo{
 				Target:         CertTargetTunnel,
